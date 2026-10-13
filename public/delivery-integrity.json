@@ -1,0 +1,38 @@
+{
+  "revision": "admincn-v8",
+  "status": "passed",
+  "project": "yeisme-service-control-center",
+  "verified_at": "2026-10-04T15:34:25.512Z",
+  "source_archive_sha256": "b9e5925c2dce70378a7952689d07fc0d82cb5a480d85284dd3f31da5b37ab78e",
+  "index_sha256": "7bcb9e78302027eb1bfdda1e3e13290a64a57641e3b6ccbd38e4d9aee72b2817",
+  "publication_files": 183,
+  "source_independent_build": "passed",
+  "local": {
+    "unit": 49,
+    "browser_regression": 53,
+    "workspace": 10,
+    "live_fixture": 2
+  },
+  "remote": {
+    "workspace": 10,
+    "reference_images": 13,
+    "members_first_row_y": 267,
+    "fullscreen_width": 1440,
+    "collapsed_width": 48,
+    "latest_source_read": "matched"
+  },
+  "evidence": {
+    "core": "2026-10-04T13-25-48-416Z",
+    "workspace": "v7-2026-10-04T12-18-47-509Z",
+    "live": "live-2026-10-03T21-14-55-960Z",
+    "visual": "visual-v7-2026-10-04T13-58-04-486Z",
+    "reference": "reference-v7-clean-2026-10-03T21-01-58-019Z",
+    "sidebar": "temp/integration-test-runs/sidebar-motion-2026-10-04T12-54-43-320Z",
+    "remote_workspace": "temp/integration-test-runs/v7-2026-10-04T15-32-57-101Z",
+    "remote_smoke": "temp/integration-test-runs/remote-sidebar-v8-2026-10-04T15-26-05-787Z",
+    "source": "temp/integration-test-runs/source-v7-2026-10-04T15-31-43-165Z"
+  },
+  "post_publication_evidence": true,
+  "real_owner_reads": false,
+  "production_mutations": false
+}

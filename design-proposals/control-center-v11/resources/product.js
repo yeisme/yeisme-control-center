@@ -1,0 +1,197 @@
+/* Design-only presentation over the v10 shell. Domain samples never leave memory. */
+(() => {
+  'use strict';
+  const M=window.YeismeSession,S=M.state,V=window.YeismeViews,D=window.YeismeDetails;
+  const {E,B,badge,icon,mark,kv,empty,title,bar,tab}=V;
+  const original={...V}, originalDetail=D.render;
+  const A=()=>window.YeismeApp;
+  const X={scenario:'normal',owner:'all',status:'all',search:'',page:1,mode:'active',assetType:'all',assetView:'grid',assetSearch:'',projectTab:'镜头与运行',teamTab:'成员',role:'admin',read:new Set(),previews:new Set(),version:'v3',from:'',to:'',order:'newest',selected:new Set(),cancel:null,member:'',configDraft:'',login:true};
+  const scenarioNames={normal:'正常',loading:'加载中',empty:'空数据',partial:'部分来源失败',stale:'观察过期',unauthorized:'权限撤销',error:'读取失败',expired:'会话过期'};
+  const goodScope=()=>M.inMedia()&&X.login&&!['unauthorized','expired'].includes(X.scenario);
+  const XB=(label,action,cls='btn',attrs='')=>`<button type="button" class="${cls}" data-v11="${action}" ${attrs}>${label}</button>`;
+  const select=(id,label,options,value)=>`<label class="field-inline"><span class="sr-only">${label}</span><select id="${id}" aria-label="${label}">${options.map(([v,t])=>`<option value="${E(v)}" ${v===value?'selected':''}>${t}</option>`).join('')}</select></label>`;
+  const pill=(t)=>badge(t, /失败|阻塞/.test(t)?'bad':/待决|过期|待审/.test(t)?'warn':/完成|采用/.test(t)?'good':'');
+  const lead=(eyebrow,heading,desc,action='')=>`<div class="product-heading"><div><div class="eyebrow">${eyebrow}</div><h2>${heading}</h2><p>${desc}</p></div>${action}</div>`;
+  const section=(heading,body,extra='')=>`<section class="panel product-panel"><div class="section-heading"><h3>${heading}</h3>${extra}</div>${body}</section>`;
+  const note=t=>`<div class="hint">${t}</div>`;
+  const taskData=[
+    {id:'video',name:'镜头 03 · 雨夜重逢',owner:'Scaena',state:'unknown',label:'结果待决',family:'video_provider_task',ref:'sca:video-103',stage:'回执核对',progress:null,shot:'03',time:'2026-10-12 14:32',revision:'7',cost:null},
+    {id:'rights',name:'镜头 03 · 女主对白',owner:'Sonora',state:'blocked',label:'权利阻塞',family:'audio_job',ref:'son:audio-082',stage:'用途校验',progress:null,shot:'03',time:'2026-10-12 14:28',revision:'4',cost:null},
+    {id:'visual',name:'镜头 03 · 视觉候选',owner:'Eikona',state:'waiting_review',label:'待审阅',family:'run',ref:'eik:visual-031',stage:'候选审阅',progress:100,shot:'03',time:'2026-10-12 14:20',revision:'9',cost:'USD 0.08'},
+    {id:'audio-running',name:'镜头 04 · 环境音',owner:'Sonora',state:'running',label:'运行中',family:'audio_job',ref:'son:audio-083',stage:'音频渲染',progress:62,shot:'04',time:'2026-10-12 14:18',revision:'3',cost:null},
+    {id:'image-queued',name:'镜头 05 · 街道全景',owner:'Eikona',state:'queued',label:'排队中',family:'run',ref:'eik:visual-032',stage:'等待调度',progress:null,shot:'05',time:'2026-10-12 14:16',revision:'1',cost:null},
+    {id:'history-video',name:'镜头 02 · 巷口停步',owner:'Scaena',state:'succeeded',label:'已完成',family:'video_provider_task',ref:'sca:video-102',stage:'完成',progress:100,shot:'02',time:'2026-10-12 13:52',revision:'5',cost:'USD 1.20'},
+    {id:'history-image',name:'镜头 01 · 雨巷空镜',owner:'Eikona',state:'succeeded',label:'已完成',family:'run',ref:'eik:visual-029',stage:'完成',progress:100,shot:'01',time:'2026-10-11 18:40',revision:'4',cost:'USD 0.06'},
+    {id:'history-audio',name:'镜头 02 · 配音初版',owner:'Sonora',state:'failed',label:'已失败',family:'audio_job',ref:'son:audio-079',stage:'音频渲染',progress:null,shot:'02',time:'2026-10-11 17:38',revision:'6',cost:null},
+    {id:'history-cancel',name:'镜头 01 · 备选构图',owner:'Eikona',state:'cancelled',label:'已取消',family:'run',ref:'eik:visual-028',stage:'已取消',progress:null,shot:'01',time:'2026-10-10 12:10',revision:'2',cost:null}
+  ];
+  const assets=[
+    {id:'image',name:'雨夜街道 · 视觉参考',type:'image',kind:'图像',owner:'Eikona',ref:'eik:visual-031',version:'v3',state:'待审阅',task:'visual',size:'1400 × 933',rights:'设计参考 · 不声明发行权利',image:'rain-street.jpg'},
+    {id:'audio',name:'女主对白 · 声音版本',type:'audio',kind:'音频',owner:'Sonora',ref:'son:audio-082',version:'v2',state:'权利阻塞',task:'rights',size:'WAV · 字节未提供',rights:'声音发行用途待确认'},
+    {id:'video',name:'巷口停步 · 视频结果',type:'video',kind:'视频',owner:'Scaena',ref:'sca:video-102',version:'v1',state:'已采用',task:'history-video',size:'MP4 · 6 秒（样例元数据）',rights:'用途事实以原服务为准'},
+    {id:'file',name:'雨夜 · 参考素材包',type:'file',kind:'文件',owner:'DriveBridge',ref:'drv:delivery-012',version:'v1',state:'来源过期',task:null,size:'固定版本引用',rights:'仅文件权限，不代表领域许可',image:'night-street.jpg'}
+  ];
+  const contractRows=[
+    ['会话与身份','GET /session','server/app.ts','已实现','同源会话；不在浏览器存服务密钥'],
+    ['登录与退出','POST /auth/personal · POST /auth/logout','server/app.ts','已实现','Origin 校验；CSRF；会话清除'],
+    ['服务目录','GET /services?observe=1','server/service-directory.ts','已实现','显式观察；普通目录读取不请求上游'],
+    ['连接诊断','GET /connections','src/task-observation.ts','已实现','transport / authorization / contract / content 独立'],
+    ['任务列表','GET /tasks?mode=active|history&cursors=…','server/task-connections.ts','已实现','授权有界批次；按来源游标；列表筛选当前批次'],
+    ['原任务定位','GET /tasks/resolve?connection=…&project=…&family=…&ref=…','server/app.ts','已实现','只读原引用；不生成新 attempt'],
+    ['任务详情 / 事件','GET /tasks/{task_key} · GET /tasks/{task_key}/events','src/task-observation.ts','已实现','保留原生状态、修订和观察时间'],
+    ['取消与查回执','POST /tasks/{task_key}/cancel · GET /tasks/{task_key}/cancel-receipt','src/task-cancel.ts','受条件限制','admin + allowed_actions + expected_revision + 幂等键；默认不开放'],
+    ['结果访问','POST /tasks/{task_key}/artifacts/{ref}/access','server/media.ts','受条件限制','preview / download；内容能力与逐结果授权；同源媒体句柄'],
+    ['历史与统计','GET /requests · GET /requests/summary','server/owners.ts','已实现','来源覆盖与分母；不同币种和费用视角分开'],
+    ['请求正文','POST /requests/{owner}/{id}/content:read','server/app.ts','受条件限制','direction + purpose；独立授权与审计；not_recorded 保持缺失'],
+    ['组织成员','GET /organization','server/app.ts','只读投影','owner 原角色与主体映射；未提供的成员不显示为已绑定'],
+    ['配置写入 / 实例注册','未提供统一远程写合同','docs/interfaces.md','待接口','只做差异预览；不能通过远程 Shell 绕过'],
+    ['邀请 / 角色修改','未提供控制中心写接口','docs/admin-interfaces.md','待接口','原服务独立角色；设计预览不修改真实成员'],
+    ['资产采用 / 审阅交接','需各 owner 的具名合同','docs/interfaces.md','待接线','固定版本；声音权利、审阅、采用分别验收'],
+    ['项目目录 / 片场返回','公开项目绑定与受限工作台链接','src/task-links.ts','部分实现','不移动项目真源；未提供的研究/知识数据保持空']
+  ];
+  function tasks(){return taskData.map(t=>t.id==='video'&&S.solved?{...t,state:'waiting_review',label:'待审阅',stage:'等待审阅',progress:100}:t);}
+  function filteredTasks(){return tasks().filter(t=>goodScope()&&(X.owner==='all'||t.owner===X.owner)&&(X.status==='all'||t.state===X.status)&&(X.mode==='history'||!['succeeded','failed','cancelled'].includes(t.state))&&(!X.from||t.time.slice(0,10)>=X.from)&&(!X.to||t.time.slice(0,10)<=X.to)&&(t.name+t.owner+t.ref).toLowerCase().includes(X.search.toLowerCase())).sort((a,b)=>X.order==='oldest'?a.time.localeCompare(b.time):b.time.localeCompare(a.time));}
+  function gatewayTasks(){return goodScope()?['请求元数据','图像任务执行','音频能力发现'].map((name,i)=>({id:'gateway-'+i,name,owner:'Aigora',state:'succeeded',label:'已完成',family:'gateway_call',ref:'aig:call-'+(119+i),stage:'已返回',progress:100,shot:'03',time:'2026-10-12 14:20',revision:'1',cost:null})):[];}
+  function progress(t){return t.progress===null?`<span class="small muted">${E(t.stage)} · 进度未提供</span>`:`<div class="task-progress"><span>${E(t.stage)}</span><span>${t.progress}%</span><progress max="100" value="${t.progress}" aria-label="${E(t.name)}进度"></progress></div>`;}
+  function taskRow(t){return `<tr><td><div class="table-object">${mark(['Scaena','Eikona','Sonora'].indexOf(t.owner))}<div>${XB(E(t.name),'task:'+t.id,'link')}<small class="mono">${E(t.ref)}</small></div></div></td><td>${pill(t.label)}</td><td>${progress(t)}</td><td>${E(t.owner)}<small>E01 / 镜头 ${t.shot}</small></td><td><time>${t.time.slice(5)}</time><small>${t.cost||'费用未提供'}</small></td><td>${XB(icon('chevron'),'task:'+t.id,'icon',`aria-label="查看${E(t.name)}"`)}</td></tr>`;}
+  function taskTable(rows){return rows.length?`<div class="table-scroll"><table class="product-table"><thead><tr><th>任务 / 原引用</th><th>状态</th><th>阶段 / 进度</th><th>服务 / 位置</th><th>创建 / 费用</th><th><span class="sr-only">详情</span></th></tr></thead><tbody>${rows.map(taskRow).join('')}</tbody></table></div>`:empty('没有匹配的任务','可以调整筛选，或回到当前项目的全部观察记录。',XB('清除任务筛选','clear-tasks'));}
+  function scenarios(){return `<div class="scenario-controls"><span>状态演练</span>${select('scenario','状态演练',Object.entries(scenarioNames),X.scenario)}</div>`;}
+  V.shell=()=>original.shell().replace('v10 · Apple 视觉核心','v11 · 完整功能').replace('独立演示环境 · split-owner','独立演示环境').replaceAll('视觉核心说明','设计与接口说明').replace('data-action="about"','data-action="about"').replace('data-action="audit"','data-v11="inbox"').replace('aria-label="查看会话活动"','aria-label="通知中心"').replace('<div class="notice"', '<div class="notice product-notice"').replace('<span class="notice-extra">',scenarios()+'<span class="notice-extra">');
+  const setScope=M.setScope;
+  M.setScope=value=>{setScope(value);X.owner='all';X.status='all';X.search='';X.page=1;X.from='';X.to='';X.selected.clear();X.previews.clear();X.cancel=null;X.assetSearch='';X.assetType='all';X.projectTab='镜头与运行';X.scenario='normal';X.member='';};
+  function recentResults(){return section('最近结果',`<div class="result-strip">${assets.slice(0,3).map(a=>XB(`<span class="result-icon">${icon(a.type==='image'?'photo':a.type==='audio'?'wave':'film')}</span><span class="grow"><b>${a.name}</b><small>${a.owner} · ${a.version} · ${a.state}</small></span>${icon('chevron')}`,'media:'+a.id,'result-item')).join('')}</div>`,B('全部资产 '+icon('chevron'),'nav:assets','link'));}
+  V.overview=()=>{let html=original.overview();if(!goodScope())return html;if(S.tab==='统计与成本')return html+section('账本来源与查询范围',`<div class="ledger-row"><b>统计窗口</b><span>10 月 12 日 · 当前项目 · 样例数据</span></div><div class="ledger-row"><b>来源完整性</b><span>Scaena / Eikona 已提供样例；Sonora 实际费用缺失</span></div><div class="ledger-row"><b>查看原记录</b>${XB('查看历史明细 '+icon('chevron'),'history','link')}</div>`);return html+recentResults();};
+  V.requests=()=>{
+    if(S.tab==='业务操作')return original.requests().replace('<div class="toolbar">',`<div class="request-shortcuts">${XB('正在运行 '+icon('chevron'),'active','link')}${XB('查看历史记录 '+icon('chevron'),'history','link')}</div><div class="toolbar">`);
+    const gateway=S.tab==='网关调用';let rows=gateway?gatewayTasks().filter(t=>(t.name+t.ref).includes(X.search)):filteredTasks();const total=rows.length,pages=Math.max(1,Math.ceil(total/5));X.page=Math.min(X.page,pages);
+    return title('请求')+bar(tab(['业务操作','领域任务','网关调用'],S.tab),S.returnStudio?B(icon('back')+'返回镜头 '+S.shot,'back-shot','primary'):XB(icon('info')+'接口依据','contracts','ghost'))+
+    lead(gateway?'GATEWAY EVIDENCE':'TASK OBSERVATION',gateway?'每次调用，都有出处。':'让每个任务都有下一步。',gateway?'网关记录独立计数，关联证据不会重复成为业务任务。':'从原任务看到执行、结果与恢复，保留未决和部分失败。')+
+    `<div class="toolbar">${gateway?'':`<div class="tabs" role="group" aria-label="任务时间范围">${[['active','当前任务'],['history','历史记录']].map(([v,t])=>XB(t,'mode:'+v,'seg'+(X.mode===v?' active':''),`aria-pressed="${X.mode===v}"`)).join('')}</div>`}<label class="search-field grow">${icon('search')}<input id="task-search" value="${E(X.search)}" placeholder="搜索任务或原引用" aria-label="搜索任务"></label>${gateway?'':select('task-owner','任务服务',[['all','全部服务'],['Scaena','Scaena'],['Eikona','Eikona'],['Sonora','Sonora']],X.owner)}${gateway?'':select('task-state','任务状态',[['all','全部状态'],['unknown','结果待决'],['running','运行中'],['queued','排队中'],['blocked','已阻塞'],['waiting_review','待审阅'],['succeeded','已完成'],['failed','已失败'],['cancelled','已取消']],X.status)}</div>`+
+    (X.mode==='history'&&!gateway?`<div class="history-filter"><label>开始日期 <input type="date" id="task-from" value="${X.from}"></label><label>结束日期 <input type="date" id="task-to" value="${X.to}"></label>${select('task-order','时间排序',[['newest','最新在前'],['oldest','最早在前']],X.order)}${XB('清除筛选','clear-tasks','link')}<small>按创建时间 · 当前已读取批次</small></div>`:'')+
+    section(gateway?'关联网关事实':X.mode==='active'?'当前任务':'历史记录',taskTable(rows.slice((X.page-1)*5,X.page*5))+`<div class="table-footer"><span>${total} 条本地样例 · 每页 5 条</span><div>${XB('上一页','page:-1','btn',X.page<=1?'disabled':'')}<span>${X.page} / ${pages}</span>${XB('下一页','page:1','btn',X.page>=pages?'disabled':'')}</div></div>`,XB('导出筛选样例','export-tasks','link')+badge('仅当前范围'))+
+    note(gateway?'示例调用关联明确的领域任务；此页不提供全平台费用合计。':'“结果待决”保留原任务，只查询、不重投。当前批次筛选不等于全量历史统计。');
+  };
+  V.projects=()=>{
+    if(!goodScope())return original.projects();
+    const tabs=`<div class="page-bar">${tab(['镜头与运行','最近结果','交接记录','项目资料'],X.projectTab,'projectview')}</div>`;
+    if(X.projectTab==='镜头与运行')return original.projects().replace('<div class="project-grid">',tabs+'<div class="project-grid">');
+    const heading=title('项目')+lead('PROJECT / RAIN','雨夜重逢','第 01 集 · 固定项目上下文，跨服务查看当前作品。',B('在片场继续 '+icon('arrow'),'studio-current','primary'))+tabs;
+    if(X.projectTab==='最近结果')return heading+recentResults();
+    if(X.projectTab==='交接记录')return heading+section('版本与交接',`<div class="journey"><div><i>01</i><b>固定输出版本</b><p>原任务与结果引用成对保留</p></div><div><i>02</i><b>审阅与用途</b><p>声音权利不随视频完成自动通过</p></div><div><i>03</i><b>返回原镜头</b><p>保持 revision 与采用版本</p></div></div>${S.handoff?note('本地交接样例已记录：'+E(S.handoff.ref)+' · 待审阅，未采用。'):empty('没有已确认交接','先查询镜头 03 的原任务，再检查审阅交接。',B('查看镜头 03','request:video'))}`);
+    return heading+section('项目绑定',kv([['控制中心范围','rain · 制作团队 / 雨夜重逢'],['Scaena','生产计划与镜头真源'],['Eikona','图像 run 与固定版本'],['Sonora','声音任务、声音权利与审听'],['工作台','片场 · client/scaena-studio'],['返回上下文','当前镜头 '+S.shot+' / revision '+M.shots[S.shot].revision]]))+note('项目绑定用于收窄可见范围。研究、知识、个人工作区保留各自合同与独立空状态。');
+  };
+  function mediaTile(a){const cover=a.image?`<img src="./resources/media/${a.image}" alt="${E(a.name)}，既有参考摄影">`:`<div class="media-symbol">${icon(a.type==='audio'?'wave':a.type==='video'?'film':'assets')}<span>${a.kind}引用</span></div>`;return `<article class="asset-tile"><button class="asset-cover" data-v11="media:${a.id}" aria-label="查看${a.name}">${cover}<span class="cover-label">${a.image?'参考摄影 · 非生成结果':'未提供媒体字节'}</span></button><div class="asset-copy"><div class="row between"><small>${a.owner} / ${a.version}</small>${pill(a.state)}</div><h3>${XB(a.name,'media:'+a.id,'link')}</h3><p>${a.size}</p><div class="row between"><small>E01 / ${a.id==='video'?'S02':'S03'}</small>${XB('版本与详情 '+icon('chevron'),'media:'+a.id,'link')}</div></div></article>`;}
+  V.assets=()=>{const rows=assets.filter(a=>goodScope()&&(X.assetType==='all'||a.type===X.assetType)&&(a.name+a.owner+a.ref).toLowerCase().includes(X.assetSearch.toLowerCase()));return title('资产')+lead('ASSET LIBRARY','每个结果，都可追溯。','固定版本、来源任务与用途边界，一起保留。',XB(icon('info')+'结果读取合同','contracts','ghost'))+`<div class="toolbar"><div class="tabs" role="group" aria-label="资产类型">${[['all','全部'],['image','图像'],['audio','音频'],['video','视频'],['file','文件']].map(([v,t])=>XB(t,'asset-type:'+v,'seg'+(X.assetType===v?' active':''),`aria-pressed="${X.assetType===v}"`)).join('')}</div><label class="search-field grow">${icon('search')}<input id="asset-search" aria-label="搜索资产" placeholder="搜索资产、服务或版本" value="${E(X.assetSearch)}"></label>${XB(icon('grid'), 'asset-view','icon',`aria-label="切换资产网格或列表" aria-pressed="${X.assetView==='list'}"`)}</div>`+(rows.length?`<div class="asset-grid ${X.assetView==='list'?'asset-list':''}">${rows.map(mediaTile).join('')}</div>`:empty('当前筛选没有资产','试试其他类型；未授权内容不会自动显示。',XB('清除资产筛选','asset-clear')))+note('图片来自原型既有参考摄影。声音与视频仅展示样例元数据；有结果引用不等于已获得媒体访问权限。');};
+  const members=[['yeisme','Yeisme','用户','控制中心','admin','个人工作区','已确认'],['director','导演 · 样例','用户','Scaena','editor','雨夜重逢','已绑定'],['reviewer','声音审阅 · 样例','用户','Sonora','reviewer','雨夜重逢','已绑定'],['observer','观测身份 · 样例','服务身份','Eikona','observer','仅当前项目','已绑定'],['unbound','未绑定主体','用户','Aigora','未知','企业范围','待绑定']];
+  V.team=()=>title('团队')+lead('PEOPLE & ACCESS','权限有范围，协作有边界。','保留每个服务的原生角色，不把平台管理员等同于领域管理员。',XB('预览成员邀请','invite','primary'))+bar(tab(['成员','角色与权限','服务身份'],X.teamTab,'teamview'))+(S.scope==='personal'?original.team():X.teamTab==='角色与权限'?section('当前身份能做什么',`<div class="permission-matrix">${[['查看任务','已授权项目','允许'],['读取内容','独立内容权限','逐结果校验'],['取消任务','管理员 + owner 动作许可','默认关闭'],['成员与角色写入','原服务管理员','待接入'],['重启 / 升级 / 密钥轮换','未提供受控操作','不可用']].map(([a,b,c])=>`<div><b>${a}</b><span>${b}</span>${pill(c)}</div>`).join('')}</div>`):section(X.teamTab==='服务身份'?'独立观测身份':'成员与主体',`<div class="table-scroll"><table class="product-table"><thead><tr><th>成员</th><th>来源 / 角色</th><th>范围</th><th>绑定</th><th></th></tr></thead><tbody>${members.filter(m=>X.teamTab!=='服务身份'||m[2]==='服务身份').map(m=>`<tr><td><div class="table-object"><span class="avatar">${m[1].slice(0,1)}</span><div>${XB(m[1],'member:'+m[0],'link')}<small>${m[2]}</small></div></div></td><td>${m[3]}<small>${m[4]}</small></td><td>${m[5]}</td><td>${pill(m[6])}</td><td>${XB(icon('chevron'),'member:'+m[0],'icon',`aria-label="查看${m[1]}权限"`)}</td></tr>`).join('')}</tbody></table></div>`))+note('本页为样例投影。真实成员来自 GET /organization；邀请和角色变更的控制中心写合同仍待提供。');
+  V.settings=()=>title('设置')+lead('YOUR WORKSPACE','按你的方式工作。','外观偏好保存在当前浏览器，业务样例仅保留到刷新。')+original.settings().replace(title('设置'),'')+section('会话与连接',`<div class="settings-row"><div><h3>当前会话</h3><small>Yeisme · 演示身份 · ${X.role==='admin'?'管理员':'只读成员'}</small></div>${XB('切换演示角色','role')}</div><div class="settings-row"><div><h3>接口与功能交接</h3><small>逐项对应现有源码、限制与待补合同</small></div>${XB('查看接口清单','contracts')}</div><div class="settings-row"><div><h3>演练数据</h3><small>重置查询、交接、筛选和状态；不影响 v10</small></div>${XB('重置本版演示','reset')}</div><div class="settings-row"><div><h3>退出演示会话</h3><small>销毁已打开内容与操作上下文</small></div>${XB('退出演示','logout')}</div>`);
+  function guard(html){
+    if(X.scenario==='expired'||!X.login)return title('会话已结束')+`<section class="panel session-card"><span class="brand-mark">Y</span><h2>回到你的工作空间。</h2><p>会话已结束。已打开的内容与旧操作上下文已清除。</p><div class="identity-preview"><span class="avatar">Y</span><div><b>Yeisme</b><small>本地设计演示身份</small></div></div>${XB('进入演示工作空间','login','primary')}<small>此入口只恢复样例会话，不输入或发送真实凭据。</small></section>`;
+    if(X.scenario==='unauthorized')return title('当前范围未授权')+empty('当前范围的访问权限已撤销','已清除旧详情、内容与任务；其他工作区需要独立授权。',XB('恢复演示权限','recover'));
+    if(X.scenario==='loading')return title('正在读取')+`<div role="status" aria-live="polite" class="loading-state"><h2>正在读取当前范围…</h2><p>等待各来源返回，尚未给出健康或成功结论。</p><div class="skeleton"></div><div class="skeleton"></div>${XB('完成加载演练','recover')}</div>`;
+    if(X.scenario==='empty')return title('暂无记录')+empty('这里还没有运行记录','当前范围已读取成功，尚未产生任务。选择其他项目或查看服务接入。',XB('返回有数据的样例','recover'));
+    if(X.scenario==='error')return title('读取失败')+empty('这次观察暂时没有返回','读取失败不代表任务失败。保留原引用，恢复读取即可继续。',XB('重新读取样例','recover','primary'));
+    if(['partial','stale'].includes(X.scenario))return `<div class="observation-banner" role="status">${icon('alert')}<div><b>${X.scenario==='partial'?'Sonora 来源读取失败，其他来源仍可查看':'当前显示上次观察快照'}</b><p>${X.scenario==='partial'?'声音记录为上次样例观察，不作当前成功判断。':'观察时间 14:32 · 已过期；刷新不会重新提交任何生成。'}</p></div>${XB('恢复观察','recover','btn')}</div>`+html;
+    return html;
+  }
+  for(const page of ['overview','requests','projects','assets','services','team','settings','studio']){const fn=V[page];V[page]=()=>guard(fn());}
+  function detailTabs(items){return tab(items,items.includes(S.detailTab)?S.detailTab:items[0],'detailtab');}
+  function taskDetail(id){
+    const t=tasks().concat(gatewayTasks()).find(x=>x.id===id);if(!t||!goodScope())return {title:'当前范围没有此任务',body:note('旧内容已清除，深链不能扩大访问权限。'),footer:B('关闭','close')};
+    let body=detailTabs(['概况','输入与结果','执行记录','关联对象']);
+    if(S.detailTab==='输入与结果')body+=section('业务输入',`<p>元数据与业务正文独立授权。样例没有保存原始提交正文。</p><div class="state-label">${badge('not_recorded')}<span>未记录原始输入</span></div>${XB('查看正文读取规则','content-rules','link')}`)+section('输出与媒体',t.id==='visual'||t.id==='rights'||t.id==='history-video'?`${XB('查看固定结果 '+icon('chevron'),'media:'+({visual:'image',rights:'audio','history-video':'video'}[t.id]),'primary')}`:note(t.state==='unknown'?'结果尚未确认，先核对原任务。':'当前未提供可访问的输出字节。'));
+    else if(S.detailTab==='执行记录')body+=`<div class="timeline">${[['14:16','提交已接受','原引用 '+t.ref],['14:18',t.stage,'原生状态 '+t.state],['14:32','读取观察快照','观察时间与任务更新时间分别保存']].map(([time,name,desc],i)=>`<div class="timeline-item"><span class="timeline-index">${i+1}</span><div><b>${name}</b><small>${time} · ${E(desc)}</small></div></div>`).join('')}</div>`+kv([['尝试次数','1 · 未进行自动重投'],['revision',t.revision],['事件游标','独立于列表分页；失效时重新读取快照']])+note('以上为本地样例事件，不是实时流。读取超时不能证明原任务失败。');
+    else if(S.detailTab==='关联对象')body+=`<div class="relation-chain">${[['项目','雨夜重逢','project:rain'],['原镜头','E01 / S'+t.shot,'shot:'+t.shot],['领域 owner',t.owner,'owner:'+t.owner]].map(([k,v,a])=>`<div><small>${k}</small>${XB(v+' '+icon('chevron'),a,'link')}</div>`).join('')}</div>`+kv([['业务操作',t.family==='gateway_call'?'仅关联调用证据，不新增业务操作':'sca:production-018 · 样例显式关系'],['原任务',E(t.ref)],['跨服务关联','仅以 owner 明确引用连接，不按时间或名称猜测']]);
+    else body+=`<section class="detail-conclusion"><div class="row between">${pill(t.label)}<span class="mono">${E(t.state)}</span></div><h3>${t.id==='video'?'保留原任务，先确认结果。':t.state==='running'?'任务正在执行，结果尚未产生。':t.state==='blocked'?'解除业务阻塞需要独立依据。':'查看当前版本与可执行动作。'}</h3>${progress(t)}</section>`+kv([['所属作品','雨夜重逢 / E01 / S'+t.shot],['原引用',E(t.ref)],['服务 / 任务族',t.owner+' / '+t.family],['当前修订',t.revision],['创建时间',t.time],['观察时间','2026-10-12 14:32 · 样例'],['费用',t.cost||'未知 · 未提供实际费用'],['当前身份',X.role==='admin'?'管理员 · 仍需 owner 授权':'只读成员']]);
+    const footer=(t.id==='video'?B(S.solved?'准备审阅交接':'查询原任务（模拟）',S.solved?'review':'query-original','primary'):t.id==='audio-running'?XB('预览取消操作','cancel:'+t.id,'btn',X.role!=='admin'?'disabled aria-describedby="cancel-role"':''):'')+XB('返回原镜头','shot:'+t.shot)+B('关闭','close');
+    if(t.id==='audio-running'&&X.role!=='admin')body+=note('<span id="cancel-role">只读成员不能取消；需要管理员与 owner 显式允许。</span>');
+    return {title:t.name,subtitle:t.owner+' · '+t.ref,mark:mark(['Scaena','Eikona','Sonora'].indexOf(t.owner)),body,footer,complex:true};
+  }
+  function assetDetail(id){const a=assets.find(v=>v.id===id);if(!a||!goodScope())return {title:'当前范围没有此资产',body:note('已清除旧内容。'),footer:B('关闭','close')};
+    const selectedVersion=a.id==='image'?X.version:a.version;let body=detailTabs(['预览','版本与来源','权限与用途']);
+    if(S.detailTab==='版本与来源')body+=`<div class="version-list">${(a.id==='image'?['v3','v2','v1']:[a.version]).map((v,i)=>XB(`<b>${v}</b><span>${i===0?'当前引用':'历史版本 · 未自动采用'}</span>${v===X.version?icon('check'):''}`,'version:'+v,'version-row'+(v===X.version?' active':''))).join('')}</div>`+kv([['选择版本',a.id==='image'?X.version:a.version],['来源任务',a.ref],['返回镜头','雨夜重逢 / E01 / '+(a.id==='video'?'S02':'S03')],['采用规则','新版本不会自动替换作品已采用版本']])+(a.id==='image'&&X.version!=='v3'?note('此历史版本仅有引用；没有预览字节，不使用 v3 画面代替。'):'');
+    else if(S.detailTab==='权限与用途')body+=kv([['当前用途',a.rights],['内容权限','按结果、用途和版本独立核验'],['文件与领域',a.owner==='DriveBridge'?'文件访问不代表声音、角色或生产用途许可':'领域规则与采用事实归 '+a.owner],['下载','未提供真实结果字节；下载动作暂不可用']])+note('正式访问由服务端签发短时同源媒体句柄；不暴露上游签名地址或服务凭据。');
+    else if(selectedVersion!==a.version)body+=empty('此历史版本没有预览字节','保留 '+selectedVersion+' 的原引用，不用当前版本画面代替。');
+    else body+=X.previews.has(id)&&a.image?`<figure class="detail-media"><img src="./resources/media/${a.image}" alt="${E(a.name)}，参考摄影"><figcaption>既有参考摄影 · 设计演示，非生成产物</figcaption></figure>`:`<div class="preview-gate">${icon(a.image?'lock':a.type==='audio'?'wave':'film')}<h3>${a.image?'按需打开参考预览':'当前未提供媒体字节'}</h3><p>${a.image?'先核对用途，再加载本原型参考摄影。':'保留结果引用与元数据；不使用无关音视频替代真实结果。'}</p>${a.image?XB('查看参考摄影','preview:'+a.id,'primary'):badge('not_provided')}</div>`;
+    body+=kv([['固定引用',a.ref+' / '+selectedVersion],['版本状态',a.state],['规格',a.size]]);
+    return {title:a.name,subtitle:a.owner+' · '+a.kind,body,complex:true,footer:(a.task?XB('查看来源任务','task:'+a.task):'')+XB('返回作品','project:rain')+B('关闭','close')};
+  }
+  function serviceDetail(id){const service=window.YeismeCatalog.find(s=>s.id===+id);if(!service||+id>2)return originalDetail();const owner=service.name;
+    let body=detailTabs(['概况','任务','配置与访问','事件']);
+    if(S.detailTab==='任务')body+=taskTable(tasks().filter(t=>goodScope()&&t.owner===owner).slice(0,4))+XB('查看此服务全部任务','owner:'+owner,'primary');
+    else if(S.detailTab==='配置与访问')body+=section('连接配置',kv([['实例','media-01 / 内网 · 演示'],['项目绑定','雨夜重逢 · 只观察批准项目'],['凭据来源','服务端安全引用 · 不返回秘密'],['内容意愿',owner==='Sonora'?'已开启；逐结果仍需授权':'已开启；能力尚需验证'],['取消意愿','默认关闭'],['配置修订','v7 · 样例']]))+`<div class="config-diff"><h3>配置变更预览</h3><label>连接显示名称<input id="config-label" value="${E(X.configDraft||owner+' · 生产观察')}" maxlength="60"></label>${XB('检查差异','config-preview')}</div>`+note('显示名称用于演练差异。连接写入、凭据轮换、启停和部署不具备控制中心远程合同。');
+    else if(S.detailTab==='事件')body+=section('最近连接观察',`<div class="timeline"><div class="timeline-item"><span class="timeline-index">1</span><div>14:32 · 获取任务元数据<small>样例观察成功 · 不代表内容可读</small></div></div><div class="timeline-item"><span class="timeline-index">2</span><div>14:20 · 核对项目范围<small>范围绑定有效 · 管理写入未启用</small></div></div></div>`)+XB('查看会话活动','activity');
+    else body+=`<div class="observation-summary">${mark(+id)}<div><h3>${owner} · media-01</h3><p>${service.role}</p></div>${badge('只读观察')}</div><div class="evidence-rows">${[['传输连接','verified','样例协议可达'],['当前授权','verified','项目限定身份'],['任务合同','supported','元数据读取可用'],['内容读取',owner==='Sonora'?'supported':'not_verified',owner==='Sonora'?'按结果独立授权':'不能推断媒体可读'],['管理写入','disabled','未启用远程管理']].map(([k,v,d])=>`<div><b>${k}</b><span>${v}</span><small>${d}</small></div>`).join('')}</div>`+kv([['上次观察','14:32 · 本地样例'],['业务影响',owner==='Scaena'?'镜头 03 结果待决':owner==='Sonora'?'镜头 03 发行权利阻塞':'镜头 03 候选待审阅'],['内容与任务','两个独立权限维度，不能用“在线”代替判断']])+XB('查看绑定项目','project:rain','link');
+    return {title:owner+' 服务实例',subtitle:'样例观察 · 生产状态未在本原型探测',mark:mark(+id),body,complex:true,footer:B('刷新只读观察（模拟）','refresh-detail')+XB('查看接口依据','contracts')+B('关闭','close')};
+  }
+  D.render=()=>{
+    const d=S.detail;if(!d)return null;
+    if(d.type==='task')return taskDetail(d.id);
+    if(d.type==='media')return assetDetail(d.id);
+    if(d.type==='service')return serviceDetail(d.id);
+    if(d.type==='contracts')return {title:'产品功能与正式接口',subtitle:'按现有源码核对 · 2026-10-12 · 非部署验收',body:`<p class="small muted">控制中心路径统一以前缀 <code>/api/control-center/v1</code> 开始。此原型没有向这些接口发起请求。</p><div class="contract-list">${contractRows.map(([n,p,f,s,d])=>`<article><div class="row between"><h3>${n}</h3>${pill(s)}</div><code>${E(p)}</code><p>${d}</p><small>源码依据：${f}</small></article>`).join('')}</div>`,footer:B('关闭','close'),complex:true};
+    if(d.type==='inbox')return {title:'通知中心',subtitle:'当前范围 · 业务提醒与会话活动',body:goodScope()?`<div class="inbox-list">${M.issues().map(i=>`<article class="${X.read.has(i.id)?'read':''}"><div class="row between">${pill(i.status)}<small>${i.time}</small></div><h3>${i.title}</h3><p>${i.reason}</p><div class="row">${XB('查看原任务','task:'+i.id,'link')}${XB(X.read.has(i.id)?'已读':'标为已读','read:'+i.id,'link',X.read.has(i.id)?'disabled':'')}</div></article>`).join('')}</div>`:empty('当前范围没有通知','切换范围会清除旧项目内容。'),footer:XB('查看会话活动','activity')+B('关闭','close')};
+    if(d.type==='member'){const m=members.find(x=>x[0]===d.id);return {title:m?.[1]||'未知成员',subtitle:'当前 owner 的角色投影',body:kv([['身份类型',m?.[2]],['授权 owner',m?.[3]],['原角色',m?.[4]],['资源范围',m?.[5]],['主体绑定',m?.[6]]])+note('成员角色写入需原服务具名合同。控制中心管理员不自动获得全服务管理员权限。'),footer:XB('预览角色变更','role-preview')+B('关闭','close')};}
+    if(d.type==='invite')return {title:'成员邀请 · 设计预览',subtitle:'填写范围与角色，核对邀请交接；不会发送真实邀请。',body:`<form id="invite-form" class="product-form"><label>成员称呼<input name="displayName" required maxlength="60" placeholder="例如：剪辑协作者"></label><label>目标服务<select name="owner"><option>Scaena</option><option>Eikona</option><option>Sonora</option></select></label><label>资源范围<input value="雨夜重逢 / 当前项目" readonly></label><label>期望协作职责<select name="role"><option>查看与追踪</option><option>审阅结果</option><option>编辑作品</option></select></label><p class="hint">协作职责是设计意图，实际可授予角色须由目标 owner 返回；当前没有邀请写接口。</p><button class="primary" type="submit">预览邀请交接</button></form>`,footer:B('关闭','close')};
+    if(d.type==='invite-preview')return {title:'邀请交接预览',body:kv([['成员称呼',E(X.invite?.name)],['目标服务',E(X.invite?.owner)],['协作职责',E(X.invite?.role)],['资源范围','仅雨夜重逢'],['提交状态','未提交 · 原服务写合同待接入']])+note('正式流程需目标角色目录、用户绑定邀请、幂等键与 owner 回执。不会用本地新增成员冒充邀请已发送。'),footer:XB('修改邀请','invite')+B('关闭','close')};
+    if(d.type==='role-preview')return {title:'角色变更预览',body:kv([['资源范围','仅当前 owner / 当前项目'],['权限来源','目标 owner 可授予角色目录'],['最后管理员','不得移除最后负责人；需目标服务事务保护'],['版本冲突','读取新 revision 后重新预览'],['当前可执行','不可提交 · 未接控制中心写接口']]),footer:B('关闭','close')};
+    if(d.type==='cancel'){
+      const t=tasks().find(t=>t.id===d.id);const c=X.cancel;
+      return {title:'取消任务 · 交互演练',subtitle:t?.ref+' · 不调用真实服务',body:kv([['唯一目标',t?.name],['expected_revision',t?.revision],['前置条件','管理员 + allowed_actions.cancel + owner 开放'],['费用影响','已发生费用不会因取消自动退回'],['样例结果',c==='unknown'?'回包丢失，结果未知':c==='conflict'?'修订冲突，保留原状态':c==='done'?'已查到原取消回执（模拟）':'尚未提交']])+note(c==='unknown'?'只查询同一幂等引用的取消回执，不能创建新的取消操作。':c==='conflict'?'重新读取任务修订后再次预览；不自动重放。':'此演练不修改 owner 状态，不提交真实取消。')+(!c?`<label class="confirm-line"><input id="cancel-confirm" type="checkbox">确认只演练此任务，不对整部作品操作</label>`:''),footer:c==='unknown'?XB('查询原取消回执（模拟）','cancel-receipt','primary'):c==='conflict'?XB('读取最新状态','cancel-reload'):c==='done'?B('关闭','close'):XB('模拟回包丢失','cancel-unknown','primary','disabled')+XB('模拟版本冲突','cancel-conflict','btn','disabled'),complex:true};
+    }
+    if(d.type==='config-preview')return {title:'连接配置差异',body:`<div class="diff-row"><small>当前 · revision v7</small><p>生产观察</p></div><div class="diff-row added"><small>本地草稿</small><p>${E(X.configDraft||'未修改')}</p></div>`+note(S.conflict?'发现新 revision v9；草稿保留，需重新检查差异。':'只保存本次弹层内草稿，不写入实际连接配置。'),footer:XB('模拟修订冲突','config-conflict')+XB('重新读取并保留草稿','config-reload')+B('关闭','close')};
+    if(d.type==='content-rules')return {title:'正文与结果读取',body:kv([['业务输入','submitted / effective 分开；未记录不重建'],['读取用途','必须明确 purpose 与 input / output direction'],['授权','独立内容权限，先审计后读取'],['缺失状态','not_recorded / forbidden / expired / integrity_failed 分开'],['安全范围','不返回内部提示、Provider 报文、永久地址或凭据']]),footer:XB('查看接口清单','contracts')+B('关闭','close')};
+    if(d.type==='about')return {title:'v11 · 完整功能原型',subtitle:'沿用 v10 视觉核心，完善已有合同对应的产品流程',body:`<section class="detail-conclusion"><h3>作品、运行、结果，连成一次完整工作。</h3><p>六入口与作品视觉保持一致；新增历史筛选、结果库、连接诊断、成员投影、通知、会话与恢复演练。</p></section>`+kv([['设计基线','control-center-v10 / index.html'],['正式客户端','client/yeisme-control-center'],['设计数据','静态本地样例；刷新可重置'],['正式接口','源码已核对；真实运行与权限未在本轮验收'],['交接文件','README.md / interface-map.md / verification.md']]),footer:XB('查看功能接口清单','contracts','primary')+B('开始体验','close')};
+    return originalDetail();
+  };
+  function rerender(focusId){const el=document.activeElement,start=el?.selectionStart;A().render();if(focusId){const next=document.getElementById(focusId);next?.focus();if(typeof start==='number'&&next?.setSelectionRange)next.setSelectionRange(start,start);}}
+  function open(type,id){A().open(type,id);}
+  function taskNav(mode='active',owner='all'){X.mode=mode;X.owner=owner;X.page=1;X.search='';X.status='all';A().nav('requests');S.tab='领域任务';rerender();A().route();}
+  function log(text){S.audit.push({scope:S.scope,time:'14:32',text:'本地演练：'+text});}
+  function doAction(action){const [cmd,...rest]=action.split(':'),id=rest.join(':');
+    if(cmd==='task')open('task',id);
+    else if(cmd==='media'){X.version='v3';open('media',id);}
+    else if(['contracts','inbox','invite','content-rules','role-preview'].includes(cmd))open(cmd);
+    else if(cmd==='member')open('member',id);
+    else if(cmd==='activity')open('audit');
+    else if(cmd==='active'||cmd==='history')taskNav(cmd);
+    else if(cmd==='owner')taskNav('history',id);
+    else if(cmd==='mode'){X.mode=id;X.page=1;rerender();A().route();}
+    else if(cmd==='export-tasks'){const rows=S.tab==='网关调用'?gatewayTasks():filteredTasks();const cells=x=>'"'+String(x??'').replaceAll('"','""')+'"';const csv='\uFEFF'+[['title','owner','state','reference','created_at','evidence'],...rows.map(t=>[t.name,t.owner,t.state,t.ref,t.time,'design_sample'])].map(r=>r.map(cells).join(',')).join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='yeisme-design-sample-tasks.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);log('导出 '+rows.length+' 条当前筛选样例');A().toast('已导出当前筛选样例；非全量生产数据。');}
+    else if(cmd==='page'){X.page+=Number(id);rerender();A().route();}
+    else if(cmd==='clear-tasks'){X.owner='all';X.status='all';X.search='';X.page=1;X.from='';X.to='';X.order='newest';rerender();A().route();}
+    else if(cmd==='project'){A().scope('rain');A().nav('projects');}
+    else if(cmd==='shot'){A().scope('rain');S.shot=M.shots[id]?id:'03';A().nav('projects');A().route();if(!M.shots[id])A().toast('该镜头明细未提供，已返回项目运行上下文。');}
+    else if(cmd==='asset-type'){X.assetType=id;rerender();}
+    else if(cmd==='asset-view'){X.assetView=X.assetView==='grid'?'list':'grid';rerender();}
+    else if(cmd==='asset-clear'){X.assetType='all';X.assetSearch='';rerender();}
+    else if(cmd==='version'){X.version=id;A().paintDetail();}
+    else if(cmd==='preview'){if(!goodScope())return;X.previews.add(id);log('查看参考摄影 '+id+'；未申请真实媒体授权');A().paintDetail();}
+    else if(cmd==='read'){X.read.add(id);A().paintDetail();}
+    else if(cmd==='recover'){X.scenario='normal';rerender();}
+    else if(cmd==='role'){X.role=X.role==='admin'?'viewer':'admin';A().toast('当前演示角色：'+(X.role==='admin'?'管理员':'只读成员'));rerender();}
+    else if(cmd==='logout'){A().close(false);X.login=false;X.scenario='expired';X.previews.clear();X.cancel=null;X.selected.clear();S.epoch++;S.busy=false;rerender();}
+    else if(cmd==='login'){X.login=true;X.scenario='normal';A().scope('team');A().nav('overview');}
+    else if(cmd==='reset'){try{localStorage.removeItem('yeisme:v11:ui');}catch{}location.hash='#overview?scope=team';location.reload();}
+    else if(cmd==='cancel'){if(!goodScope()||X.role!=='admin')return;X.cancel=null;open('cancel',id);}
+    else if(cmd==='cancel-unknown'||cmd==='cancel-conflict'){if(X.role!=='admin'||!document.getElementById('cancel-confirm')?.checked)return;X.cancel=cmd==='cancel-unknown'?'unknown':'conflict';log('取消演练 '+X.cancel+'；任务仍保持原状态');A().paintDetail();}
+    else if(cmd==='cancel-receipt'){if(X.cancel!=='unknown')return;X.cancel='done';log('通过原幂等引用查到取消样例回执；未发送新操作');A().paintDetail();}
+    else if(cmd==='cancel-reload'){X.cancel=null;A().paintDetail();}
+    else if(cmd==='config-preview'){X.configDraft=document.getElementById('config-label')?.value||X.configDraft;S.conflict=false;open('config-preview');}
+    else if(cmd==='config-conflict'){S.conflict=true;A().paintDetail();}
+    else if(cmd==='config-reload'){S.conflict=false;A().paintDetail();A().toast('已读取样例修订；本地草稿保持不变。');}
+  }
+  document.addEventListener('click',e=>{
+    const x=e.target.closest('[data-v11]');if(x&&!x.disabled){e.preventDefault();e.stopImmediatePropagation();doAction(x.dataset.v11);return;}
+    const b=e.target.closest('[data-action]');if(b?.dataset.action.startsWith('projectview:')){e.stopImmediatePropagation();X.projectTab=b.dataset.action.slice(12);rerender();}
+    if(b?.dataset.action.startsWith('teamview:')){e.stopImmediatePropagation();X.teamTab=b.dataset.action.slice(9);rerender();}
+  },true);
+  document.addEventListener('input',e=>{const id=e.target.id;if(id==='task-search'){X.search=e.target.value;X.page=1;rerender(id);}if(id==='asset-search'){X.assetSearch=e.target.value;rerender(id);}if(id==='config-label')X.configDraft=e.target.value;});
+  document.addEventListener('change',e=>{const id=e.target.id,v=e.target.value;
+    if(id==='scenario'){A().close(false);S.epoch++;S.busy=false;X.previews.clear();X.cancel=null;X.scenario=v;rerender();return;}
+    const fields={'task-owner':'owner','task-state':'status','task-from':'from','task-to':'to','task-order':'order'};if(fields[id]){X[fields[id]]=v;X.page=1;rerender();A().route();}
+    if(id==='cancel-confirm')document.querySelectorAll('[data-v11="cancel-unknown"],[data-v11="cancel-conflict"]').forEach(b=>b.disabled=!e.target.checked);
+  });
+  document.addEventListener('submit',e=>{if(e.target.id!=='invite-form')return;e.preventDefault();const f=new FormData(e.target);X.invite={name:String(f.get('displayName')),owner:String(f.get('owner')),role:String(f.get('role'))};open('invite-preview');});
+  window.YeismeProduct={saveRoute(p){if(S.page==='requests'){for(const k of ['owner','status','mode','order'])p.set(k,X[k]);p.set('created_from',X.from);p.set('created_to',X.to);p.set('p',String(X.page));}},restoreRoute(p){X.owner=['all','Scaena','Eikona','Sonora'].includes(p.get('owner'))?p.get('owner'):'all';X.mode=p.get('mode')==='history'?'history':'active';X.status=['all','unknown','running','queued','blocked','waiting_review','succeeded','failed','cancelled'].includes(p.get('status'))?p.get('status'):'all';X.from=/^\d{4}-\d{2}-\d{2}$/.test(p.get('created_from')||'')?p.get('created_from'):'';X.to=/^\d{4}-\d{2}-\d{2}$/.test(p.get('created_to')||'')?p.get('created_to'):'';X.page=Math.max(1,Math.min(100,Number(p.get('p'))||1));X.order=p.get('order')==='oldest'?'oldest':'newest';}};
+})();

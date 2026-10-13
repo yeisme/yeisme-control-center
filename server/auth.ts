@@ -1,0 +1,382 @@
+import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import type { ServerConfig, Session, PrincipalBinding } from "./contracts";
+import { checkPassword, credentialVersion } from "./password";
+const nonce = () => randomBytes(32).toString("base64url");
+export class AuthError extends Error {
+  constructor(
+    public code: string,
+    public status = 401,
+  ) {
+    super(code);
+  }
+}
+export function secret(ref: string) {
+  const stat = statSync(ref);
+  if (!stat.isFile() || stat.mode & 0o077)
+    throw new AuthError("secret_permissions_invalid", 503);
+  return readFileSync(ref, "utf8").trim();
+}
+export function validateEndpoint(value: string, issuer: string) {
+  const url = new URL(value),
+    source = new URL(issuer);
+  if (
+    url.origin !== source.origin ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    (url.protocol !== "https:" &&
+      !(
+        url.protocol === "http:" &&
+        ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+      ))
+  )
+    throw new AuthError("oidc_endpoint_not_trusted", 503);
+  return url.href;
+}
+export async function boundedJSON(response: Response, max = 1048576) {
+  if (!response.ok)
+    throw new AuthError(
+      "upstream_unavailable",
+      response.status === 403 ? 403 : 503,
+    );
+  const reader = response.body?.getReader();
+  if (!reader) throw new AuthError("invalid_response", 503);
+  let size = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > max) {
+        await reader.cancel();
+        throw new AuthError("response_limit_exceeded", 503);
+      }
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    await reader.cancel().catch(() => {});
+    throw e;
+  }
+}
+export function verifyIDToken(
+  token: string,
+  jwks: { keys: JsonWebKey[] },
+  expected: { issuer: string; audience: string; nonce: string; now: number },
+) {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new AuthError("invalid_id_token");
+  let header: any, claims: any;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+    claims = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  } catch {
+    throw new AuthError("invalid_id_token");
+  }
+  const keys = jwks.keys.filter(
+    (k: any) =>
+      k.kid === header.kid &&
+      k.kty === "RSA" &&
+      (!k.use || k.use === "sig") &&
+      (!k.alg || k.alg === "RS256"),
+  );
+  if (
+    header.alg !== "RS256" ||
+    keys.length !== 1 ||
+    header.crit ||
+    !verify(
+      "RSA-SHA256",
+      Buffer.from(parts[0] + "." + parts[1]),
+      createPublicKey({ key: keys[0] as any, format: "jwk" }),
+      Buffer.from(parts[2], "base64url"),
+    )
+  )
+    throw new AuthError("invalid_id_token");
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (
+    claims.iss !== expected.issuer ||
+    !aud.includes(expected.audience) ||
+    (aud.length > 1 && claims.azp !== expected.audience) ||
+    (claims.azp && claims.azp !== expected.audience) ||
+    claims.nonce !== expected.nonce ||
+    typeof claims.exp !== "number" ||
+    claims.exp <= expected.now ||
+    typeof claims.iat !== "number" ||
+    claims.iat > expected.now + 30 ||
+    (claims.nbf && claims.nbf > expected.now + 30) ||
+    typeof claims.sub !== "string" ||
+    !claims.sub
+  )
+    throw new AuthError("invalid_id_token");
+  return claims;
+}
+export class SessionAuth {
+  sessions = new Map<string, Session>();
+  private challenges = new Map<
+    string,
+    { state: string; verifier: string; nonce: string; expires: number }
+  >();
+  constructor(
+    private config: ServerConfig,
+    private fetcher: typeof fetch = fetch,
+  ) {}
+  private loginAttempts: number[] = [];
+  private loginBusy = false;
+  personalBinding(): PrincipalBinding | undefined {
+    const p = this.config.personal;
+    if (this.config.auth_mode !== "personal" || !p) return undefined;
+    const all = this.config.principals.flatMap((v) => v.scopes);
+    return {
+      issuer: "yeisme:personal",
+      subject: p.username || "owner",
+      name: p.name,
+      role: p.role === "admin" ? "admin" : "viewer",
+      scopes: all.filter((v) => p.scope_ids.includes(v.id)),
+    };
+  }
+  principal(s: Session): PrincipalBinding | undefined {
+    if (s.personal) {
+      const binding = this.personalBinding();
+      return binding?.issuer === s.issuer && binding.subject === s.subject
+        ? binding
+        : undefined;
+    }
+    return this.config.principals.find(
+      (p) => p.issuer === s.issuer && p.subject === s.subject,
+    );
+  }
+  role(s: Session) {
+    return this.principal(s)?.role === "admin" ? "admin" : "viewer";
+  }
+  async personalLogin(request: Request, password: string, username?: string) {
+    const binding = this.personalBinding();
+    if (
+      !binding ||
+      request.headers.get("origin") !== this.config.origin ||
+      new URL(request.url).origin !== this.config.origin
+    )
+      throw new AuthError("personal_login_unavailable", 403);
+    validateEndpoint(this.config.origin, this.config.origin);
+    const now = Date.now();
+    this.loginAttempts = this.loginAttempts.filter(
+      (v) => now - v < 15 * 60_000,
+    );
+    if (this.loginBusy || this.loginAttempts.length >= 5)
+      throw new AuthError("login_rate_limited", 429);
+    this.loginAttempts.push(now);
+    this.loginBusy = true;
+    try {
+      const encoded = secret(this.config.personal!.password_hash_ref);
+      const passwordMatches = await checkPassword(password, encoded);
+      const expectedUsername = this.config.personal!.username;
+      if (!passwordMatches || (expectedUsername !== undefined && username !== expectedUsername))
+        throw new AuthError("invalid_credentials", 401);
+      this.prune();
+      if (this.sessions.size >= 100)
+        throw new AuthError("session_capacity", 503);
+      const id = nonce();
+      this.sessions.set(id, {
+        id,
+        issuer: binding.issuer,
+        subject: binding.subject,
+        name: binding.name,
+        accessToken: "",
+        accessAudience: [],
+        expires: now + 12 * 3600_000,
+        csrf: nonce(),
+        personal: true,
+        last_seen: now,
+        credential_version: credentialVersion(encoded),
+      });
+      return { cookie: this.cookie(id, 12 * 3600) };
+    } finally {
+      this.loginBusy = false;
+    }
+  }
+  cookie(value: string, maxAge: number) {
+    return `yeisme_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(this.config.origin).protocol === "https:" ? "; Secure" : ""}`;
+  }
+  challengeCookie(value: string, maxAge: number) {
+    return `yeisme_login=${value}; Path=/api/control-center/v1/auth; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(this.config.origin).protocol === "https:" ? "; Secure" : ""}`;
+  }
+  private async discovery() {
+    if (this.config.auth_mode === "personal")
+      throw new AuthError("oidc_not_configured", 503);
+    const o = this.config.oidc;
+    if (!o) throw new AuthError("oidc_not_configured", 503);
+    validateEndpoint(o.issuer, o.issuer);
+    const d = await boundedJSON(
+      await this.fetcher(
+        o.issuer.replace(/\/$/, "") + "/.well-known/openid-configuration",
+        { redirect: "error", signal: AbortSignal.timeout(5000) },
+      ),
+    );
+    if (d.issuer !== o.issuer) throw new AuthError("issuer_mismatch", 503);
+    for (const key of ["authorization_endpoint", "token_endpoint", "jwks_uri"])
+      validateEndpoint(d[key], o.issuer);
+    return d;
+  }
+  async begin() {
+    const d = await this.discovery(),
+      o = this.config.oidc!,
+      state = nonce(),
+      challenge = nonce(),
+      verifier = nonce(),
+      n = nonce();
+    this.prune();
+    if (this.challenges.size >= 1000)
+      throw new AuthError("login_capacity", 503);
+    this.challenges.set(challenge, {
+      state,
+      verifier,
+      nonce: n,
+      expires: Date.now() + 300000,
+    });
+    const url = new URL(d.authorization_endpoint);
+    url.search = new URLSearchParams({
+      client_id: o.clientId,
+      response_type: "code",
+      scope: "openid",
+      redirect_uri: this.config.origin + "/api/control-center/v1/auth/callback",
+      state,
+      nonce: n,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge_method: "S256",
+    }).toString();
+    return { url: url.href, cookie: this.challengeCookie(challenge, 300) };
+  }
+  async callback(request: Request) {
+    const url = new URL(request.url),
+      cookie = request.headers
+        .get("cookie")
+        ?.match(/(?:^|;\s*)yeisme_login=([^;]+)/)?.[1],
+      pending = cookie ? this.challenges.get(cookie) : undefined;
+    if (cookie) this.challenges.delete(cookie);
+    if (
+      !pending ||
+      pending.expires < Date.now() ||
+      pending.state !== url.searchParams.get("state") ||
+      !url.searchParams.get("code")
+    )
+      throw new AuthError("invalid_login_state");
+    const d = await this.discovery(),
+      o = this.config.oidc!;
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: url.searchParams.get("code")!,
+      redirect_uri: this.config.origin + "/api/control-center/v1/auth/callback",
+      client_id: o.clientId,
+      code_verifier: pending.verifier,
+    });
+    const headers: Record<string, string> = {
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    if (o.clientSecretRef)
+      headers.Authorization =
+        "Basic " +
+        Buffer.from(
+          encodeURIComponent(o.clientId) +
+            ":" +
+            encodeURIComponent(secret(o.clientSecretRef)),
+        ).toString("base64");
+    const tokens = await boundedJSON(
+      await this.fetcher(d.token_endpoint, {
+        method: "POST",
+        headers,
+        body,
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      }),
+      65536,
+    );
+    const jwks = await boundedJSON(
+      await this.fetcher(d.jwks_uri, {
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      }),
+      65536,
+    );
+    const claims = verifyIDToken(tokens.id_token, jwks, {
+      issuer: o.issuer,
+      audience: o.clientId,
+      nonce: pending.nonce,
+      now: Date.now() / 1000,
+    });
+    const binding = this.config.principals.find(
+      (p) => p.issuer === claims.iss && p.subject === claims.sub,
+    );
+    if (!binding) throw new AuthError("identity_not_bound", 403);
+    // An access token is never accepted as identity here. Each target owner must verify its audience and delegated actor.
+    let accessAudience: string[] = [];
+    try {
+      const payload = JSON.parse(
+        Buffer.from(tokens.access_token.split(".")[1], "base64url").toString(),
+      );
+      accessAudience = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    } catch {
+      /* Opaque tokens require an explicit owner exchange contract, not inference. */
+    }
+    this.prune();
+    if (this.sessions.size >= 1000)
+      throw new AuthError("session_capacity", 503);
+    const id = nonce(),
+      expires = Math.min(
+        claims.exp * 1000,
+        Date.now() + Math.min(Number(tokens.expires_in) || 300, 1800) * 1000,
+      );
+    this.sessions.set(id, {
+      id,
+      issuer: claims.iss,
+      subject: claims.sub,
+      name: binding.name,
+      accessToken:
+        typeof tokens.access_token === "string" ? tokens.access_token : "",
+      accessAudience,
+      expires,
+      csrf: nonce(),
+    });
+    return {
+      cookie: this.cookie(id, Math.floor((expires - Date.now()) / 1000)),
+      clear: this.challengeCookie("", 0),
+    };
+  }
+  current(r: Request) {
+    this.prune();
+    const id = r.headers
+      .get("cookie")
+      ?.match(/(?:^|;\s*)yeisme_session=([^;]+)/)?.[1];
+    const s = id ? this.sessions.get(id) : undefined;
+    if (!s) throw new AuthError("login_required");
+    if (!this.principal(s)) {
+      this.sessions.delete(s.id);
+      throw new AuthError("identity_not_bound", 403);
+    }
+    if (s.personal) {
+      if (
+        (s.last_seen || 0) + 30 * 60_000 <= Date.now() ||
+        s.credential_version !==
+          credentialVersion(secret(this.config.personal!.password_hash_ref))
+      ) {
+        this.sessions.delete(s.id);
+        throw new AuthError("login_required");
+      }
+      s.last_seen = Date.now();
+    }
+    return s;
+  }
+  csrf(r: Request, s: Session) {
+    if (
+      r.headers.get("origin") !== this.config.origin ||
+      r.headers.get("x-csrf-token") !== s.csrf
+    )
+      throw new AuthError("csrf_denied", 403);
+  }
+  private prune() {
+    for (const [k, v] of this.sessions)
+      if (v.expires <= Date.now()) this.sessions.delete(k);
+    for (const [k, v] of this.challenges)
+      if (v.expires <= Date.now()) this.challenges.delete(k);
+  }
+}
