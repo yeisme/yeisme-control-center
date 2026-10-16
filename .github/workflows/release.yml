@@ -40,7 +40,7 @@ jobs:
           RELEASE_NAME: ${{ inputs.tag || github.ref_name }}
         run: tar -czf "yeisme-control-center-${RELEASE_NAME}.tar.gz" dist temp/delivery/release-manifest.json temp/delivery/sbom.spdx.json CHANGELOG.md README.md
       - name: Attest release archive
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "yeisme-control-center-${{ inputs.tag || github.ref_name }}.tar.gz"
       - name: Upload release candidate artifacts
