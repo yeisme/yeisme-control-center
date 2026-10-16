@@ -1,7 +1,9 @@
 import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import type { ServerConfig, Session, PrincipalBinding } from "./contracts";
-import { checkPassword, credentialVersion } from "./password";
+import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
+import type { ControlCenterRole } from "../src/service-directory";
+import { checkPassword, credentialVersion, hashPassword } from "./password";
 const nonce = () => randomBytes(32).toString("base64url");
 export class AuthError extends Error {
   constructor(
@@ -33,6 +35,21 @@ export function validateEndpoint(value: string, issuer: string) {
   )
     throw new AuthError("oidc_endpoint_not_trusted", 503);
   return url.href;
+}
+export function validateControlOrigin(value: string) {
+  const url = new URL(value);
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  const approvedLanHttp = url.hostname === "10.10.1.101" && url.port === "51873";
+  if (
+    url.origin !== value ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || approvedLanHttp)))
+  )
+    throw new AuthError("control_origin_not_trusted", 503);
+  return url.origin;
 }
 export async function boundedJSON(response: Response, max = 1048576) {
   if (!response.ok)
@@ -124,6 +141,12 @@ export class SessionAuth {
   ) {}
   private loginAttempts: number[] = [];
   private loginBusy = false;
+  private personalUsers() {
+    return this.config.personal?.users || [];
+  }
+  private personalUser(username: string) {
+    return this.personalUsers().find((user) => user.enabled !== false && user.username === username);
+  }
   personalBinding(): PrincipalBinding | undefined {
     const p = this.config.personal;
     if (this.config.auth_mode !== "personal" || !p) return undefined;
@@ -136,8 +159,23 @@ export class SessionAuth {
       scopes: all.filter((v) => p.scope_ids.includes(v.id)),
     };
   }
+  private personalUserBinding(user: PersonalUser): PrincipalBinding {
+    const all = this.config.principals.flatMap((v) => v.scopes);
+    return {
+      issuer: "yeisme:personal",
+      subject: user.username,
+      name: user.name,
+      role: user.role,
+      scopes: all.filter((scope) => user.scope_ids.includes(scope.id)),
+    };
+  }
   principal(s: Session): PrincipalBinding | undefined {
     if (s.personal) {
+      const user = this.personalUser(s.subject);
+      if (user) {
+        const binding = this.personalUserBinding(user);
+        return binding.issuer === s.issuer && binding.subject === s.subject ? binding : undefined;
+      }
       const binding = this.personalBinding();
       return binding?.issuer === s.issuer && binding.subject === s.subject
         ? binding
@@ -150,15 +188,18 @@ export class SessionAuth {
   role(s: Session) {
     return this.principal(s)?.role === "admin" ? "admin" : "viewer";
   }
-  async personalLogin(request: Request, password: string, username?: string) {
-    const binding = this.personalBinding();
+  async personalLogin(request: Request, secretValue: string, username?: string) {
+    const users = this.personalUsers();
+    const user = username ? this.personalUser(username) : undefined;
+    const binding = user ? this.personalUserBinding(user) : this.personalBinding();
     if (
-      !binding ||
+      this.config.auth_mode !== "personal" ||
+      !this.config.personal ||
       request.headers.get("origin") !== this.config.origin ||
       new URL(request.url).origin !== this.config.origin
     )
       throw new AuthError("personal_login_unavailable", 403);
-    validateEndpoint(this.config.origin, this.config.origin);
+    validateControlOrigin(this.config.origin);
     const now = Date.now();
     this.loginAttempts = this.loginAttempts.filter(
       (v) => now - v < 15 * 60_000,
@@ -168,11 +209,15 @@ export class SessionAuth {
     this.loginAttempts.push(now);
     this.loginBusy = true;
     try {
-      const encoded = secret(this.config.personal!.password_hash_ref);
-      const passwordMatches = await checkPassword(password, encoded);
+      const encoded = user
+        ? secret(user.key_hash_ref)
+        : secret(this.config.personal!.password_hash_ref);
+      const valueMatches = await checkPassword(secretValue, encoded);
       const expectedUsername = this.config.personal!.username;
-      if (!passwordMatches || (expectedUsername !== undefined && username !== expectedUsername))
+      const legacyAdminMatch = users.length > 0 && !user && expectedUsername !== undefined && username === expectedUsername && valueMatches;
+      if (!valueMatches || (users.length === 0 && expectedUsername !== undefined && username !== expectedUsername) || (users.length > 0 && !user && !legacyAdminMatch))
         throw new AuthError("invalid_credentials", 401);
+      if (!binding) throw new AuthError("invalid_credentials", 401);
       this.prune();
       if (this.sessions.size >= 100)
         throw new AuthError("session_capacity", 503);
@@ -194,6 +239,39 @@ export class SessionAuth {
     } finally {
       this.loginBusy = false;
     }
+  }
+  listPersonalUsers() {
+    return this.personalUsers().map(({ key_hash_ref: _keyHashRef, ...user }) => ({ ...user, enabled: user.enabled !== false }));
+  }
+  async createPersonalUser(input: { username: string; name: string; role: ControlCenterRole; scope_ids: string[] }) {
+    if (!this.config.personal || !this.config.config_file) throw new AuthError("user_management_unavailable", 503);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(input.username) || !input.name.trim() || !["admin", "viewer"].includes(input.role))
+      throw new AuthError("invalid_user", 400);
+    if (this.personalUsers().some((user) => user.username === input.username)) throw new AuthError("user_exists", 409);
+    const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
+    if (!input.scope_ids.length || input.scope_ids.some((id) => !allowedScopes.has(id))) throw new AuthError("scope_not_found", 404);
+    const accessKey = "yk_live_" + nonce();
+    const keyHashRef = resolve(this.config.config_file + ".users", input.username + ".key");
+    mkdirSync(dirname(keyHashRef), { recursive: true, mode: 0o700 });
+    writeFileSync(keyHashRef, (await hashPassword(accessKey)) + "\n", { mode: 0o600, flag: "wx" });
+    const user: PersonalUser = { username: input.username, name: input.name.trim(), role: input.role, key_hash_ref: keyHashRef, scope_ids: input.scope_ids, enabled: true, created_at: new Date().toISOString() };
+    this.config.personal.users = [...this.personalUsers(), user];
+    this.persistConfig();
+    return { user: { ...user, key_hash_ref: undefined }, access_key: accessKey };
+  }
+  revokePersonalUser(username: string) {
+    if (!this.config.personal || !this.personalUsers().some((user) => user.username === username)) throw new AuthError("user_not_found", 404);
+    this.config.personal.users = this.personalUsers().map((user) => user.username === username ? { ...user, enabled: false } : user);
+    for (const session of this.sessions.values()) if (session.personal && session.subject === username) this.sessions.delete(session.id);
+    this.persistConfig();
+  }
+  private persistConfig() {
+    const path = this.config.config_file;
+    if (!path) throw new AuthError("user_management_unavailable", 503);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const temp = path + "." + process.pid + ".users.tmp";
+    writeFileSync(temp, JSON.stringify({ ...this.config, config_file: undefined }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(temp, path);
   }
   cookie(value: string, maxAge: number) {
     return `yeisme_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(this.config.origin).protocol === "https:" ? "; Secure" : ""}`;
@@ -354,10 +432,12 @@ export class SessionAuth {
       throw new AuthError("identity_not_bound", 403);
     }
     if (s.personal) {
+      const user = this.personalUser(s.subject);
+      const ref = user?.key_hash_ref || this.config.personal?.password_hash_ref;
       if (
         (s.last_seen || 0) + 30 * 60_000 <= Date.now() ||
-        s.credential_version !==
-          credentialVersion(secret(this.config.personal!.password_hash_ref))
+        !ref ||
+        s.credential_version !== credentialVersion(secret(ref))
       ) {
         this.sessions.delete(s.id);
         throw new AuthError("login_required");

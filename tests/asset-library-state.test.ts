@@ -22,8 +22,8 @@ describe("generation library organization", () => {
     state.folders.push({ id: "child", name: "待审阅", parent: "visual" });
     state.locations[assets[0].id] = "child";
     state.notes[assets[0].id] = "片头候选";
-    const filters = { folder: "visual", owner: "eikona", status: "待审阅" };
-    expect(filterLibraryAssets(assets, state, filters, "图像", "片头").map((a) => a.id)).toEqual([assets[0].id]);
+    const filters = { ...emptyAssetFilters, folder: "visual", owner: "scaena", status: "待审阅" };
+    expect(filterLibraryAssets(assets, state, filters, "图像", "雨夜").map((a) => a.id)).toEqual([assets[0].id]);
     expect(filterLibraryAssets(assets, state, filters, "音频", "")).toEqual([]);
     expect(filterLibraryAssets(assets.filter((a) => a.project === "coast"), state, filters, "all", "")).toEqual([]);
   });
@@ -31,7 +31,7 @@ describe("generation library organization", () => {
     const state = initialAssetLibrary();
     state.favorites = [assets[0].id, assets[1].id];
     delete state.locations[assets[1].id];
-    const scoped = assets.filter((a) => a.project === "coast");
+    const scoped = assets.filter((a) => a.id === assets[1].id);
     expect(filterLibraryAssets(scoped, state, { ...emptyAssetFilters, folder: "favorites" }, "all", "").map((a) => a.id)).toEqual([assets[1].id]);
     expect(filterLibraryAssets(assets, state, { ...emptyAssetFilters, folder: "unfiled" }, "all", "").map((a) => a.id)).toEqual([assets[1].id]);
   });

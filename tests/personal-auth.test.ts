@@ -11,6 +11,7 @@ import type { ServerConfig } from "../server/contracts";
 const dir = mkdtempSync(join(tmpdir(), "yeisme-auth-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const origin = "http://127.0.0.1:4312";
+const lanOrigin = "http://10.10.1.101:51873";
 const request = (
   path: string,
   method = "GET",
@@ -20,6 +21,12 @@ const request = (
   new Request(origin + "/api/control-center/v1" + path, {
     method,
     headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+const lanRequest = (path: string, method = "GET", body?: unknown) =>
+  new Request(lanOrigin + "/api/control-center/v1" + path, {
+    method,
+    headers: { Origin: lanOrigin },
     body: body ? JSON.stringify(body) : undefined,
   });
 async function setup() {
@@ -59,6 +66,12 @@ async function setup() {
   return { auth, config, app: createApp(config, { auth }) };
 }
 describe("personal login", () => {
+  it("accepts the explicitly approved LAN HTTP origin", async () => {
+    const { app, config } = await setup();
+    config.origin = lanOrigin;
+    const result = await app(lanRequest("/auth/personal", "POST", { password: "test-only-password-123" }));
+    expect(result.status).toBe(200);
+  });
   it("uses a server session without exposing service credentials", async () => {
     const { app } = await setup();
     const result = await app(
@@ -73,6 +86,21 @@ describe("personal login", () => {
     expect(s.scopes[0].id).toBe("personal");
     expect(s.identity).toBe("yeisme:personal|owner");
     expect(s.accessToken).toBeUndefined();
+  });
+  it("authenticates a named user with an administrator-distributed key", async () => {
+    const { app, auth, config } = await setup();
+    config.config_file = join(dir, crypto.randomUUID() + ".json");
+    const created = await auth.createPersonalUser({ username: "editor-01", name: "Editor", role: "viewer", scope_ids: ["personal"] });
+    expect(created.access_key).toMatch(/^yk_live_/);
+    expect(JSON.stringify(auth.listPersonalUsers())).not.toContain(created.access_key);
+    const denied = await app(request("/auth/personal", "POST", { username: "editor-01", key: "wrong-key" }));
+    expect(denied.status).toBe(401);
+    const login = await app(request("/auth/personal", "POST", { username: "editor-01", key: created.access_key }));
+    expect(login.status).toBe(200);
+    const cookie = login.headers.get("set-cookie")!;
+    expect(await (await app(request("/session", "GET", undefined, cookie))).json()).toMatchObject({ username: "editor-01", role: "viewer" });
+    auth.revokePersonalUser("editor-01");
+    expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(401);
   });
   it("requires the configured username and exposes only a server-derived role", async () => {
     const { app, auth, config } = await setup();

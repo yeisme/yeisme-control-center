@@ -23,6 +23,12 @@ const assetKinds: Record<string, LocalKind> = {
   音频: "audio",
   文稿: "text",
 };
+const contentLabels: Record<Asset["content"], string> = {
+  available: "参考字节可预览",
+  missing_bytes: "有引用，无字节",
+  forbidden: "无内容读取权限",
+  not_recorded: "来源未采集",
+};
 
 function previewFor(asset: Asset): {
   kind: LocalKind;
@@ -30,7 +36,7 @@ function previewFor(asset: Asset): {
   unavailable?: Unavailable;
   caption: string;
 } {
-  if (asset.image)
+  if (asset.image && asset.content === "available")
     return {
       kind: "image",
       src: "./media/" + asset.image,
@@ -38,27 +44,39 @@ function previewFor(asset: Asset): {
     };
   const kind = assetKinds[asset.type] ?? "file";
   const unavailable: Unavailable =
-    kind === "audio"
+    asset.content === "forbidden"
+      ? {
+          title: "内容不可读取",
+          body: "当前身份只读到资产引用与元数据，原服务没有授予内容字节读取权限。",
+          tag: contentLabels.forbidden,
+        }
+      : asset.content === "not_recorded"
+        ? {
+            title: "来源尚未采集",
+            body: "历史引用没有可核对的来源记录，不根据名称或引用构造媒体。",
+            tag: contentLabels.not_recorded,
+          }
+        : kind === "audio"
       ? {
           title: "音频版本已登记",
           body: "真实审听媒体尚未接入，不提供模拟播放。",
-          tag: "仅元数据",
+          tag: contentLabels.missing_bytes,
         }
       : kind === "text"
         ? {
             title: "文稿版本已登记",
             body: "正文由 Auctra 保存，当前仅展示版本与来源。",
-            tag: "仅元数据",
+            tag: contentLabels.missing_bytes,
           }
         : {
             title: asset.type + "版本已登记",
             body: "尚未提供可读取的内容字节，不根据引用构造媒体。",
-            tag: "仅元数据",
+            tag: contentLabels.missing_bytes,
           };
   return {
     kind,
     unavailable,
-    caption: "固定版本的引用与内容权限分别保留",
+    caption: contentLabels[asset.content],
   };
 }
 
@@ -106,7 +124,7 @@ export function AssetDetail({
     <div className="asset-detail" data-od-id="asset-detail-panel">
       <div className="asset-detail-caption">
         <span>
-          {asset.type} · {asset.version}
+          {contentLabels[asset.content]} · {asset.version}
         </span>
         <Button
           onClick={() => {
@@ -130,7 +148,7 @@ export function AssetDetail({
         className="asset-detail-tabs"
       >
         <Tabs.List aria-label="产物详情">
-          <Tabs.Trigger value="overview">概览</Tabs.Trigger>
+          <Tabs.Trigger value="overview">预览与归因</Tabs.Trigger>
           <Tabs.Trigger value="lineage">来源与版本</Tabs.Trigger>
           <Tabs.Trigger value="handoff">权利与交接</Tabs.Trigger>
         </Tabs.List>
@@ -145,19 +163,70 @@ export function AssetDetail({
               caption={preview.caption}
             />
             <div className="asset-properties">
-              <h3>产物信息</h3>
+              <section className="asset-property-group">
+                <h3>作品与版本</h3>
               <dl className="read-fields">
+                <div className="read-field">
+                  <dt>固定版本</dt>
+                  <dd>{asset.version}</dd>
+                </div>
                 <div className="read-field">
                   <dt>所属项目</dt>
                   <dd>{projectName(asset.project)}</dd>
                 </div>
                 <div className="read-field">
-                  <dt>生成来源</dt>
-                  <dd>{serviceById(asset.owner)?.name}</dd>
+                  <dt>内容状态</dt>
+                  <dd>{contentLabels[asset.content]}</dd>
                 </div>
                 <div className="read-field">
-                  <dt>版本状态</dt>
-                  <dd>{asset.state}</dd>
+                  <dt>审阅状态</dt>
+                  <dd>{asset.review}</dd>
+                </div>
+              </dl>
+              </section>
+              <section className="asset-property-group">
+                <h3>生产与归属</h3>
+                <dl className="read-fields">
+                <div className="read-field">
+                  <dt>生产者</dt>
+                  <dd>{asset.producer}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>上传者</dt>
+                  <dd>{asset.uploader}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>当前负责人</dt>
+                  <dd>{asset.responsible}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>服务</dt>
+                  <dd>{serviceById(asset.owner)?.name || asset.owner}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>调用主体</dt>
+                  <dd>{asset.actor === "human" ? "个人主体" : asset.actor === "service" ? "服务身份" : "归因未知"}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>生产团队</dt>
+                  <dd>{asset.productionTeam}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>使用 Key</dt>
+                  <dd>{asset.productionKey}</dd>
+                </div>
+                </dl>
+              </section>
+              <section className="asset-property-group">
+                <h3>来源与版本</h3>
+                <dl className="read-fields">
+                <div className="read-field">
+                  <dt>来源请求</dt>
+                  <dd>{asset.request}</dd>
+                </div>
+                <div className="read-field">
+                  <dt>来源日期</dt>
+                  <dd>{asset.date}</dd>
                 </div>
                 <div className="read-field">
                   <dt>所在目录</dt>
@@ -173,7 +242,8 @@ export function AssetDetail({
                     <CopyReference value={asset.id} />
                   </dd>
                 </div>
-              </dl>
+                </dl>
+              </section>
               <div className="asset-note-heading">
                 <h3>整理备注</h3>
                 {!editing && (

@@ -10,6 +10,10 @@ const filters: TaskFilters = {
   state: "",
   family: "",
   connection: "",
+  owner: "",
+  project: "",
+  modality: "",
+  results: "",
   from: "",
   through: "",
 };
@@ -77,5 +81,7 @@ it("filters authorized rows without merging same-name instances or inventing dat
       through: "2026-10-01",
     }),
   ).toEqual([]);
+  expect(filterTasks(rows, { ...filters, owner: "sonora", results: "no" })).toEqual([rows[2]]);
+  expect(filterTasks(rows, { ...filters, project: "p", owner: "eikona" })).toEqual([rows[0], rows[1]]);
   expect(rows.filter(taskNeedsAttention)).toEqual([rows[0], rows[2]]);
 });

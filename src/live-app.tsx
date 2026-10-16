@@ -45,6 +45,8 @@ import {
   type DataColumn,
 } from "./admin-ui";
 import { PanelNotice } from "./workspace";
+import { ProviderCapabilitiesPage, ProviderCreationPage, ProviderInspector, ProviderUsagePage, type ProviderInspectorTarget, type Run } from "./provider-live-pages";
+import { PersonalUsersPage } from "./personal-users-page";
 import { RequestBody, RequestOverview } from "./request-content";
 import {
   coverageLabels,
@@ -57,10 +59,28 @@ import {
   type ContentRead,
 } from "./request-visibility";
 const api = "/api/control-center/v1";
+const pageFromLocation = () => {
+  const match = location.hash.match(/^#\/(\w+)/);
+  const value = match?.[1] || "overview";
+  if (value === "tasks") {
+    const next = "#/requests" + location.hash.slice("#/tasks".length);
+    history.replaceState(null, "", next);
+    return "requests";
+  }
+  if (value === "usage") {
+    history.replaceState(null, "", "#/provider_usage" + location.hash.slice("#/usage".length));
+    return "provider_usage";
+  }
+  return value;
+};
 const errorLabels: Record<string, string> = {
   login_required: "请登录后查看获授权的请求",
   oidc_not_configured: "统一登录尚未配置",
   identity_not_bound: "当前身份尚未绑定控制中心访问范围",
+  user_management_unavailable: "用户管理尚未配置持久化存储",
+  user_exists: "用户名已存在",
+  user_not_found: "用户不存在",
+  invalid_user: "用户信息不符合要求",
   scope_not_found: "当前范围不可访问",
   source_unavailable: "数据来源暂不可用",
   delegation_unavailable: "owner 用户委托尚未接通",
@@ -83,12 +103,11 @@ export function LiveApp() {
     [oidc, setOidc] = useState(false),
     [personal, setPersonal] = useState(false),
     [usernameRequired, setUsernameRequired] = useState(false),
+    [keyRequired, setKeyRequired] = useState(false),
     [username, setUsername] = useState(""),
     [password, setPassword] = useState(''),
     [loginBusy, setLoginBusy] = useState(false),
-    [page, setPage] = useState(
-      () => location.hash.match(/^#\/(\w+)/)?.[1] || "overview",
-    ),
+    [page, setPage] = useState(pageFromLocation),
     [section, setSection] = useState("history"),
     [scope, setScope] = useState(""),
     [query, setQuery] = useState(defaultRequestQuery),
@@ -98,6 +117,7 @@ export function LiveApp() {
       () => localStorage.getItem("yeisme.live.theme") === "dark",
     ),
     [selected, setSelected] = useState<RequestProjection | null>(null),
+    [providerInspector, setProviderInspector] = useState<ProviderInspectorTarget | null>(null),
     [tab, setTab] = useState("概况"),
     [revision, setRevision] = useState(0),
     [data, setData] = useState<{
@@ -127,6 +147,7 @@ export function LiveApp() {
     setSession(null);
     setScope("");
     setSelected(null);
+    setProviderInspector(null);
     setData(null);
     setSummary(null);
     setOrg(null);
@@ -136,7 +157,7 @@ export function LiveApp() {
   }, []);
   useEffect(() => {
     const onHashChange = () => {
-      setPage(location.hash.match(/^#\/(\w+)/)?.[1] || "overview");
+      setPage(pageFromLocation());
       setSelected(null);
       setMobile(false);
     };
@@ -149,10 +170,10 @@ export function LiveApp() {
   }, [dark]);
   useEffect(() => {
     const c = new AbortController();
-    read<{ oidc: boolean; personal?: boolean; username_required?: boolean }>("/auth/methods", c.signal)
+    read<{ oidc: boolean; personal?: boolean; username_required?: boolean; key_required?: boolean }>("/auth/methods", c.signal)
       .then((v) => {
         if (c.signal.aborted) return;
-        setOidc(v.oidc); setPersonal(v.personal === true); setUsernameRequired(v.username_required === true);
+        setOidc(v.oidc); setPersonal(v.personal === true); setUsernameRequired(v.username_required === true); setKeyRequired(v.key_required === true);
       })
       .catch(() => {});
     read<Session>("/session", c.signal)
@@ -233,6 +254,7 @@ export function LiveApp() {
   };
   const navigate = (id: string, next?: string) => {
     setSelected(null);
+    setProviderInspector(null);
     setPage(id);
     if (next) setSection(next);
     setMobile(false);
@@ -240,11 +262,17 @@ export function LiveApp() {
   };
   const update = (value: RequestQuery) => {
     setSelected(null);
+    setProviderInspector(null);
     setCursors([]);
     setQuery({ ...value, cursor: undefined });
   };
   const selectedScope = session?.scopes.find((s) => s.id === scope),
     currentNav = navigation.find((n) => n.id === page) || navigation[0];
+  const handleProviderRun = useCallback((value: Run | null) => {
+    if (!value) return;
+    setSelected(null);
+    setProviderInspector({ kind: "run", value });
+  }, []);
   const rows = (current?.rows || []).filter((r) =>
     section === "queue"
       ? ["queued", "running", "unknown", "waiting_review"].includes(r.state)
@@ -445,9 +473,15 @@ export function LiveApp() {
     </div>
   );
   let content;
-  if (session && page === "services")
-    content = <ServiceDirectoryPage key={scope} scope={scope} revision={revision} onSessionExpired={expireSession} onTasks={(connection, project) => { location.hash = connection && project ? taskListHash(connection, project) : "#/tasks"; }} />;
-  else if (session?.task_connections && ['overview','tasks','assets'].includes(page))
+  if (session && page === "capabilities")
+    content = <ProviderCapabilitiesPage scope={scope} revision={revision} onOpen={(value) => { setSelected(null); setProviderInspector({ kind: "capability", value }); }} />;
+  else if (session && page === "provider_usage")
+    content = <ProviderUsagePage scope={scope} revision={revision} onOpen={(value) => { setSelected(null); setProviderInspector({ kind: "usage", value }); }} />;
+  else if (session && page === "creation")
+    content = <ProviderCreationPage scope={scope} session={session} revision={revision} onRun={handleProviderRun} />;
+  else if (session && page === "services")
+    content = <ServiceDirectoryPage key={scope} scope={scope} revision={revision} onSessionExpired={expireSession} onTasks={(connection, project) => { location.hash = connection && project ? taskListHash(connection, project) : "#/requests"; }} />;
+  else if (session?.task_connections && ['overview','requests','history','assets','approvals'].includes(page))
     content = <TaskMonitor viewState={taskViewState} key={scope + ":" + page} scope={scope} csrf={session.csrf} page={page} revision={revision} onSessionExpired={expireSession}/>;
   else if (page === "settings")
     content = (
@@ -489,6 +523,8 @@ export function LiveApp() {
         </div>
       </div>
     );
+  else if (page === "members" && session?.task_connections && session.role === "admin")
+    content = <PersonalUsersPage session={session} csrf={session.csrf} revision={revision} />;
   else if (page === "members" && session?.task_connections)
     content = <div className="space-y-5">
       <h2 className="text-xl font-semibold">个人工作区与权限</h2>
@@ -682,7 +718,7 @@ export function LiveApp() {
         </div>
       </>
     );
-  else if (page === "tasks")
+  else if (page === "tasks" || page === "requests" || page === "history")
     content = (
       <>
         <AdminTabs
@@ -969,7 +1005,7 @@ export function LiveApp() {
       }
     >
       <div className="content-layout">
-        <main className={"main page-" + page}>
+        <main className={"main v18-content page-" + page}>
           <h1 className="sr-only" tabIndex={-1}>
             {currentNav.label}
           </h1>
@@ -996,7 +1032,7 @@ export function LiveApp() {
                   try {
                     await read('/auth/personal', undefined, {
                       method: 'POST', headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ password, ...(usernameRequired ? { username } : {}) }),
+                      body: JSON.stringify({ ...(keyRequired ? { key: password } : { password }), ...(usernameRequired ? { username } : {}) }),
                     });
                     const next = await read<Session>('/session');
                     setSession(next); setScope(next.scopes[0]?.id || ''); setAuthState('ready');
@@ -1008,11 +1044,11 @@ export function LiveApp() {
                     <label className="block text-sm" htmlFor="personal-username">用户名</label>
                     <input id="personal-username" name="username" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} required maxLength={80} disabled={loginBusy} className="w-full rounded-lg border bg-background p-3" />
                   </>}
-                  <label className="block text-sm" htmlFor="personal-password">个人访问密码</label>
+                  <label className="block text-sm" htmlFor="personal-password">{keyRequired ? "管理员分发的访问 Key" : "个人访问密码"}</label>
                   <input id="personal-password" name="password" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required maxLength={1024} disabled={loginBusy} className="w-full rounded-lg border bg-background p-3" />
                   {['invalid_credentials', 'login_rate_limited', 'source_unavailable'].includes(authState) && <p role="alert" className="text-sm">{errorLabels[authState]}</p>}
                   <Button type="submit" variant="primary" disabled={loginBusy}>{loginBusy ? '正在登录' : '登录个人工作区'}</Button>
-                  <p className="text-xs text-muted-foreground">密码只用于此控制中心会话，不是 MCP 或 Provider 密钥。</p>
+                  <p className="text-xs text-muted-foreground">{keyRequired ? "Key 只用于控制中心登录；管理员创建后只显示一次。" : "密码只用于此控制中心会话，不是 MCP 或 Provider 密钥。"}</p>
                 </form>
               ) : oidc ? (
                 <a className="button primary" href={api + "/auth/login"}>
@@ -1187,6 +1223,13 @@ export function LiveApp() {
             </>
           )}
         </AdminPanel>
+      )}
+      {providerInspector && session && (
+        <ProviderInspector
+          target={providerInspector}
+          scope={selectedScope?.label || scope}
+          close={() => setProviderInspector(null)}
+        />
       )}
     </AppShell>
   );

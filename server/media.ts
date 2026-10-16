@@ -50,6 +50,23 @@ export class MediaBridge {
     try {
       const grant = await this.tasks.artifact(task, scope, ref, action);
       const handle = randomBytes(32).toString("base64url");
+      let mime = allowedMimes.has(grant.artifact.mime) ? grant.artifact.mime : "";
+      if (!mime) {
+        try {
+          const probe = await this.fetcher(grant.url, {
+            method: "HEAD",
+            redirect: "error",
+            signal: AbortSignal.timeout(10000),
+            headers: this.tasks.mediaHeaders(task, scope),
+          });
+          const candidate = probe.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() || "";
+          if (probe.ok && allowedMimes.has(candidate)) mime = candidate;
+          await probe.body?.cancel();
+        } catch {
+          // The owner may not implement HEAD. The transfer path will still
+          // validate the content type before returning any bytes.
+        }
+      }
       this.handles.set(handle, {
         session: session.id,
         scope: scope.id,
@@ -67,7 +84,7 @@ export class MediaBridge {
           "?scope=" +
           encodeURIComponent(scope.id),
         expires_at: new Date(this.handles.get(handle)!.expires).toISOString(),
-        mime: allowedMimes.has(grant.artifact.mime) ? grant.artifact.mime : "",
+        mime,
       };
     } finally {
       this.issuing--;

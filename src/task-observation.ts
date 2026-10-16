@@ -134,8 +134,12 @@ export function taskNeedsAttention(task: Pick<TaskSnapshot, "state">) {
 export interface TaskFilters {
   text: string;
   connection: string;
+  owner: string;
+  project: string;
   state: string;
   family: string;
+  modality: string;
+  results: string;
   from: string;
   through: string;
 }
@@ -146,9 +150,14 @@ export function filterTasks(tasks: TaskSnapshot[], filters: TaskFilters) {
   return tasks.filter((task) => {
     if (filters.connection && task.connection_id !== filters.connection)
       return false;
+    if (filters.owner && task.locator.owner !== filters.owner) return false;
+    if (filters.project && task.locator.project !== filters.project) return false;
     if (filters.state && task.state !== filters.state) return false;
     if (filters.family && task.locator.task_family !== filters.family)
       return false;
+    const resultCount = task.results?.length || 0;
+    if (filters.results === "yes" && resultCount === 0) return false;
+    if (filters.results === "no" && resultCount > 0) return false;
     if (
       needle &&
       ![

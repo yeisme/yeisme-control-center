@@ -72,6 +72,46 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
     throw new AuthError("task_scope_mismatch", 403);
   const p = v.progress || {},
     kind = ["count", "percent"].includes(p.kind) ? p.kind : "indeterminate";
+  const results = (Array.isArray(v.results) ? v.results : [])
+    .slice(0, 100)
+    .flatMap((a: unknown, index: number) => {
+      if (!a || typeof a !== "object" || !("ref" in a)) return [];
+      const value = a as Record<string, unknown>;
+      return typeof value.ref === "string" && value.ref.length <= 512
+        ? [{
+            ref: `artifact-${index}`,
+            name: safeText(value.name),
+            mime: safeText(value.mime, 100),
+            bytes: count(value.bytes),
+            state: safeText(value.state, 80),
+            width: count(value.width) ?? undefined,
+            height: count(value.height) ?? undefined,
+            duration_ms: count(value.duration_ms) ?? undefined,
+          }]
+        : [];
+    });
+  const allowedActions: TaskSnapshot["allowed_actions"] = (Array.isArray(v.allowed_actions) ? v.allowed_actions : [])
+    .flatMap((a: unknown): TaskSnapshot["allowed_actions"] => {
+      if (!a || typeof a !== "object" || !("action" in a)) return [];
+      const action = a.action;
+      if (action !== "cancel" && action !== "preview" && action !== "download") return [];
+      const contentBlocked = action !== "cancel" && c.allow_content !== true;
+      return [{
+        action,
+        enabled:
+          "enabled" in a && a.enabled === true &&
+          (action !== "cancel" || c.allow_cancel === true) &&
+          !contentBlocked,
+        reason: contentBlocked
+          ? "content_not_authorized"
+          : safeText("reason" in a ? a.reason : undefined, 200),
+      }];
+    });
+  if (c.allow_content === true && results.length > 0) {
+    for (const action of ["preview", "download"] as const)
+      if (!allowedActions.some((item) => item.action === action))
+        allowedActions.push({ action, enabled: true, reason: "owner_result_access_requested" });
+  }
   return {
     schema_version: "yeisme.task_observation.v1",
     locator: {
@@ -104,41 +144,8 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
         : undefined,
     parent_ref:
       typeof v.parent_ref === "string" ? safeText(v.parent_ref, 512) : null,
-    results: (Array.isArray(v.results) ? v.results : [])
-      .slice(0, 100)
-      .flatMap((a: unknown, index: number) => {
-        if (!a || typeof a !== "object" || !("ref" in a)) return [];
-        const value = a as Record<string, unknown>;
-        return typeof value.ref === "string" && value.ref.length <= 512
-          ? [{
-              ref: `artifact-${index}`,
-              name: safeText(value.name),
-              mime: safeText(value.mime, 100),
-              bytes: count(value.bytes),
-              state: safeText(value.state, 80),
-              width: count(value.width) ?? undefined,
-              height: count(value.height) ?? undefined,
-              duration_ms: count(value.duration_ms) ?? undefined,
-            }]
-          : [];
-      }),
-    allowed_actions: (Array.isArray(v.allowed_actions) ? v.allowed_actions : [])
-      .flatMap((a: unknown): TaskSnapshot["allowed_actions"] => {
-        if (!a || typeof a !== "object" || !("action" in a)) return [];
-        const action = a.action;
-        if (action !== "cancel" && action !== "preview" && action !== "download") return [];
-        const contentBlocked = action !== "cancel" && c.allow_content !== true;
-        return [{
-          action,
-          enabled:
-            "enabled" in a && a.enabled === true &&
-            (action !== "cancel" || c.allow_cancel === true) &&
-            !contentBlocked,
-          reason: contentBlocked
-            ? "content_not_authorized"
-            : safeText("reason" in a ? a.reason : undefined, 200),
-        }];
-      }),
+    results,
+    allowed_actions: allowedActions,
     coverage: v.coverage === "complete" ? "complete" : "partial",
   };
 }
@@ -641,7 +648,7 @@ export class TaskConnections {
     const artifact = task.results.find((item) => item.ref === `artifact-${artifactIndex}`);
     if (!sourceRef || !artifact) throw new AuthError("artifact_not_found", 404);
     const allowed = task.allowed_actions.find((item) => item.action === action);
-    if (!allowed?.enabled) throw new AuthError(allowed?.reason || "content_not_authorized", 403);
+    if (allowed && !allowed.enabled) throw new AuthError(allowed.reason || "content_not_authorized", 403);
     if (c.owner === "sonora" || c.owner === "scaena") {
       const grant = await this.call(c, "control_center.tasks.artifact_access", {
         task_ref: task.locator.task_ref,

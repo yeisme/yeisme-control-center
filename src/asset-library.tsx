@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import { Popover } from "./ui";
 import {
   ArrowRight,
+  AudioLines,
+  Image,
+  Video,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -14,15 +17,17 @@ import {
   Undo2,
   X,
 } from "./icons";
-import { Button, Empty, Field, Modal, Pick } from "./ui";
-import { ObjectBrowser, type BrowserItem } from "./finder";
+import { Button, Empty, Field, Modal, Pick, SearchBox } from "./ui";
+import type { BrowserItem } from "./finder";
+import { ExtendThumbnail } from "./extend-finder";
 import { DraftGuard } from "./workspace";
 import { LocalFilePreview } from "./local-file-preview";
-import { serviceById, type Asset, type Scenario } from "./data";
+import { assetContentLabels as contentLabels, projectName, serviceById, type Asset, type Scenario } from "./data";
 import {
   folderDescendants,
   folderMoveError,
   folderNameError,
+  filterLibraryAssets,
   type AssetFilters,
   type AssetLibraryState,
 } from "./asset-library-state";
@@ -45,6 +50,7 @@ interface Props {
   type: string;
   setType: (type: string) => void;
   query: string;
+  setQuery: (query: string) => void;
   clearQuery: () => void;
   view: ViewMode;
   selected: string | null;
@@ -63,7 +69,6 @@ const dragMime = "application/x-yeisme-library";
 export function AssetLibrary(props: Props) {
   const {
     assets,
-    items,
     state,
     setState,
     filters,
@@ -126,7 +131,7 @@ export function AssetLibrary(props: Props) {
       setDialog("create");
     });
   const nameFor = (id: string | null) =>
-    state.folders.find((f) => f.id === id)?.name || "全部产物";
+    state.folders.find((f) => f.id === id)?.name || "全部资产";
   const move = (
     subject: { kind: "asset" | "folder"; id: string },
     destination: string,
@@ -279,352 +284,330 @@ export function AssetLibrary(props: Props) {
           </div>
         );
       });
+  const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [tableView, setTableView] = useState<"list" | "grid">("list");
+  const [sortOrder, setSortOrder] = useState("date-desc");
+  const [page, setPage] = useState(1);
+  const [columns, setColumns] = useState({
+    producer: true,
+    project: true,
+    service: true,
+    review: true,
+    date: true,
+  });
+  const filteredAssets = filterLibraryAssets(assets, state, filters, type, query);
+  const sortedAssets = [...filteredAssets].sort((a, b) => {
+    const value = sortOrder.startsWith("name")
+      ? a.name.localeCompare(b.name, "zh-CN")
+      : a.date.localeCompare(b.date);
+    return sortOrder.endsWith("desc") ? -value : value;
+  });
+  const pageSize = 20;
+  const pageCount = Math.max(1, Math.ceil(sortedAssets.length / pageSize));
+  const visibleAssets = sortedAssets.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => {
+    setPage(1);
+  }, [
+    type,
+    query,
+    filters.folder,
+    filters.owner,
+    filters.status,
+    filters.producer,
+    filters.content,
+    filters.review,
+    filters.project,
+    filters.version,
+    filters.from,
+    filters.to,
+  ]);
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+  const itemFor = (asset: Asset): BrowserItem => ({
+    id: asset.id,
+    kind: "asset",
+    name: asset.name,
+    type: asset.type,
+    subtitle: asset.producer + " · " + asset.version,
+    status: contentLabels[asset.content],
+    image: asset.image ? "./media/" + asset.image : undefined,
+    detail: contentLabels[asset.content] + " · " + asset.review,
+    owner: asset.owner,
+  });
   const active = [
+    filters.folder !== "all" && {
+      label:
+        filters.folder === "favorites"
+          ? "已收藏"
+          : filters.folder === "unfiled"
+            ? "未归类"
+            : nameFor(filters.folder),
+      clear: () => setFilters({ ...filters, folder: "all" }),
+    },
     type !== "all" && { label: type, clear: () => setType("all") },
+    filters.producer !== "all" && {
+      label: "生产者：" + filters.producer,
+      clear: () => setFilters({ ...filters, producer: "all" }),
+    },
     filters.owner !== "all" && {
-      label: serviceById(filters.owner)?.name || filters.owner,
+      label: "服务：" + (serviceById(filters.owner)?.name || filters.owner),
       clear: () => setFilters({ ...filters, owner: "all" }),
     },
+    filters.content !== "all" && {
+      label: "内容：" + contentLabels[filters.content as Asset["content"]],
+      clear: () => setFilters({ ...filters, content: "all" }),
+    },
+    filters.review !== "all" && {
+      label: "审阅：" + filters.review,
+      clear: () => setFilters({ ...filters, review: "all" }),
+    },
+    filters.project !== "all" && {
+      label: "项目：" + projectName(filters.project),
+      clear: () => setFilters({ ...filters, project: "all" }),
+    },
     filters.status !== "all" && {
-      label: filters.status,
+      label: "状态：" + filters.status,
       clear: () => setFilters({ ...filters, status: "all" }),
     },
+    filters.version !== "all" && { label: "版本：" + filters.version, clear: () => setFilters({ ...filters, version: "all" }) },
+    filters.from && { label: "开始：" + filters.from, clear: () => setFilters({ ...filters, from: "" }) },
+    filters.to && { label: "结束：" + filters.to, clear: () => setFilters({ ...filters, to: "" }) },
     query && { label: "搜索：" + query, clear: clearQuery },
   ].filter((v): v is { label: string; clear: () => void } => !!v);
   const clear = props.clearFilters;
   const selectedAsset = assets.find((a) => a.id === props.selected);
   const currentFolder = state.folders.find((f) => f.id === filters.folder);
-  const folderPath: typeof state.folders = [];
-  let cursor = currentFolder;
-  while (cursor && !folderPath.some((f) => f.id === cursor!.id)) {
-    folderPath.unshift(cursor);
-    cursor = state.folders.find((f) => f.id === cursor!.parent);
-  }
   return (
     <section className="asset-library" data-od-id="generation-asset-workspace">
-      <div className="library-summary" data-od-id="asset-summary">
-        <span>
-          <strong>{assets.length}</strong> 项产物
-        </span>
-        <span>
-          <strong>{new Set(assets.map((a) => a.type)).size}</strong> 种格式
-        </span>
-        <span>
-          <strong>
-            {assets.filter((a) => a.state.startsWith("待")).length}
-          </strong>{" "}
-          项待确认
-        </span>
-        <Button
-          variant="primary"
-          data-od-id="create-folder"
-          onClick={startCreate}
-          disabled={!writable}
-        >
-          <FolderPlus size={16} />
-          新建目录
-        </Button>
-      </div>
-      <div className="library-shell">
-        <aside
-          className="library-directory"
-          aria-label="产物目录"
-          data-od-id="asset-directory"
-        >
-          <div className="directory-heading">
-            <strong>资源目录</strong>
+      <header className="asset-page-heading">
+        <div>
+          <span className="asset-page-eyebrow">当前授权范围</span>
+          <h2>资产与生产归因</h2>
+          <p>生产者、上传者与当前负责人分别保留。</p>
+        </div>
+        <div className="asset-page-actions">
+          <LocalFilePreview notify={notify} />
+          <Button data-od-id="asset-directory-toggle" onClick={() => setDirectoryOpen((value) => !value)}>
             <FolderOpen size={15} />
+            {directoryOpen ? "收起目录整理" : "目录整理"}
+          </Button>
+        </div>
+      </header>
+
+      {directoryOpen && (
+        <aside className="library-directory library-directory-drawer" aria-label="目录整理" data-od-id="asset-directory">
+          <div className="directory-heading">
+            <strong>目录整理</strong>
+            <Button disabled={!writable} onClick={startCreate}><FolderPlus size={15} />新建目录</Button>
           </div>
-          <button
-            className="library-shortcut"
-            data-selected={filters.folder === "all"}
-            data-drop={dropTarget === "root"}
-            onClick={() => setFilters({ ...filters, folder: "all" })}
-            {...dropProps("root")}
-          >
-            <Layers size={16} />
-            <span>全部产物</span>
-            <small>{assets.length}</small>
+          <button className="library-shortcut" data-selected={filters.folder === "all"} data-drop={dropTarget === "root"} onClick={() => setFilters({ ...filters, folder: "all" })} {...dropProps("root")}>
+            <Layers size={16} /><span>全部资产</span><small>{assets.length}</small>
           </button>
-          <button
-            className="library-shortcut"
-            data-selected={filters.folder === "favorites"}
-            onClick={() => setFilters({ ...filters, folder: "favorites" })}
-          >
-            <Star size={16} />
-            <span>已收藏</span>
-            <small>
-              {assets.filter((a) => state.favorites.includes(a.id)).length}
-            </small>
+          <button className="library-shortcut" data-selected={filters.folder === "favorites"} onClick={() => setFilters({ ...filters, folder: "favorites" })}>
+            <Star size={16} /><span>已收藏</span><small>{assets.filter((a) => state.favorites.includes(a.id)).length}</small>
           </button>
-          <button
-            className="library-shortcut"
-            data-selected={filters.folder === "unfiled"}
-            onClick={() => setFilters({ ...filters, folder: "unfiled" })}
-          >
-            <Folder size={16} />
-            <span>未归类</span>
-            <small>{assets.filter((a) => !state.locations[a.id]).length}</small>
+          <button className="library-shortcut" data-selected={filters.folder === "unfiled"} onClick={() => setFilters({ ...filters, folder: "unfiled" })}>
+            <Folder size={16} /><span>未归类</span><small>{assets.filter((a) => !state.locations[a.id]).length}</small>
           </button>
           <div className="directory-divider" />
           <div className="directory-subheading">我的目录</div>
           {folderRows(null)}
           {currentFolder && (
-            <Button
-              className="directory-move"
-              disabled={!writable}
-              onClick={() =>
-                props.guard(() => {
-                  setMoveSubject({ kind: "folder", id: currentFolder.id });
-                  setTarget("root");
-                  setFormError("");
-                  setDialog("move");
-                })
-              }
-            >
-              移动此目录
-              <ArrowRight size={14} />
+            <Button className="directory-move" disabled={!writable} onClick={() => props.guard(() => {
+              setMoveSubject({ kind: "folder", id: currentFolder.id });
+              setTarget("root");
+              setFormError("");
+              setDialog("move");
+            })}>
+              移动此目录 <ArrowRight size={14} />
             </Button>
           )}
-          <p className="directory-hint">
-            <GripVertical size={15} />
-            拖动产物或目录以整理位置；也可使用“移动到”。
-          </p>
-          <p className="directory-scope">仅当前演示会话，不改变领域归属。</p>
+          <p className="directory-hint"><GripVertical size={15} />拖动资产或目录以整理位置；也可使用“移动到”。</p>
+          <p className="directory-scope">目录整理只改变当前演示会话的位置。</p>
         </aside>
-        <div className="library-content">
-          <div className="library-breadcrumb" data-od-id="asset-breadcrumb">
-            <button onClick={() => setFilters({ ...filters, folder: "all" })}>
-              产物库
-            </button>
-            {folderPath.map((f) => (
-              <span key={f.id}>
-                <ChevronRight size={13} />
-                <button
-                  onClick={() => setFilters({ ...filters, folder: f.id })}
-                >
-                  {f.name}
-                </button>
-              </span>
-            ))}
-            {!currentFolder && (
-              <span>
-                <ChevronRight size={13} />
-                {
-                  { all: "全部产物", favorites: "已收藏", unfiled: "未归类" }[
-                    filters.folder
-                  ]
-                }
-              </span>
-            )}
+      )}
+
+      <div className="asset-v17-surface">
+        <div className="asset-view-controls" data-od-id="asset-view-controls">
+          <div className="asset-view-toggle" role="group" aria-label="资产显示方式">
+            <button type="button" className={tableView === "list" ? "active" : ""} aria-label="列表视图" aria-pressed={tableView === "list"} onClick={() => setTableView("list")}>列表</button>
+            <button type="button" className={tableView === "grid" ? "active" : ""} aria-label="图标视图" aria-pressed={tableView === "grid"} onClick={() => setTableView("grid")}>网格</button>
           </div>
-          <div className="library-filters" data-od-id="asset-filters">
-            <Pick
-              label="资产类型"
-              value={type}
-              onChange={setType}
-              options={[
-                { value: "all", label: "全部类型" },
-                ...["图像", "视频", "音频", "文稿", "文件"].map((x) => ({
-                  value: x,
-                  label: x,
-                })),
-              ]}
-            />
-            <Popover.Root>
-              <Popover.Trigger
-                className="button"
-                data-od-id="advanced-asset-filters"
-              >
-                <SlidersHorizontal size={15} />
-                筛选
-                {active.length > 0 && (
-                  <span className="filter-count">{active.length}</span>
-                )}
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="library-filter-popover"
-                  sideOffset={8}
-                  align="start"
-                  collisionPadding={16}
-                >
-                  <h3>组合筛选</h3>
-                  <p>所有条件同时生效，结果即时更新。</p>
-                  <Field label="生成来源">
-                    <Pick
-                      label="生成来源"
-                      value={filters.owner}
-                      onChange={(owner) => setFilters({ ...filters, owner })}
-                      options={[
-                        { value: "all", label: "全部来源" },
-                        ...Array.from(new Set(assets.map((a) => a.owner))).map(
-                          (id) => ({
-                            value: id,
-                            label: serviceById(id)?.name || id,
-                          }),
-                        ),
-                      ]}
-                    />
-                  </Field>
-                  <Field label="产物状态">
-                    <Pick
-                      label="产物状态"
-                      value={filters.status}
-                      onChange={(status) => setFilters({ ...filters, status })}
-                      options={[
-                        { value: "all", label: "全部状态" },
-                        ...Array.from(new Set(assets.map((a) => a.state))).map(
-                          (s) => ({ value: s, label: s }),
-                        ),
-                      ]}
-                    />
-                  </Field>
-                  <div className="filter-footer">
-                    <button onClick={clear}>重置条件</button>
-                    <Popover.Close className="button">完成</Popover.Close>
-                  </div>
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-            <LocalFilePreview notify={notify} />
-            <span className="library-result-count" role="status">
-              {items.length} 项结果
-            </span>
-          </div>
-          {!!active.length && (
-            <div className="library-active-filters">
-              {active.map((chip) => (
-                <button
-                  key={chip.label}
-                  onClick={chip.clear}
-                  aria-label={"移除筛选 " + chip.label}
-                >
-                  {chip.label}
-                  <X size={12} />
-                </button>
-              ))}
-              <button onClick={clear}>清除全部</button>
-            </div>
-          )}
-          {!!selectedAsset && (
-            <div
-              className="library-selection"
-              data-od-id="asset-selection-actions"
-            >
-              <span>已选择 1 项</span>
-              <Button
-                disabled={!writable}
-                onClick={() =>
-                  props.guard(() => {
-                    setMoveSubject({ kind: "asset", id: selectedAsset.id });
-                    setTarget(state.locations[selectedAsset.id] || "root");
-                    setFormError("");
-                    setDialog("move");
-                  })
-                }
-              >
-                <Folder size={14} />
-                移动到
-              </Button>
-              <Button
-                onClick={() => {
-                  const has = state.favorites.includes(selectedAsset.id);
-                  setState({
-                    ...state,
-                    favorites: has
-                      ? state.favorites.filter((id) => id !== selectedAsset.id)
-                      : [...state.favorites, selectedAsset.id],
-                  });
-                  notify(has ? "已取消收藏。" : "已加入当前演示会话的收藏。");
-                }}
-              >
-                <Star size={14} />
-                {state.favorites.includes(selectedAsset.id)
-                  ? "取消收藏"
-                  : "收藏"}
-              </Button>
-              <Button
-                onClick={() =>
-                  props.onInfo(items.find((i) => i.id === selectedAsset.id)!)
-                }
-              >
-                查看详情
-                <ArrowRight size={14} />
-              </Button>
-            </div>
-          )}
-          <div
-            onDragStart={(event) => {
-              const element = (
-                event.target as HTMLElement
-              ).closest<HTMLElement>("[data-object-id]");
-              const id = element?.dataset.objectId;
-              if (writable && id && assets.some((a) => a.id === id)) {
-                const subject = { kind: "asset" as const, id };
-                setDragged(subject);
-                event.dataTransfer.setData(dragMime, JSON.stringify(subject));
-                event.dataTransfer.effectAllowed = "move";
-              }
-            }}
-            onDragEnd={() => {
-              setDragged(null);
-              setDropTarget(null);
-            }}
-          >
-            <ObjectBrowser
-              items={items}
-              view={props.view}
-              selected={props.selected}
-              onSelect={props.onSelect}
-              onOpen={props.onOpen}
-              onQuickLook={props.onQuickLook}
-              onInfo={props.onInfo}
-              label="资产浏览器"
-              draggable={writable}
-            />
-          </div>
-          {!items.length && (
-            <Empty
-              title="这里还没有匹配的产物"
-              description={
-                assets.length
-                  ? "试试其他目录，或清除筛选条件。现有产物不会被删除。"
-                  : "当前授权范围暂无产物，切换项目或环境后再查看。"
-              }
-              action={
-                active.length ? (
-                  <Button onClick={clear}>清除筛选</Button>
-                ) : undefined
-              }
-            />
-          )}
-          <div className="library-footnote">
-            固定版本 · 保留来源 · 权利由原服务管理
-          </div>
+          <Pick label="资产排序" value={sortOrder} onChange={setSortOrder} options={[
+            { value: "date-desc", label: "日期：最新在前" },
+            { value: "date-asc", label: "日期：最早在前" },
+            { value: "name-asc", label: "名称：升序" },
+            { value: "name-desc", label: "名称：降序" },
+          ]} />
+          <Popover.Root>
+            <Popover.Trigger className="button" data-od-id="asset-columns" aria-label="显示列">显示列</Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content className="library-filter-popover asset-columns-popover" sideOffset={8} align="end" collisionPadding={16}>
+                <h3>显示列</h3>
+                <p>名称、固定版本与内容状态始终显示。</p>
+                {([
+                  ["producer", "生产者"],
+                  ["project", "项目"],
+                  ["service", "服务"],
+                  ["review", "审阅"],
+                  ["date", "日期"],
+                ] as const).map(([key, label]) => (
+                  <label className="asset-column-option" key={key}>
+                    <input type="checkbox" checked={columns[key]} data-column={key} onChange={(event) => setColumns({ ...columns, [key]: event.target.checked })} />
+                    {label}
+                  </label>
+                ))}
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+          <span className="library-result-count" role="status">{sortedAssets.length} 条 · 每页 {pageSize} 条</span>
         </div>
+
+        <div className="library-filters asset-v17-filters" data-od-id="asset-filters">
+          <SearchBox label="搜索资产" placeholder="搜索资产或来源" value={query} onChange={props.setQuery} />
+          <Pick label="生产用户" value={filters.producer} onChange={(producer) => setFilters({ ...filters, producer })} options={[
+            { value: "all", label: "全部生产者" },
+            ...Array.from(new Set(assets.map((a) => a.producer))).map((producer) => ({ value: producer, label: producer })),
+          ]} />
+          <Pick label="媒体类型" value={type} onChange={setType} options={[
+            { value: "all", label: "全部媒体" },
+            ...["图像", "视频", "音频", "文稿", "文件"].map((value) => ({ value, label: value })),
+          ]} />
+          <Pick label="内容可用性" value={filters.content} onChange={(content) => setFilters({ ...filters, content })} options={[
+            { value: "all", label: "全部内容状态" },
+            ...Object.entries(contentLabels).map(([value, label]) => ({ value, label })),
+          ]} />
+          <Popover.Root>
+            <Popover.Trigger className="button" data-od-id="advanced-asset-filters"><SlidersHorizontal size={15} />高级筛选{active.length > 0 && <span className="filter-count">{active.length}</span>}</Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content className="library-filter-popover asset-advanced-popover" sideOffset={8} align="start" collisionPadding={16}>
+                <h3>高级筛选</h3><p>所有条件同时生效，结果即时更新。</p>
+                <Field label="服务">
+                  <Pick label="服务" value={filters.owner} onChange={(owner) => setFilters({ ...filters, owner })} options={[
+                    { value: "all", label: "全部服务" },
+                    ...Array.from(new Set(assets.map((a) => a.owner))).map((id) => ({ value: id, label: serviceById(id)?.name || id })),
+                  ]} />
+                </Field>
+                <Field label="项目">
+                  <Pick label="项目" value={filters.project} onChange={(project) => setFilters({ ...filters, project })} options={[
+                    { value: "all", label: "全部项目" },
+                    ...Array.from(new Set(assets.map((a) => a.project))).map((id) => ({ value: id, label: projectName(id) })),
+                  ]} />
+                </Field>
+                <Field label="审阅状态">
+                  <Pick label="审阅状态" value={filters.review} onChange={(review) => setFilters({ ...filters, review })} options={[
+                    { value: "all", label: "全部审阅状态" },
+                    ...Array.from(new Set(assets.map((a) => a.review))).map((value) => ({ value, label: value })),
+                  ]} />
+                </Field>
+                <Field label="固定版本"><Pick label="固定版本" value={filters.version} onChange={(version) => setFilters({ ...filters, version })} options={[{value:"all",label:"全部版本"}, ...Array.from(new Set(assets.map(a => a.version))).sort().map(value => ({value,label:value}))]} /></Field>
+                <Field label="开始日期"><input type="date" value={filters.from} onChange={e => setFilters({...filters, from:e.target.value})} /></Field>
+                <Field label="结束日期"><input type="date" value={filters.to} onChange={e => setFilters({...filters, to:e.target.value})} /></Field>
+                {filters.from && filters.to && filters.from > filters.to && <p role="alert">结束日期不能早于开始日期。</p>}
+                <div className="filter-footer"><button onClick={clear}>清空筛选</button><Popover.Close className="button">完成</Popover.Close></div>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+        </div>
+
+        {!!active.length && (
+          <div className="library-active-filters filter-chips" data-od-id="asset-filter-chips">
+            {active.map((chip) => (
+              <button key={chip.label} onClick={chip.clear} aria-label={"移除筛选 " + chip.label}>{chip.label}<X size={12} /></button>
+            ))}
+            <button onClick={clear}>清除全部</button>
+          </div>
+        )}
+
+        {directoryOpen && !!selectedAsset && (
+          <div className="library-selection" data-od-id="asset-selection-actions">
+            <span>已选择 1 项</span>
+            <Button disabled={!writable} onClick={() => props.guard(() => {
+              setMoveSubject({ kind: "asset", id: selectedAsset.id });
+              setTarget(state.locations[selectedAsset.id] || "root");
+              setFormError("");
+              setDialog("move");
+            })}><Folder size={14} />移动到</Button>
+            <Button onClick={() => {
+              const has = state.favorites.includes(selectedAsset.id);
+              setState({ ...state, favorites: has ? state.favorites.filter((id) => id !== selectedAsset.id) : [...state.favorites, selectedAsset.id] });
+              notify(has ? "已取消收藏。" : "已加入当前演示会话的收藏。");
+            }}><Star size={14} />{state.favorites.includes(selectedAsset.id) ? "取消收藏" : "收藏"}</Button>
+          </div>
+        )}
+
+        {tableView === "list" ? (
+          <div className="asset-data-table-wrap">
+            <table className="asset-data-table" data-od-id="asset-data-table">
+              <caption className="sr-only">获授权资产列表</caption>
+              <thead><tr>
+                <th>资产名称</th><th>版本</th>
+                {columns.producer && <th className="col-producer">生产者</th>}
+                {columns.project && <th className="col-project">项目</th>}
+                {columns.service && <th className="col-service">服务</th>}
+                <th>内容状态</th>
+                {columns.review && <th className="col-review">审阅</th>}
+                {columns.date && <th className="col-date">日期</th>}
+                <th><span className="sr-only">详情</span></th>
+              </tr></thead>
+              <tbody>
+                {visibleAssets.map((asset) => (
+                  <tr key={asset.id} data-asset-id={asset.id} data-object-id={asset.id} data-selected={props.selected === asset.id} draggable={writable && directoryOpen}
+                    onDragStart={(e) => { const subject = {kind: "asset" as const, id:asset.id}; setDragged(subject); e.dataTransfer.setData(dragMime, JSON.stringify(subject)); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragEnd={() => {setDragged(null); setDropTarget(null);}}
+                    onClick={() => directoryOpen ? props.onSelect(itemFor(asset)) : props.onInfo(itemFor(asset))}>
+                    <td><div className="asset-name-cell">
+                      {asset.image && asset.content === "available" ? <ExtendThumbnail src={"./media/" + asset.image} small /> : <span className={"asset-type-icon " + asset.content}>{asset.type === "音频" ? <AudioLines size={18} /> : asset.type === "视频" ? <Video size={18} /> : <Image size={18} />}</span>}
+                      <div><button className="asset-name-button" onClick={e => {e.stopPropagation(); props.onInfo(itemFor(asset));}}>{asset.name}</button><small>{asset.type}</small></div>
+                    </div></td>
+                    <td><span className="version-tag">{asset.version}</span></td>
+                    {columns.producer && <td className="col-producer">{asset.producer}</td>}
+                    {columns.project && <td className="col-project">{projectName(asset.project)}</td>}
+                    {columns.service && <td className="col-service">{serviceById(asset.owner)?.name || asset.owner}</td>}
+                    <td><span className={"asset-content-badge " + asset.content}>{contentLabels[asset.content]}</span></td>
+                    {columns.review && <td className="col-review">{asset.review}</td>}
+                    {columns.date && <td className="col-date">{asset.date}</td>}
+                    <td><button type="button" className="asset-row-detail" aria-label={"查看资产 " + asset.name} onClick={e => {e.stopPropagation(); props.onInfo(itemFor(asset));}}><ChevronRight size={15} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="asset-v17-grid">
+            {visibleAssets.map((asset) => (
+              <article key={asset.id} className="asset-v17-card" data-asset-id={asset.id} draggable={writable && directoryOpen}
+                    onDragStart={(e) => { const subject = {kind: "asset" as const, id:asset.id}; setDragged(subject); e.dataTransfer.setData(dragMime, JSON.stringify(subject)); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragEnd={() => {setDragged(null); setDropTarget(null);}}
+                    onClick={() => directoryOpen ? props.onSelect(itemFor(asset)) : props.onInfo(itemFor(asset))}>
+                {asset.image && asset.content === "available" ? <ExtendThumbnail src={"./media/" + asset.image} /> : <div className="asset-v17-placeholder"><strong>{asset.type === "音频" ? <AudioLines /> : asset.type === "视频" ? <Video /> : <Image />}</strong><span>{contentLabels[asset.content]}</span></div>}
+                <div className="asset-v17-card-copy"><small>{serviceById(asset.owner)?.name || asset.owner} · {asset.version}</small><h2><button onClick={e => {e.stopPropagation(); props.onInfo(itemFor(asset));}}>{asset.name}</button></h2><p>生产者：{asset.producer}</p><p>{contentLabels[asset.content]} · {asset.review}</p></div>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {!visibleAssets.length && (
+          <Empty title="当前授权和筛选条件下没有资源" description={assets.length ? "没有符合当前条件的资产；没有产物的请求仍可在请求页查询。" : "当前授权范围暂无资产，切换项目或环境后再查看。"} action={active.length ? <Button onClick={clear}>清空筛选</Button> : undefined} />
+        )}
+
+        <div className="asset-pagination" aria-label="资产分页">
+          <span>{sortedAssets.length ? (page - 1) * pageSize + 1 + "–" + Math.min(page * pageSize, sortedAssets.length) + " / " + sortedAssets.length : "0 条"}</span>
+          <div><button type="button" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {page} / {pageCount} 页</span><button type="button" disabled={page >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>下一页</button></div>
+        </div>
+        <div className="library-footnote">固定版本 · 保留来源 · 生产归因、内容权限与审阅状态分别记录</div>
       </div>
+
       {undo && (
         <div className="library-undo" role="status">
           <span>{undo.text}</span>
-          <Button
-            disabled={!writable}
-            onClick={() => {
-              setState({
-                ...state,
-                folders: undo.folders,
-                locations: undo.locations,
-              });
-              setUndo(null);
-              notify("已撤销上一次目录移动。");
-            }}
-          >
-            <Undo2 size={15} />
-            撤销
-          </Button>
-          <button aria-label="关闭移动回执" onClick={() => setUndo(null)}>
-            <X size={15} />
-          </button>
+          <Button disabled={!writable} onClick={() => {
+            setState({ ...state, folders: undo.folders, locations: undo.locations });
+            setUndo(null);
+            notify("已撤销上一次目录移动。");
+          }}><Undo2 size={15} />撤销</Button>
+          <button aria-label="关闭移动回执" onClick={() => setUndo(null)}><X size={15} /></button>
         </div>
       )}
       <Modal
@@ -737,7 +720,7 @@ export function AssetLibrary(props: Props) {
                 setFormError("");
               }}
               options={[
-                { value: "root", label: "产物库（根目录）" },
+                { value: "root", label: "资产（根目录）" },
                 ...state.folders
                   .filter(
                     (f) =>

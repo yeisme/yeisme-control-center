@@ -60,15 +60,31 @@ export function RightWorkspace({
   live?: boolean;
   compact?: boolean;
 }) {
-  const [pinned, setPinned] = useState(false);
+  const [pinned, setPinned] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("yeisme:v17:panels") || "{}").pinned === true;
+    } catch {
+      return false;
+    }
+  });
   const [expanded, setExpanded] = useState(false);
-  const [width, setWidth] = useState(480);
+  const [width, setWidth] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("yeisme:v17:panels") || "{}");
+      return Number(saved[editing ? "form" : "detail"]) || (editing ? 520 : 360);
+    } catch {
+      return editing ? 520 : 360;
+    }
+  });
   const [viewport, setViewport] = useState(window.innerWidth);
   const [layoutWidth, setLayoutWidth] = useState(window.innerWidth - 232);
   const maxDockWidth = Math.min(640, layoutWidth - 560 - 48);
-  const canPin = viewport >= 1280 && maxDockWidth >= 400;
-  const effectiveWidth = Math.max(400, Math.min(width, maxDockWidth));
+  const minPanelWidth = editing ? 520 : 360;
+  const canPin = viewport >= 1440 && maxDockWidth >= minPanelWidth;
+  const effectiveWidth = Math.max(minPanelWidth, Math.min(width, maxDockWidth));
+  const floatingWidth = Math.max(minPanelWidth, Math.min(width, 640));
   const docked = pinned && !expanded && canPin;
+  const floating = viewport > 700 && !expanded;
   const reducedMotion = useReducedMotion();
   const panelMotion = useSpring({
     opacity: open ? 1 : 0,
@@ -91,6 +107,15 @@ export function RightWorkspace({
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, []);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("yeisme:v17:panels") || "{}");
+      localStorage.setItem(
+        "yeisme:v17:panels",
+        JSON.stringify({ ...saved, pinned, [editing ? "form" : "detail"]: width }),
+      );
+    } catch {}
+  }, [pinned, width, editing]);
   useLayoutEffect(() => {
     if (!open || !docked) return;
     document.documentElement.style.setProperty(
@@ -111,7 +136,7 @@ export function RightWorkspace({
     const move = (e: PointerEvent) =>
       setWidth(
         Math.max(
-          400,
+          minPanelWidth,
           Math.min(640, initialWidth + origin - e.clientX, maxDockWidth),
         ),
       );
@@ -126,7 +151,7 @@ export function RightWorkspace({
   const panel = useRef<HTMLElement | null>(null);
   const body = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
-    if (open && editing) {
+    if (open && editing && !floating) {
       const frame = requestAnimationFrame(() =>
         panel.current
           ?.querySelector<HTMLElement>("input:not([type=checkbox]),textarea")
@@ -237,12 +262,14 @@ export function RightWorkspace({
   );
   return (
     <Dialog.Root
-      modal={!docked}
+      modal={!docked && !floating && !expanded}
       open={open}
       onOpenChange={(value) => !value && close()}
     >
       <Dialog.Portal>
-        {!docked && <Dialog.Overlay className="workspace-overlay" />}
+        {!docked && !floating && !expanded && (
+          <Dialog.Overlay className="workspace-overlay" />
+        )}
         <Dialog.Content
           asChild
           onOpenAutoFocus={(event) => {
@@ -252,6 +279,7 @@ export function RightWorkspace({
               if (!panel.current?.contains(active))
                 returnFocus.current = active;
             }
+            if (floating) return;
             (
               panel.current?.querySelector<HTMLElement>(
                 editing ? "input:not([type=checkbox]),textarea,button" : "h2",
@@ -293,10 +321,10 @@ export function RightWorkspace({
             }
           }}
           onInteractOutside={(event) => {
-            if (docked) event.preventDefault();
+            if (docked || floating || expanded) event.preventDefault();
           }}
           onPointerDownOutside={(event) => {
-            if (docked) {
+            if (docked || floating || expanded) {
               event.preventDefault();
               return;
             }
@@ -326,39 +354,51 @@ export function RightWorkspace({
               opacity: panelMotion.opacity,
               transform: panelMotion.x.to((x) => `translateX(${x}px)`),
               ...(docked ? { width: effectiveWidth } : {}),
+              ...(floating
+                ? ({ "--floating-width": `${floatingWidth}px` } as React.CSSProperties)
+                : {}),
             }}
             aria-label="详情与上下文"
             aria-describedby={undefined}
             data-stage={stage}
             data-slot="sheet-content"
+            data-mode={
+              expanded
+                ? "workspace"
+                : docked
+                  ? "dock"
+                  : floating
+                    ? "float"
+                    : "modal"
+            }
           >
             {docked && (
-            <div
-              className="workspace-resizer"
-              role="separator"
-              aria-label="调整详情宽度"
-              aria-orientation="vertical"
-              aria-valuemin={400}
-              aria-valuemax={maxDockWidth}
-              aria-valuenow={effectiveWidth}
-              tabIndex={0}
-              onPointerDown={startResize}
-              onKeyDown={(e) => {
-                if (["ArrowLeft", "ArrowRight"].includes(e.key)) {
-                  e.preventDefault();
-                  setWidth((w) =>
-                    Math.max(
-                      400,
-                      Math.min(
-                        640,
-                        w + (e.key === "ArrowLeft" ? 16 : -16),
-                        maxDockWidth,
+              <div
+                className="workspace-resizer"
+                role="separator"
+                aria-label="调整详情宽度"
+                aria-orientation="vertical"
+                aria-valuemin={minPanelWidth}
+                aria-valuemax={maxDockWidth}
+                aria-valuenow={effectiveWidth}
+                tabIndex={0}
+                onPointerDown={startResize}
+                onKeyDown={(e) => {
+                  if (["ArrowLeft", "ArrowRight"].includes(e.key)) {
+                    e.preventDefault();
+                    setWidth((w) =>
+                      Math.max(
+                        minPanelWidth,
+                        Math.min(
+                          640,
+                          w + (e.key === "ArrowLeft" ? 16 : -16),
+                          maxDockWidth,
+                        ),
                       ),
-                    ),
-                  );
-                }
-              }}
-            />
+                    );
+                  }
+                }}
+              />
             )}
             {content}
           </animated.div>

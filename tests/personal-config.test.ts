@@ -31,9 +31,10 @@ describe("personal configuration CLI", () => {
     expect(JSON.parse(status.stdout)).toMatchObject({ username: "legacy-admin", role: "admin", password_configured: false, connections: [] });
   });
   it("rejects unsafe origins and malformed account identifiers before writing", () => {
-    for (const origin of ["http://10.10.1.101", "ftp://localhost", "https://control.example.test/path", "https://name:pass@control.example.test"]) {
+    for (const origin of ["http://10.10.1.101", "http://10.10.1.101:51874", "ftp://localhost", "https://control.example.test/path", "https://name:pass@control.example.test"]) {
       expect(run("init", join(dir, "unsafe.json"), origin, "test-admin").status).not.toBe(0);
     }
+    expect(run("init", join(dir, "lan.json"), "http://10.10.1.101:51873", "test-admin").status).toBe(0);
     expect(run("init", join(dir, "bad-user.json"), "https://control.example.test", "bad user").status).not.toBe(0);
   });
   it("toggles local content preference and reports it without secrets", () => {

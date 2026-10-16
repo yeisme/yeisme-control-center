@@ -1032,3 +1032,54 @@ fieldset.editor-scroll:disabled textarea {
 .workspace-footer:empty {
   display: none;
 }
+
+/* OpenDesign v17: details float by default; only an explicit pin docks them. */
+@media (min-width: 701px) {
+  .right-workspace.drawer[data-mode="float"] {
+    position: fixed;
+    inset: 64px 12px 12px auto;
+    width: var(--floating-width, 360px);
+    max-width: calc(100vw - 32px);
+    height: calc(100dvh - 76px);
+    max-height: calc(100dvh - 76px);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 6px 24px #10221b18;
+    z-index: 40;
+    overflow: hidden;
+  }
+  .right-workspace.drawer[data-mode="float"].editing {
+    width: var(--floating-width, 520px);
+  }
+  .right-workspace.drawer[data-mode="dock"] {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: var(--workspace-dock-width, 360px);
+    max-width: 640px;
+    height: 100dvh;
+    border-radius: 0;
+    box-shadow: none;
+    z-index: 45;
+  }
+  .right-workspace.drawer[data-mode="workspace"] {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    border-radius: 0;
+    box-shadow: none;
+    z-index: 101;
+  }
+}
+
+@media (max-width: 700px) {
+  .right-workspace.drawer[data-mode="modal"] {
+    inset: auto 0 0;
+    width: 100vw;
+    max-width: 100vw;
+    height: calc(100dvh - 20px);
+    max-height: calc(100dvh - 20px);
+    border-radius: 10px 10px 0 0;
+  }
+}

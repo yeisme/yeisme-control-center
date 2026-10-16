@@ -15,11 +15,25 @@ export interface AssetFilters {
   folder: string;
   owner: string;
   status: string;
+  producer: string;
+  content: string;
+  review: string;
+  project: string;
+  version: string;
+  from: string;
+  to: string;
 }
 export const emptyAssetFilters: AssetFilters = {
   folder: "all",
   owner: "all",
   status: "all",
+  producer: "all",
+  content: "all",
+  review: "all",
+  project: "all",
+  version: "all",
+  from: "",
+  to: "",
 };
 export const initialAssetLibrary = (): AssetLibraryState => ({
   folders: [
@@ -28,10 +42,10 @@ export const initialAssetLibrary = (): AssetLibraryState => ({
     { id: "writing", name: "文稿与内容", parent: null },
   ],
   locations: {
-    "demo:eikona:station-v3": "visual",
-    "demo:drivebridge:reference-pack": "visual",
-    "demo:sonora:coast-audio": "sound",
-    "demo:auctra:script-r6": "writing",
+    "asset-image": "visual",
+    "asset-denied": "visual",
+    "asset-audio": "sound",
+    "asset-missing": "writing",
   },
   notes: {},
   favorites: [],
@@ -102,13 +116,20 @@ export function filterLibraryAssets(
       (type === "all" || asset.type === type) &&
       (filters.owner === "all" || asset.owner === filters.owner) &&
       (filters.status === "all" || asset.state === filters.status) &&
+      (filters.producer === "all" || asset.producer === filters.producer) &&
+      (filters.content === "all" || asset.content === filters.content) &&
+      (filters.review === "all" || asset.review === filters.review) &&
+      (filters.project === "all" || asset.project === filters.project) &&
+      (filters.version === "all" || asset.version === filters.version) &&
+      (!filters.from || asset.date >= filters.from) &&
+      (!filters.to || asset.date <= filters.to) &&
       (filters.folder === "all" ||
         (filters.folder === "favorites"
           ? state.favorites.includes(asset.id)
           : filters.folder === "unfiled"
             ? !state.locations[asset.id]
             : nested.has(state.locations[asset.id]))) &&
-      `${asset.name} ${asset.id} ${asset.owner} ${asset.source} ${state.notes[asset.id] || ""}`
+      `${asset.name} ${asset.id} ${asset.owner} ${asset.producer} ${asset.uploader} ${asset.source} ${state.notes[asset.id] || ""}`
         .toLocaleLowerCase()
         .includes(term),
   );

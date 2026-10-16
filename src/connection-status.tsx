@@ -30,20 +30,26 @@ export function ConnectionCards({ connections, now = Date.now(), onOpen }: {
   return <section className="connection-cards task-connections" aria-label="核心服务接入">
     {owners.flatMap(owner => {
       const items = connections.filter(c => c.owner === owner);
-      return (items.length ? items : [{ id: owner, owner, label: owner[0].toUpperCase() + owner.slice(1),
-        instance_id: '', project: '', environment: '', state: 'not_configured', observed_at: '' }]).map(c =>
-        <article className="connection-card" key={c.id}>
-          <div className="connection-card-heading"><span className="connection-icon"><Server size={18}/></span>
-            <strong>{c.label}</strong><Badge state={c.state === 'ready' ? 'succeeded' : 'unknown'} label={connectionLabel(c.state)}/></div>
-          <p className="text-sm text-muted-foreground">{c.instance_id ? `${c.environment || '环境未提供'} · ${c.instance_id} · ${c.project}` : '等待登记项目观测连接'}</p>
-          <p className="text-sm text-muted-foreground">{contentStateMessage('runtime' in c ? c.runtime?.content : undefined)}</p>
-          <div className="connection-card-footer"><small>{c.observed_at
-            ? `${now - Date.parse(c.observed_at) > 30000 ? '上次成功观察' : '观察于'} ${new Date(c.observed_at).toLocaleTimeString()}`
-            : '尚无成功观察'}</small>
-            {onOpen ? <Button variant="ghost" size="sm" onClick={() => onOpen(owner)}>查看接入 <ArrowRight size={14}/></Button>
-              : c.project && <a href={taskListHash(c.id, c.project)}>查看任务 <ArrowRight size={14}/></a>}
-          </div>
-        </article>);
+      const ready = items.filter(c => c.state === 'ready').length;
+      const supported = items.filter(c => c.runtime?.content === 'supported').length;
+      const latest = items.map(c => c.observed_at).filter(Boolean).sort().at(-1) || '';
+      const label = owner[0].toUpperCase() + owner.slice(1);
+      const status = !items.length ? '未配置连接' : ready === items.length ? '任务读取可用' : ready ? `${ready}/${items.length} 个范围可用` : connectionLabel(items[0].state);
+      return <article className="connection-card connection-card-grouped" key={owner}>
+        <div className="connection-card-heading"><span className="connection-icon"><Server size={18}/></span>
+          <strong>{label}</strong><Badge state={ready === items.length && items.length > 0 ? 'succeeded' : 'unknown'} label={status}/></div>
+        <p className="text-sm text-muted-foreground">{items.length ? `${items.length} 个项目范围 · ${supported}/${items.length} 个范围支持结果内容读取` : '等待登记项目观测连接'}</p>
+        {items.length > 0 && <div className="connection-project-list" aria-label={`${label}项目范围`}>
+          {items.map(c => <span className="connection-project-chip" key={c.id} title={c.project}>{c.project}</span>)}
+        </div>}
+        <p className="text-sm text-muted-foreground">{supported === items.length && items.length > 0 ? '来源合同支持内容读取；预览和下载仍需逐结果独立授权。' : contentStateMessage(items[0]?.runtime?.content)}</p>
+        <div className="connection-card-footer"><small>{latest
+          ? `${now - Date.parse(latest) > 30000 ? '上次成功观察' : '观察于'} ${new Date(latest).toLocaleTimeString()}`
+          : '尚无成功观察'}</small>
+          {onOpen ? <Button variant="ghost" size="sm" onClick={() => onOpen(owner)}>查看 {items.length || ''} 个接入 <ArrowRight size={14}/></Button>
+            : items[0]?.project && <a href={taskListHash(items[0].id, items[0].project)}>查看任务 <ArrowRight size={14}/></a>}
+        </div>
+      </article>;
     })}
   </section>;
 }

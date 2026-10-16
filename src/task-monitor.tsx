@@ -68,7 +68,8 @@ export function TaskMonitor({
 }) {
   const viewKey = scope + ":" + page;
   const saved = viewState?.current.get(viewKey);
-  const [mode, setMode] = useState<"active" | "history">(saved?.mode || (page === "assets" ? "history" : "active")),
+  const pageMode: "active" | "history" = page === "history" || page === "assets" ? "history" : "active";
+  const [mode, setMode] = useState<"active" | "history">(saved?.mode || pageMode),
     [data, setData] = useState<TaskPage | null>(null),
     [selected, setSelected] = useState<TaskSnapshot | null>(null),
     [error, setError] = useState(""),
@@ -87,11 +88,21 @@ export function TaskMonitor({
     [cancelBusy, setCancelBusy] = useState(false),
     [cancelUnknown, setCancelUnknown] = useState(false),
     [cancelMessage, setCancelMessage] = useState("");
+  const effectiveMode: "active" | "history" =
+    page === "history" || page === "assets"
+      ? "history"
+      : page === "requests"
+        ? "active"
+        : mode;
   const emptyFilters: TaskFilters = {
     text: "",
     connection: "",
+    owner: "",
+    project: "",
     state: "",
     family: "",
+    modality: "",
+    results: "",
     from: "",
     through: "",
   };
@@ -214,7 +225,7 @@ export function TaskMonitor({
         const [tasksRead, connectionsRead] = await Promise.allSettled([
           page === "overview"
             ? Promise.all([readMode("active"), readMode("history")]).then(([activePage, historyPage]) => combineTaskPages(activePage, historyPage))
-            : readMode(mode),
+            : readMode(effectiveMode),
           readObservation<{ connections: TaskPage["connections"] }>("/connections?" + search),
         ]);
         if (controller.signal.aborted) return;
@@ -255,7 +266,7 @@ export function TaskMonitor({
         );
         for (const [key, prior] of known.current)
           if (denied.has(prior.connection_id || "")) known.current.delete(key);
-        if (mode === "active") {
+        if (effectiveMode === "active") {
           const missing = [...known.current.values()]
             .filter(
               (t) =>
@@ -335,7 +346,7 @@ export function TaskMonitor({
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [scope, mode, page, refresh, revision, onSessionExpired]);
+  }, [scope, mode, effectiveMode, page, refresh, revision, onSessionExpired]);
   useEffect(() => {
     const changed = () => {
       setSelected(null);
@@ -540,7 +551,7 @@ export function TaskMonitor({
               ? "服务任务接入"
               : page === "overview"
                 ? "运行摘要"
-                : page === "assets" ? "任务结果与资产引用" : "任务与执行进展"}
+                : page === "assets" ? "任务结果与资产引用" : page === "history" ? "历史任务" : page === "requests" ? "正在请求" : "任务与执行进展"}
           </h2>
           <p className="text-sm text-muted-foreground">
             来自已授权 MCP 实例；不触发生成或自动重试。
@@ -652,7 +663,7 @@ export function TaskMonitor({
             )}
           </section>
         )}
-        <ConnectionCards connections={data?.connections || []} now={now} onOpen={page === "overview" ? owner => { location.hash = "#/services?owner=" + encodeURIComponent(owner); } : undefined} />
+        {page === "overview" && <ConnectionCards connections={data?.connections || []} now={now} onOpen={owner => { location.hash = "#/services?owner=" + encodeURIComponent(owner); }} />}
       </div>
       {page === "overview" && (
         <div className="task-result-grid">
@@ -700,7 +711,7 @@ export function TaskMonitor({
         />
       )}
       {page === "overview" && <p className="text-sm text-muted-foreground">活动与历史观察合并 · 当前授权批次 {data?.rows.length ?? "—"} 项 · 不代表全量统计</p>}
-      {page === "assets" ? <p className="text-sm text-muted-foreground">只展示当前授权历史批次中的结果引用，不是全量资产库。预览和下载仍需 owner 的独立内容授权。</p> : page !== "overview" && <AdminTabs
+      {page === "assets" ? <p className="text-sm text-muted-foreground">只展示当前授权历史批次中的结果引用，不是全量资产库。预览和下载仍需 owner 的独立内容授权。</p> : page !== "overview" && page !== "requests" && page !== "history" && <AdminTabs
         value={mode}
         onChange={(v) => setMode(v as "active" | "history")}
         items={[
@@ -733,6 +744,20 @@ export function TaskMonitor({
                 {c.label} · {c.instance_id}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          Owner
+          <select aria-label="Owner" value={filters.owner} onChange={(e) => setFilters({ ...filters, owner: e.target.value })}>
+            <option value="">全部 owner</option>
+            {[...new Set((data?.rows || []).map((t) => t.locator.owner))].sort().map((owner) => <option key={owner} value={owner}>{owner}</option>)}
+          </select>
+        </label>
+        <label>
+          项目
+          <select aria-label="项目" value={filters.project} onChange={(e) => setFilters({ ...filters, project: e.target.value })}>
+            <option value="">全部项目</option>
+            {[...new Set((data?.rows || []).map((t) => t.locator.project))].sort().map((project) => <option key={project} value={project}>{project}</option>)}
           </select>
         </label>
         <label>
@@ -770,6 +795,14 @@ export function TaskMonitor({
           </select>
         </label>
         <label>
+          结果
+          <select aria-label="结果" value={filters.results} onChange={(e) => setFilters({ ...filters, results: e.target.value })}>
+            <option value="">全部结果</option>
+            <option value="yes">有结果</option>
+            <option value="no">无结果</option>
+          </select>
+        </label>
+        <label>
           创建起日（UTC）
           <input
             type="date"
@@ -798,15 +831,17 @@ export function TaskMonitor({
           <thead>
             <tr className="border-b">
               <th className="p-3">任务 / 来源</th>
-              <th className="p-3">{page === "assets" ? "结果与权限" : "执行阶段"}</th>
+              <th className="p-3">项目 / 实例</th>
+              <th className="p-3">状态 / 阶段</th>
               <th className="p-3">进度</th>
-              <th className="p-3">观察</th>
+              <th className="p-3">结果</th>
+              <th className="p-3">创建 / 观察</th>
             </tr>
           </thead>
           <tbody>
             {visibleRows.map((t) => (
               <tr key={t.task_key} className="border-b last:border-0">
-                <td className="p-3">
+                <td className="p-3 task-primary-cell">
                   <button
                     className="text-left font-medium underline-offset-4 hover:underline"
                     onClick={() => open(t)}
@@ -817,6 +852,7 @@ export function TaskMonitor({
                     {t.locator.owner} · {t.locator.task_ref}
                   </p>
                 </td>
+                <td className="p-3"><strong>{t.locator.project || "未提供"}</strong><p className="text-xs text-muted-foreground">{t.locator.owner} · {t.locator.instance_id}</p><p className="text-xs text-muted-foreground">{t.locator.task_family}</p></td>
                 <td className="p-3">
                   <Badge
                     state={t.state}
@@ -827,9 +863,8 @@ export function TaskMonitor({
                 <td className="p-3 tabular-nums">
                   {progressLabel(t.progress)}
                 </td>
-                <td className="p-3 text-xs">
-                  {new Date(t.observed_at).toLocaleTimeString()}
-                </td>
+                <td className="p-3"><strong>{t.results.length}</strong><p className="text-xs text-muted-foreground">{t.results.length ? "结果可核验" : "暂无结果"}</p></td>
+                <td className="p-3 text-xs"><div>{t.created_at ? new Date(t.created_at).toLocaleDateString("zh-CN") : "未知"}</div><div className="text-muted-foreground">{t.observed_at ? new Date(t.observed_at).toLocaleTimeString("zh-CN") : "未知"}</div></td>
               </tr>
             ))}
           </tbody>

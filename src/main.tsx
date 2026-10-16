@@ -63,6 +63,7 @@ import {
   projects,
   initialOperations,
   assets,
+  assetContentLabels,
   initialApprovals,
   serviceById,
   projectName,
@@ -119,6 +120,7 @@ import {
   type SortOrder,
 } from "./finder-state";
 import "./style.css";
+import "./workspace-v18/styles.css";
 import "./finder.css";
 import "./workspace.css";
 import "./admin.css";
@@ -178,6 +180,8 @@ import {
 import "./asset-library.css";
 import "./components/ui/ui.css";
 import "./layout.css";
+import "./refinement.css";
+import { WorkspaceV18App } from "./workspace-v18/main";
 
 const nav = navigation as {
   id: Page;
@@ -1285,7 +1289,7 @@ export function DemoApp() {
     setFieldErrors({});
     decide();
   };
-  const currentNav = nav.find((n) => n.id === page)!;
+  const currentNav = nav.find((n) => n.id === page) || nav.find((n) => (n.id as string) === "requests")!;
   const status = (s: Service) =>
     scenario === "offline" && s.kind === "remote"
       ? "unknown"
@@ -1845,6 +1849,7 @@ export function DemoApp() {
       <AssetLibrary
         key={scopeKey}
         assets={scopedAssets}
+        setQuery={(value) => dirty ? guard(() => setQuery(value)) : setQuery(value)}
         {...browserProps}
         state={library}
         setState={setLibrary}
@@ -1861,7 +1866,7 @@ export function DemoApp() {
         clearFilters={() =>
           guard(() => {
             setFilter("all");
-            setAssetFilters({ ...assetFilters, owner: "all", status: "all" });
+            setAssetFilters({ ...emptyAssetFilters });
             setQuery("");
           })
         }
@@ -2846,7 +2851,7 @@ export function DemoApp() {
           : task
             ? "任务与操作"
             : asset
-              ? "资产与固定版本"
+              ? "资产与生产归因"
               : approval
                 ? approval.type
                 : selectedProject
@@ -2889,7 +2894,7 @@ export function DemoApp() {
   ) : task ? (
     <Badge state={task.state} />
   ) : asset ? (
-    <Badge state="healthy" label={asset.version} />
+    <Badge state="healthy" label={assetContentLabels[asset.content]} />
   ) : approval ? (
     <Badge state={approval.status} />
   ) : undefined;
@@ -3605,7 +3610,7 @@ export function DemoApp() {
         mobile={mobileNav}
         onCollapse={() => setCollapsed((v) => !v)}
         onMobile={setMobileNav}
-        onNavigate={(id) => go(id as Page)}
+        onNavigate={(id) => go((id === "requests" || id === "history" ? "tasks" : id) as Page)}
         onSearch={() => setSearchOpen(true)}
         identity={"demo:" + role}
         scope={
@@ -3826,7 +3831,7 @@ export function DemoApp() {
         )}
         <div className="content-layout">
           <main
-            className={"main finder-page page-" + page}
+            className={"main v18-content finder-page page-" + page}
             id="main-content"
             tabIndex={-1}
             ref={mainRef}
@@ -3834,7 +3839,7 @@ export function DemoApp() {
             <h1 className="sr-only finder-location" tabIndex={-1}>
               {currentNav.label}
             </h1>
-            {["projects", "assets", "services", "audit"].includes(page) && (
+            {["projects", "services", "audit"].includes(page) && (
               <div className="browser-toolbar">
                 {["projects", "assets", "services", "tasks", "audit"].includes(
                   page,
@@ -3930,7 +3935,7 @@ export function DemoApp() {
             )}
             <SectionNavigation
               page={page}
-              onNavigate={(id) => go(id as Page)}
+              onNavigate={(id) => go((id === "requests" || id === "history" ? "tasks" : id) as Page)}
             />
             {page === "approvals" && (
               <div className="page-tabs-row">
@@ -4176,8 +4181,8 @@ export function DemoApp() {
 const demoMode =
   (import.meta as unknown as { env: { MODE: string } }).env.MODE === "demo" ||
   new URLSearchParams(location.search).get("mode") === "demo";
-if (demoMode) createRoot(document.getElementById("root")!).render(<DemoApp />);
+if (demoMode) createRoot(document.getElementById("root")!).render(<WorkspaceV18App mode="demo" />);
 else
-  import("./live-app").then(({ LiveApp }) =>
-    createRoot(document.getElementById("root")!).render(<LiveApp />),
+  import("./workspace-v18/main").then(({ WorkspaceV18App }) =>
+    createRoot(document.getElementById("root")!).render(<WorkspaceV18App mode="live" />),
   );

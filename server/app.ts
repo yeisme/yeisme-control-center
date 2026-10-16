@@ -11,6 +11,11 @@ import { MediaBridge } from "./media";
 import { serviceDirectory } from "./service-directory";
 import type { TaskSnapshot } from "../src/task-observation";
 import type { ServerConfig, ScopeBinding, Session, Owner } from "./contracts";
+import { createWorkspaceV18Demo } from "./workspace-v18-demo";
+import {
+  ProviderRunManager,
+  type ProviderRunRequest,
+} from "./provider-live";
 import {
   defaultRequestQuery,
   type RequestQuery,
@@ -68,13 +73,16 @@ export function createApp(
     auth?: SessionAuth;
     readers?: OwnerReaders;
     tasks?: TaskConnections;
+    providers?: ProviderRunManager;
   } = {},
 ) {
   const auth = deps.auth || new SessionAuth(config),
     readers = deps.readers || new OwnerReaders(config),
     tasks = deps.tasks || new TaskConnections(config),
+    providers = deps.providers || new ProviderRunManager(config),
     media = new MediaBridge(tasks),
-    cursorKey = randomBytes(32);
+    cursorKey = randomBytes(32),
+    workspaceV18Demo = createWorkspaceV18Demo();
   const scoped = (s: Session, id: string | null): ScopeBinding => {
     const p = auth.principal(s);
     const scope = p?.scopes.find((v) => v.id === id);
@@ -135,13 +143,25 @@ export function createApp(
         path = url.pathname.slice(prefix.length);
       if (!url.pathname.startsWith(prefix + "/"))
         return json({ error: "not_found" }, 404);
+      const v18ProxyOrigin =
+        config.workspace_v18_demo &&
+        path.startsWith("/workspace-v18/") &&
+        /^https?:\/\/127\.0\.0\.1:\d+$/.test(r.headers.get("origin") || "");
       if (
-        url.origin !== config.origin ||
-        (r.headers.has("origin") && r.headers.get("origin") !== config.origin)
+        !v18ProxyOrigin &&
+        (url.origin !== config.origin ||
+          (r.headers.has("origin") && r.headers.get("origin") !== config.origin))
       )
         throw new AuthError("origin_denied", 403);
       if (r.method === "GET" && path === "/health")
         return json({ status: "ok", service: "yeisme-control-center" });
+      if (config.workspace_v18_demo && path.startsWith("/workspace-v18/")) {
+        if (config.personal || config.auth_mode === "oidc") {
+          const v18Session = auth.current(r);
+          if (r.method === "POST") auth.csrf(r, v18Session);
+        }
+        return await workspaceV18Demo(r, path);
+      }
       if (r.method === "POST" && path === "/auth/personal") {
         const raw = await r.text();
         if (raw.length > 2048)
@@ -154,18 +174,21 @@ export function createApp(
         }
         if (
           !body ||
-          typeof body.password !== "string" ||
+          (typeof body.password !== "string" && typeof body.key !== "string") ||
+          (body.password !== undefined && typeof body.password !== "string") ||
+          (body.key !== undefined && typeof body.key !== "string") ||
           (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 80)) ||
-          Object.keys(body).some((k) => !["password", "username"].includes(k))
+          Object.keys(body).some((k) => !["password", "key", "username"].includes(k))
         )
           throw new AuthError("invalid_login_request", 400);
-        const result = await auth.personalLogin(r, body.password, body.username);
+        const result = await auth.personalLogin(r, body.key || body.password, body.username);
         return json({ ok: true }, 200, { "Set-Cookie": result.cookie });
       }
       if (r.method === "GET" && path === "/auth/methods")
         return json({
-          personal: !!auth.personalBinding(),
-          username_required: !!auth.personalBinding() && config.personal?.username !== undefined,
+          personal: config.auth_mode === "personal" && !!config.personal,
+          username_required: !!config.personal && ((config.personal.users?.length || 0) > 0 || config.personal.username !== undefined),
+          key_required: !!config.personal && (config.personal.users?.length || 0) > 0,
           oidc: config.auth_mode !== "personal" && !!config.oidc,
           mode: "live",
           owners: owners.map((owner) => ({
@@ -196,7 +219,7 @@ export function createApp(
         const p = auth.principal(session)!;
         return json({
           name: session.name,
-          username: session.personal ? config.personal?.username : undefined,
+          username: session.personal ? session.subject : undefined,
           role: auth.role(session),
           identity: session.issuer + "|" + session.subject,
           csrf: session.csrf,
@@ -208,6 +231,26 @@ export function createApp(
           task_connections: session.personal === true,
         });
       }
+      if (path === "/admin/personal-users" || path.startsWith("/admin/personal-users/")) {
+        if (!session.personal || auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
+        if (r.method === "GET") return json({ users: auth.listPersonalUsers() });
+        if (r.method === "POST") {
+          auth.csrf(r, session);
+          const raw = await r.text();
+          if (raw.length > 4096) throw new AuthError("invalid_request", 400);
+          let body;
+          try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
+          if (!body || typeof body.username !== "string" || typeof body.name !== "string" || !["admin", "viewer"].includes(body.role) || !Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string") || Object.keys(body).some((key) => !["username", "name", "role", "scope_ids"].includes(key))) throw new AuthError("invalid_request", 400);
+          return json(await auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids }), 201);
+        }
+        const revoke = path.match(/^\/admin\/personal-users\/([^/]+)\/revoke$/);
+        if (revoke && r.method === "POST") {
+          auth.csrf(r, session);
+          auth.revokePersonalUser(decodeURIComponent(revoke[1]));
+          return json({ ok: true });
+        }
+        return json({ error: "operation_not_allowed" }, 405);
+      }
       if (r.method === "POST" && path === "/auth/logout") {
         auth.csrf(r, session);
         auth.sessions.delete(session.id);
@@ -217,6 +260,86 @@ export function createApp(
       if (r.method === "GET" && path === "/services")
         return json(serviceDirectory(config, scope, session,
           session.personal && url.searchParams.get("observe") === "1" ? await tasks.observe(scope) : []));
+      if (r.method === "GET" && path === "/capabilities")
+        return json({ scope: scope.id, capabilities: await providers.capabilities(scope) });
+      if (r.method === "GET" && path === "/usage")
+        return json({
+          scope: scope.id,
+          rows: providers.usageRows(scope),
+          budget: providers.budgetStatus(),
+          coverage: { state: "partial", observed_at: new Date().toISOString(), reason: "仅包含已接入 Provider 回执；历史 owner 账本仍按来源读取" },
+        });
+      if (path === "/provider-runs" && r.method === "POST") {
+        auth.csrf(r, session);
+        const raw = await r.text();
+        if (raw.length > 12000) throw new AuthError("invalid_provider_request", 400);
+        let body: any;
+        try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_provider_request", 400); }
+        const allowed = ["mode", "owner", "modality", "model_ref", "scope_id", "project_ref", "prompt", "budget_cap", "idempotency_key", "trace_ref"];
+        if (!body || Object.keys(body).some((key) => !allowed.includes(key)) ||
+          body.mode !== "live" || !["eikona", "scaena", "sonora"].includes(body.owner) ||
+          !["image", "video", "audio"].includes(body.modality) ||
+          typeof body.model_ref !== "string" || body.model_ref.length < 1 || body.model_ref.length > 200 ||
+          typeof body.scope_id !== "string" || typeof body.project_ref !== "string" ||
+          typeof body.prompt !== "string" || body.prompt.length < 1 || body.prompt.length > 10000 ||
+          !body.budget_cap || body.budget_cap.currency !== "CNY" ||
+          typeof body.budget_cap.amount !== "number" || !Number.isFinite(body.budget_cap.amount) ||
+          typeof body.idempotency_key !== "string" ||
+          (body.trace_ref !== undefined && typeof body.trace_ref !== "string"))
+          throw new AuthError("invalid_provider_request", 400);
+        const result = await providers.create(body as ProviderRunRequest, scope, session);
+        return json(result, 202);
+      }
+      const providerRun = path.match(/^\/provider-runs\/([^/]+)(\/events|\/reconcile)?$/);
+      if (providerRun) {
+        const runRef = decodeURIComponent(providerRun[1]);
+        const run = providers.get(runRef);
+        if (!run || run.scope_id !== scope.id) throw new AuthError("run_not_found", 404);
+        if (r.method === "GET" && !providerRun[2]) return json(run);
+        if (r.method === "POST" && providerRun[2] === "/reconcile") {
+          auth.csrf(r, session);
+          return json(await providers.reconcile(runRef));
+        }
+        if (r.method === "GET" && providerRun[2] === "/events") {
+          const encoder = new TextEncoder();
+          let unsubscribe = () => {};
+          let heartbeat: ReturnType<typeof setInterval> | undefined;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              let closed = false;
+              const close = () => {
+                if (closed) return;
+                closed = true;
+                unsubscribe();
+                if (heartbeat) clearInterval(heartbeat);
+                try { controller.close(); } catch { /* client disconnected */ }
+              };
+              const send = (value: unknown, event = "provider-run") => {
+                if (closed) return;
+                try { controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`)); }
+                catch { close(); }
+              };
+              send(run);
+              if (["succeeded", "failed", "unknown", "reconciled"].includes(run.state)) return close();
+              unsubscribe = providers.subscribe(runRef, (next) => {
+                send(next);
+                if (["succeeded", "failed", "unknown", "reconciled"].includes(next.state)) close();
+              });
+              heartbeat = setInterval(() => send({ run_ref: runRef, observed_at: new Date().toISOString() }, "heartbeat"), 15000);
+              r.signal.addEventListener("abort", close, { once: true });
+            },
+            cancel() { unsubscribe(); if (heartbeat) clearInterval(heartbeat); },
+          });
+          return new Response(stream, {
+            headers: {
+              "Cache-Control": "no-cache, no-store",
+              "Content-Type": "text/event-stream; charset=utf-8",
+              Connection: "keep-alive",
+              "X-Accel-Buffering": "no",
+            },
+          });
+        }
+      }
       const permittedTask = (task: TaskSnapshot): TaskSnapshot => auth.role(session) === "admin" ? task : ({
         ...task,
         allowed_actions: task.allowed_actions.map(action => action.action === "cancel"

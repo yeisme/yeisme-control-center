@@ -11,6 +11,7 @@ import {
   Wallet,
   ShieldCheck,
   ClipboardCheck,
+  Sparkles,
   PanelLeftOpen,
   Menu,
   X,
@@ -24,21 +25,27 @@ import { NavigationSidebar } from "./navigation-sidebar";
 import { AdminTabs } from "./admin-ui";
 import { Button, DropdownMenu } from "./ui";
 export const navigation = [
-  { id: "overview", label: "总览", group: "工作空间", icon: ChartNoAxesCombined },
-  { id: "projects", label: "项目", group: "工作空间", icon: FolderKanban },
-  { id: "tasks", label: "请求", group: "工作空间", icon: ListTodo },
-  { id: "assets", label: "资产", group: "工作空间", icon: Images },
-  { id: "services", label: "服务", group: "工作空间", icon: ServerCog },
-  { id: "members", label: "团队", group: "工作空间", icon: UsersRound },
-  { id: "settings", label: "设置", group: "设置", icon: Settings2 },
-  { id: "usage", label: "统计与成本", group: "总览", icon: Wallet },
-  { id: "audit", label: "诊断与审计", group: "设置", icon: ShieldCheck },
-  { id: "approvals", label: "待处理", group: "请求", icon: ClipboardCheck },
+  { id: "overview", label: "总览", group: "创作空间", icon: ChartNoAxesCombined },
+  { id: "projects", label: "项目", group: "创作空间", icon: FolderKanban },
+  { id: "requests", label: "正在请求", group: "生产协作", icon: ListTodo },
+  { id: "history", label: "历史任务", group: "生产协作", icon: FileText },
+  { id: "assets", label: "资产", group: "创作空间", icon: Images },
+  { id: "services", label: "服务", group: "资源运营", icon: ServerCog },
+  { id: "capabilities", label: "模型与工具", group: "资源运营", icon: ServerCog },
+  { id: "creation", label: "AI 创作", group: "创作空间", icon: Sparkles },
+  { id: "provider_usage", label: "用量与费用", group: "总览", icon: Wallet },
+  { id: "members", label: "团队", group: "团队与设置", icon: UsersRound },
+  { id: "settings", label: "设置", group: "团队与设置", icon: Settings2 },
+  { id: "usage", label: "统计与成本", group: "资源运营", icon: Wallet },
+  { id: "audit", label: "诊断与审计", group: "团队与设置", icon: ShieldCheck },
+  { id: "approvals", label: "待处理", group: "生产协作", icon: ClipboardCheck },
 ];
-export function navigationRoot(page: string) {
+export function navigationRoot(page: string, demo = false) {
   return (
     (
-      { usage: "overview", audit: "settings", approvals: "tasks" } as Record<
+      (demo
+        ? { tasks: "requests", usage: "overview", provider_usage: "overview", capabilities: "overview", creation: "overview", audit: "settings", approvals: "requests" }
+        : { tasks: "requests", usage: "overview", capabilities: "capabilities", creation: "creation", audit: "settings", approvals: "requests" }) as Record<
         string,
         string
       >
@@ -87,31 +94,34 @@ export function AppShell({
   demo?: boolean;
 }) {
   const current = navigation.find((n) => n.id === page) || navigation[0];
-  const root = navigation.find((n) => n.id === navigationRoot(page))!;
+  const root = navigation.find((n) => n.id === navigationRoot(page, demo))!;
+  const visibleNavigation = demo
+    ? navigation
+    : navigation.filter((item) => item.id !== "usage");
   const reducedMotion = useReducedMotion();
   const sidebarMotion = useSpring({
-    width: collapsed ? 48 : 232,
+    width: collapsed ? 64 : 232,
     config: sidebarSpring,
     immediate: !!reducedMotion,
   });
   return (
     <div
-      className={`app-shell ${collapsed ? "collapsed " : ""}${mobile ? "mobile-nav-open" : ""}`}
+      className={`app-shell v18-app ${collapsed ? "collapsed v18-collapsed " : ""}${mobile ? "mobile-nav-open" : ""}`}
     >
       <animated.aside
-        className="sidebar"
+        className="sidebar v18-sidebar"
         data-slot="sidebar"
         style={{ width: sidebarMotion.width }}
       >
         <a
-          className="brand"
+          className="brand v18-brand"
           href="#/overview"
           onClick={(e) => {
             e.preventDefault();
             onNavigate("overview");
           }}
         >
-          <span className="brand-monogram" aria-hidden="true">
+          <span className="brand-monogram v18-brand-mark" aria-hidden="true">
             Y
           </span>
           <span>
@@ -126,15 +136,24 @@ export function AppShell({
         >
           <X size={18} />
         </button>
+        <div className="v18-workspace-switcher" aria-label="Rain Studio 团队工作空间">
+          <span className="v18-workspace-avatar">R</span>
+          <span>
+            <strong>Rain Studio</strong>
+            <small>团队工作空间</small>
+          </span>
+          <ChevronRight size={15} />
+        </div>
+        <div className="v18-scope-slot">{scope}</div>
         <NavigationSidebar
-          items={navigation.slice(0, 6)}
-          page={navigationRoot(page)}
+          items={[...visibleNavigation.slice(0, 9), ...visibleNavigation.filter((item) => item.id === "members")]}
+          page={navigationRoot(page, demo)}
           onNavigate={onNavigate}
           identity={identity}
         />
-        <div className="sidebar-bottom">
+        <div className="sidebar-bottom v18-sidebar-bottom">
           <button
-            className={`nav-item ${root.id === "settings" ? "active" : ""}`}
+            className={`nav-item v18-nav-item ${root.id === "settings" ? "active" : ""}`}
             aria-label="设置"
             aria-current={root.id === "settings" ? "page" : undefined}
             onClick={() => onNavigate("settings")}
@@ -152,25 +171,25 @@ export function AppShell({
           onClick={() => onMobile(false)}
         />
       )}
-      <div className="workspace">
-        <header className="admincn-header">
-          <div className="header-left">
+      <div className="workspace v18-main">
+        <header className="admincn-header v18-topbar">
+          <div className="header-left v18-topbar-left">
             <button
-              className="icon-button desktop-menu"
+              className="icon-button v18-icon-button desktop-menu"
               aria-label={collapsed ? "展开导航" : "收起导航"}
               onClick={onCollapse}
             >
               <PanelLeftOpen size={20} />
             </button>
             <button
-              className="icon-button mobile-menu"
+              className="icon-button v18-icon-button mobile-menu"
               aria-label="打开导航"
               onClick={() => onMobile(true)}
             >
               <Menu size={20} />
             </button>
             <span className="header-divider" />
-            <nav className="breadcrumb" aria-label="当前位置">
+            <nav className="breadcrumb v18-breadcrumb" aria-label="当前位置">
               {root.id !== page && (
                 <>
                   <button onClick={() => onNavigate(root.id)}>
@@ -187,18 +206,17 @@ export function AppShell({
               </span>
             )}
           </div>
-          <div className="header-actions">
-            {scope}
-            {onSearch && (
-              <button
-                className="icon-button header-search"
+          <div className="header-actions v18-topbar-actions">
+            <button
+                className="header-search v18-search"
                 aria-label="搜索控制中心"
                 title="搜索 · ⌘ K"
-                onClick={onSearch}
+                onClick={() => onSearch?.()}
               >
                 <Search size={18} />
+                <span>搜索项目、资产、模型或任务</span>
+                <kbd>⌘ K</kbd>
               </button>
-            )}
             {actions}
           </div>
         </header>

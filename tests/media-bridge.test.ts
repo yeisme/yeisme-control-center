@@ -90,6 +90,7 @@ it("bounds concurrent transfers and releases capacity when a client aborts witho
 it("streams only session-bound content and repeats owner authorization", async () => {
   const { bridge, detail, fetcher } = setup();
   const handle = await bridge.issue(session, scope, "task", "ref", "preview");
+  const issueCalls = fetcher.mock.calls.length;
   expect(handle.url).not.toContain("acc_test");
   const key = new URL(handle.url, "http://localhost").pathname
     .split("/")
@@ -102,7 +103,7 @@ it("streams only session-bound content and repeats owner authorization", async (
       scope,
     ),
   ).rejects.toThrow("media_not_found");
-  expect(fetcher).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledTimes(issueCalls);
   const response = await bridge.read(
     key,
     new Request("http://localhost"),
@@ -118,17 +119,18 @@ it("requires a new explicit access request after the owner grant expires", async
   const { bridge, artifact, fetcher } = setup();
   const value = await bridge.issue(session, scope, "t", "r", "preview"),
     key = value.url.split("/").pop()!.split("?")[0];
+  const issueCalls = fetcher.mock.calls.length;
   fetcher.mockImplementation(async () => new Response(null, { status: 410 }));
   await expect(
     bridge.read(key, new Request("http://localhost"), session, scope),
   ).rejects.toThrow("media_unavailable");
   expect(artifact).toHaveBeenCalledTimes(1);
-  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(fetcher).toHaveBeenCalledTimes(issueCalls + 1);
   await expect(
     bridge.read(key, new Request("http://localhost"), session, scope),
   ).rejects.toThrow("media_unavailable");
   expect(artifact).toHaveBeenCalledTimes(1);
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledTimes(issueCalls + 2);
 });
 it("accepts a single Range and HEAD, rejects multipart and unsafe MIME", async () => {
   const { bridge } = setup("image/png", 206);

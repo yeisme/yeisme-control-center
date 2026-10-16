@@ -4,10 +4,15 @@ export interface TaskTarget {
   family: string;
   ref: string;
 }
+const taskPrefixes = ["#/tasks?", "#/requests?", "#/history?"] as const;
+function taskPrefix(hash: string) {
+  return taskPrefixes.find((prefix) => hash.startsWith(prefix));
+}
 // Only reference parameters are accepted. No caller-provided redirect or action.
 export function taskTarget(hash: string): TaskTarget | null {
-  if (!hash.startsWith("#/tasks?")) return null;
-  const p = new URLSearchParams(hash.slice("#/tasks?".length));
+  const prefix = taskPrefix(hash);
+  if (!prefix) return null;
+  const p = new URLSearchParams(hash.slice(prefix.length));
   if (
     [...p.keys()].some(
       (k) => !["connection", "project", "family", "ref"].includes(k),
@@ -38,7 +43,8 @@ export function clientOrigin(value: string): string {
     (u.protocol !== "https:" &&
       !(
         u.protocol === "http:" &&
-        ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)
+        (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) ||
+          (u.hostname === "10.10.1.101" && u.port === "51873"))
       ))
   )
     throw new Error("invalid_client_origin");
@@ -49,8 +55,9 @@ export function taskListHash(connection: string, project: string): string {
   return '#/tasks?' + new URLSearchParams({ connection, project });
 }
 export function taskListTarget(hash: string): Pick<TaskTarget, 'connection' | 'project'> | null {
-  if (!hash.startsWith('#/tasks?')) return null;
-  const params = new URLSearchParams(hash.slice('#/tasks?'.length));
+  const prefix = taskPrefix(hash);
+  if (!prefix) return null;
+  const params = new URLSearchParams(hash.slice(prefix.length));
   if ([...params.keys()].some(key => !['connection', 'project'].includes(key))) return null;
   for (const key of ['connection', 'project'])
     if (params.getAll(key).length !== 1 || !params.get(key) || params.get(key)!.length > 512) return null;

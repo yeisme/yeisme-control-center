@@ -42,6 +42,25 @@ export interface TaskConnection {
   media_origins?: string[];
   studio_origin?: string;
 }
+export type ProviderOwner = "eikona" | "scaena" | "sonora";
+export type ProviderModality = "image" | "video" | "audio";
+export interface ProviderConnection {
+  owner: ProviderOwner;
+  endpoint: string;
+  /** A user-level 0600 file reference. The file content never leaves the server. */
+  credential_ref?: string;
+  /** Environment variable name used for ephemeral/local runtime injection. */
+  credential_env?: string;
+  project?: string;
+  enabled: boolean;
+  model_refs?: string[];
+  action_manifest?: {
+    submit: string;
+    status?: string;
+    reconcile?: string;
+    estimate?: string;
+  };
+}
 export interface ServerConfig {
   auth_mode?: "personal" | "oidc";
   personal?: {
@@ -50,14 +69,28 @@ export interface ServerConfig {
     role?: ControlCenterRole;
     password_hash_ref: string;
     scope_ids: string[];
+    users?: PersonalUser[];
   };
+  /** User-level config file path; populated by the server loader, never sent to clients. */
+  config_file?: string;
   connections?: TaskConnection[];
   origin: string;
   port: number;
   oidc?: { issuer: string; clientId: string; clientSecretRef?: string };
   principals: PrincipalBinding[];
   owners: Partial<Record<Owner, { origin: string; audience: string }>>;
+  providers?: Partial<Record<ProviderOwner, ProviderConnection>>;
   allowInsecureLoopback?: boolean;
+  workspace_v18_demo?: boolean;
+}
+export interface PersonalUser {
+  username: string;
+  name: string;
+  role: ControlCenterRole;
+  key_hash_ref: string;
+  scope_ids: string[];
+  enabled?: boolean;
+  created_at?: string;
 }
 export interface Session {
   id: string;

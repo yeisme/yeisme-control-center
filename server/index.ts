@@ -6,9 +6,27 @@ import { resolve, extname, sep } from "node:path";
 import { createApp } from "./app";
 import type { ServerConfig } from "./contracts";
 const file = process.env.YEISME_CONTROL_CONFIG;
-const config: ServerConfig = file
+const providerEntries: Array<[string, { owner: "eikona" | "scaena" | "sonora"; endpoint: string; credential_env: string; enabled: boolean }]> = [];
+for (const owner of ["eikona", "scaena", "sonora"] as const) {
+  const upper = owner.toUpperCase();
+  const endpoint = process.env[`YEISME_PROVIDER_${upper}_URL`];
+  const credential_env = process.env[`YEISME_PROVIDER_${upper}_TOKEN_ENV`] || `YEISME_PROVIDER_${upper}_TOKEN`;
+  if (endpoint) providerEntries.push([owner, { owner, endpoint, credential_env, enabled: true }]);
+}
+const baseConfig: ServerConfig = file
   ? JSON.parse(readFileSync(file, "utf8"))
-  : { origin: "http://127.0.0.1:4312", port: 4312, principals: [], owners: {} };
+  : {
+      origin: process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312",
+      port: Number(process.env.YEISME_CONTROL_PORT || 4312),
+      principals: [],
+      owners: {},
+      workspace_v18_demo: process.env.YEISME_V18_DEMO === "1",
+    };
+const config: ServerConfig = {
+  ...baseConfig,
+  ...(file ? { config_file: resolve(file) } : {}),
+  providers: { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
+};
 const app = createApp(config),
   root = resolve("dist"),
   types: Record<string, string> = {
@@ -32,7 +50,7 @@ createServer(async (req, res) => {
       let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > 4096) {
+        if (bytes > 16384) {
           res.writeHead(413);
           res.end();
           return;
