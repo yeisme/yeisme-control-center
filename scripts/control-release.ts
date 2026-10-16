@@ -15,7 +15,7 @@ const verification = JSON.parse(await readFile(join(proof, 'summary.json'), 'utf
 const source = join(candidate, 'artifacts/control-center');
 if (summary.status !== 'passed' || verification.status !== 'passed' || verification.release !== source) throw Error('Passing release-specific component evidence required.');
 const checksums = Object.entries(summary.checksums as Record<string,string>).filter(([file]) => file.startsWith('control-center/'));
-if (!checksums.some(([file]) => file === 'control-center/server.mjs') || !checksums.some(([file]) => file === 'control-center/dist/index.html') || !checksums.some(([file]) => file === 'control-center/dist/workspace-v18.html')) throw Error('Incomplete release fingerprints.');
+if (!checksums.some(([file]) => file === 'control-center/server.mjs') || !checksums.some(([file]) => file === 'control-center/dist/index.html')) throw Error('Incomplete release fingerprints.');
 for (const [file, digest] of checksums) {
   if (file.includes('..') || createHash('sha256').update(await readFile(join(candidate, 'artifacts', file))).digest('hex') !== digest)
     throw Error('Candidate fingerprint mismatch.');
@@ -24,7 +24,8 @@ const state = join(homedir(), '.local/state/yeisme-control-center');
 const manifestPath = join(state, 'deployment.json');
 const originalManifest = await readFile(manifestPath, 'utf8'), manifest = JSON.parse(originalManifest);
 const httpsOrigin = manifest.origin.startsWith('https://');
-if (manifest.origin !== 'http://10.10.1.101:51873' || !manifest.release?.startsWith(join(state, 'releases/'))) throw Error('Unexpected deployment target.');
+const expectedOrigin = process.env.YEISME_CONTROL_ORIGIN;
+if (!expectedOrigin || manifest.origin !== expectedOrigin || !manifest.release?.startsWith(join(state, 'releases/'))) throw Error('Unexpected deployment target. Set YEISME_CONTROL_ORIGIN to the approved HTTPS origin.');
 const unitPath = join(homedir(), '.config/systemd/user/yeisme-control-center.service');
 const originalUnit = await readFile(unitPath, 'utf8');
 if (!originalUnit.includes('WorkingDirectory=' + manifest.release + '\n') || !originalUnit.includes(manifest.release + '/server.mjs')) throw Error('Running unit differs from release baseline.');
@@ -73,8 +74,6 @@ try {
   if (!ready) throw Error('Release health did not recover.');
   const html = get('/');
   if (html !== await readFile(join(destination, 'dist/index.html'), 'utf8')) throw Error('HTTPS assets differ from the candidate.');
-  const v18Html = get('/workspace-v18.html');
-  if (v18Html !== await readFile(join(destination, 'dist/workspace-v18.html'), 'utf8')) throw Error('Workspace v18 entry differs from the candidate.');
   for (const [file, digest] of checksums.filter(([file]) => /dist\/assets\/.*\.(js|css)$/.test(file))) {
     const content = get('/' + file.slice('control-center/dist/'.length));
     if (createHash('sha256').update(content).digest('hex') !== digest) throw Error('Published asset fingerprint mismatch.');

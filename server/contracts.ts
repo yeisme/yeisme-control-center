@@ -75,13 +75,14 @@ export interface ServerConfig {
   config_file?: string;
   connections?: TaskConnection[];
   origin: string;
+  /** Listen address. Defaults to loopback; 0.0.0.0 is an explicit opt-in for controlled testing. */
+  bind?: string;
   port: number;
   oidc?: { issuer: string; clientId: string; clientSecretRef?: string };
   principals: PrincipalBinding[];
   owners: Partial<Record<Owner, { origin: string; audience: string }>>;
   providers?: Partial<Record<ProviderOwner, ProviderConnection>>;
   allowInsecureLoopback?: boolean;
-  workspace_v18_demo?: boolean;
 }
 export interface PersonalUser {
   username: string;

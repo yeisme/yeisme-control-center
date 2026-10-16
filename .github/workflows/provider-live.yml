@@ -1,0 +1,70 @@
+name: Provider live canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_live:
+        description: Confirm real Provider calls and the declared budget
+        required: true
+        default: false
+        type: boolean
+      total_cny:
+        description: Total budget in CNY
+        required: true
+        default: '30'
+        type: string
+      image_cny:
+        description: Eikona budget in CNY
+        required: true
+        default: '15'
+        type: string
+      video_cny:
+        description: Scaena budget in CNY
+        required: true
+        default: '10'
+        type: string
+      audio_cny:
+        description: Sonora budget in CNY
+        required: true
+        default: '5'
+        type: string
+
+environment: provider-live
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    if: inputs.confirm_live == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Write ephemeral login file
+        env:
+          CONTROL_CENTER_LOGIN_JSON: ${{ secrets.CONTROL_CENTER_LOGIN_JSON }}
+        run: |
+          test -n "$CONTROL_CENTER_LOGIN_JSON"
+          umask 077
+          printf '%s' "$CONTROL_CENTER_LOGIN_JSON" > "$RUNNER_TEMP/control-center-login.json"
+      - name: Run explicitly confirmed canary
+        env:
+          YEISME_CONTROL_ORIGIN: ${{ secrets.YEISME_CONTROL_ORIGIN }}
+          YEISME_CONTROL_LOGIN_FILE: ${{ runner.temp }}/control-center-login.json
+        run: |
+          test -n "$YEISME_CONTROL_ORIGIN"
+          bun run test:provider-live -- --confirm-live --total-cny "${{ inputs.total_cny }}" --image-cny "${{ inputs.image_cny }}" --video-cny "${{ inputs.video_cny }}" --audio-cny "${{ inputs.audio_cny }}"
+      - name: Upload redacted canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-live-evidence
+          if-no-files-found: warn
+          path: temp/integration-test-runs/provider-live-*/**

@@ -13,7 +13,7 @@ const caps = { eikona: Number(value("--image-cny", "0")), scaena: Number(value("
 if (!Number.isFinite(total) || total <= 0 || Object.values(caps).some((v) => !Number.isFinite(v) || v <= 0) || Object.values(caps).reduce((a, b) => a + b, 0) > total)
   throw Error("Invalid budget. Example: --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5");
 const origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312";
-const loginFile = join(homedir(), ".config/yeisme-control-center/test-login.json");
+const loginFile = process.env.YEISME_CONTROL_LOGIN_FILE || join(homedir(), ".config/yeisme-control-center/test-login.json");
 const login = JSON.parse(await readFile(loginFile, "utf8"));
 const evidence = join(process.cwd(), "temp/integration-test-runs/provider-live-" + new Date().toISOString().replace(/[:.]/g, "-"));
 await mkdir(join(evidence, "artifacts"), { recursive: true });

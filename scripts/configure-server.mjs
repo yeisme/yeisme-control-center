@@ -5,7 +5,7 @@ fs.mkdirSync(".local", { recursive: true, mode: 0o700 });
 fs.writeFileSync(
   target,
   JSON.stringify(
-    { origin: "http://127.0.0.1:4312", port: 4312, principals: [], owners: {} },
+    { origin: "http://127.0.0.1:4312", bind: "127.0.0.1", port: 4312, principals: [], owners: {} },
     null,
     2,
   ) + "\n",

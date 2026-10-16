@@ -11,7 +11,6 @@ import type { ServerConfig } from "../server/contracts";
 const dir = mkdtempSync(join(tmpdir(), "yeisme-auth-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const origin = "http://127.0.0.1:4312";
-const lanOrigin = "http://10.10.1.101:51873";
 const request = (
   path: string,
   method = "GET",
@@ -21,12 +20,6 @@ const request = (
   new Request(origin + "/api/control-center/v1" + path, {
     method,
     headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-const lanRequest = (path: string, method = "GET", body?: unknown) =>
-  new Request(lanOrigin + "/api/control-center/v1" + path, {
-    method,
-    headers: { Origin: lanOrigin },
     body: body ? JSON.stringify(body) : undefined,
   });
 async function setup() {
@@ -66,11 +59,15 @@ async function setup() {
   return { auth, config, app: createApp(config, { auth }) };
 }
 describe("personal login", () => {
-  it("accepts the explicitly approved LAN HTTP origin", async () => {
+  it("rejects non-loopback HTTP origins", async () => {
     const { app, config } = await setup();
-    config.origin = lanOrigin;
-    const result = await app(lanRequest("/auth/personal", "POST", { password: "test-only-password-123" }));
-    expect(result.status).toBe(200);
+    config.origin = "http://control.example.test:4313";
+    const result = await app(new Request(config.origin + "/api/control-center/v1/auth/personal", {
+      method: "POST",
+      headers: { Origin: config.origin },
+      body: JSON.stringify({ password: "test-only-password-123" }),
+    }));
+    expect(result.status).toBe(503);
   });
   it("uses a server session without exposing service credentials", async () => {
     const { app } = await setup();

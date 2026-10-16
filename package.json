@@ -1,28 +1,26 @@
 {
   "name": "@yeisme/control-center",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "Yeisme read-only service control center",
   "directories": {
     "doc": "docs"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4298",
-    "dev:v18": "vite --host 127.0.0.1 --port 4299",
-    "preview:demo": "vite --host 127.0.0.1 --port 4298 --mode demo",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "vite build",
-    "test:ui": "node scripts/verify-design-v18.mjs",
-    "handoff": "node scripts/package-source.mjs",
-    "build:demo": "vite build --mode demo",
+    "test:ci:browser": "node scripts/verify-ci-browser.mjs",
+    "check:public-surface": "node scripts/check-public-surface.mjs",
+    "release:manifest": "node scripts/release-manifest.mjs",
+    "preview:real": "bun scripts/start-dev-preview.mjs",
+    "test:preview:real": "node scripts/verify-dev-preview.mjs",
     "serve": "bun server/index.ts",
-    "serve:v18": "YEISME_V18_DEMO=1 YEISME_CONTROL_ORIGIN=http://127.0.0.1:4313 YEISME_CONTROL_PORT=4313 bun server/index.ts",
-    "test:live": "node scripts/verify-live.mjs",
-    "test:workspace": "node scripts/verify-workspace-v6.mjs",
     "test:owners": "node scripts/verify-owners.mjs",
     "test:provider-live": "bun scripts/test-provider-live.ts",
+    "test:owner-live-read": "bun scripts/verify-real-owner-reads.ts",
     "test:task-visibility": "bun scripts/verify-task-visibility.ts",
-    "test:v18": "node scripts/verify-design-v18.mjs"
+    "test:app": "node scripts/verify-app.mjs"
   },
   "type": "module",
   "private": true,
@@ -35,6 +33,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-is": "19.2.3",
+    "react-router-dom": "^7",
     "recharts": "3.10.1"
   },
   "devDependencies": {

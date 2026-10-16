@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { cpSync } from "node:fs";
 import { join, resolve } from "node:path";
-export default defineConfig(({ mode }) => ({
+export default defineConfig(() => ({
   root: "app",
   base: "./",
   publicDir: "../public",
@@ -28,12 +28,11 @@ export default defineConfig(({ mode }) => ({
     alias: { "/src": fileURLToPath(new URL("./src", import.meta.url)) },
   },
   build: {
-    outDir: mode === "demo" ? "../dist-demo" : "../dist",
+    outDir: "../dist",
     emptyOutDir: true,
     rollupOptions: {
       input: {
         controlCenter: resolve("app/index.html"),
-        workspaceV18: resolve("app/workspace-v18.html"),
       },
       output: {
         manualChunks: {

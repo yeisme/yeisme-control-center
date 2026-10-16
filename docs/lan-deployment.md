@@ -1,63 +1,85 @@
-# 控制中心内网部署与 Provider 接入状态
+# 控制中心运行与部署边界
 
-## 可访问入口
-
-- URL：**http://10.10.1.101:51873**
-- v18 入口：**http://10.10.1.101:51873/workspace-v18.html**
-- 用户名：**yeisme**；密码不写入本文。
-- 应用仅监听 `127.0.0.1:4312`，内网 HTTP 网关绑定 `10.10.1.101:51873`。
-- 原 `8443` HTTPS 入口已停止监听；旧证书和旧发布快照仅作为回退资料保留。
-- HTTP 入口只用于受信任内网，不提供公网安全边界。
-
-Provider MCP 配置仍由服务端通过 user-level `credential_ref` 读取；浏览器不会接触明文密钥。Eikona、Scaena、Sonora 的 Provider transport 已完成真实 `initialize/tools-list` 只读探测，任务观测和真实生成结果仍按各 owner 合同独立核验。
-
-## 访问与验证
-
-在 `10.10.1.101` 上执行：
+正式入口统一由 `YEISME_CONTROL_ORIGIN` 管理。默认本地配置为：
 
 ```bash
-curl --fail http://10.10.1.101:51873/api/control-center/v1/health
-curl --fail -I http://10.10.1.101:51873/
-curl --fail -I http://10.10.1.101:51873/workspace-v18.html
-curl --silent -i http://10.10.1.101:51873/api/control-center/v1/workspace-v18/state
+export YEISME_CONTROL_ORIGIN=http://127.0.0.1:4312
+export YEISME_CONTROL_BIND=127.0.0.1
 ```
 
-未登录的最后一条应返回 `401 login_required`。登录仍使用控制中心个人账号；HTTP origin 会让会话 Cookie 保持 `HttpOnly`、`SameSite=Lax`，不设置 `Secure` 属性。
+loopback 本地测试允许 HTTP；任何可被其他设备访问的入口必须使用 HTTPS。`0.0.0.0` 只能作为显式监听地址用于受控联调，不能写入浏览器 URL，也不能绕过 HTTPS 要求。
+
+## 本地验证
+
+```bash
+bun install --frozen-lockfile
+bun run build
+YEISME_CONTROL_ORIGIN=http://127.0.0.1:4312 YEISME_CONTROL_BIND=127.0.0.1 bun run serve
+curl --fail "$YEISME_CONTROL_ORIGIN/api/control-center/v1/health"
+```
+
+v18.1 使用同一根入口：
+
+```bash
+curl --fail -I "$YEISME_CONTROL_ORIGIN/"
+```
+
+未登录的业务读取应返回 `401 login_required`。健康端点只证明控制中心进程响应，不证明 owner、Provider 或真实业务数据可用。
+
+## 真实开发预览
+
+需要在本机浏览真实 owner 读取时，使用临时配置启动预览；不会覆盖用户配置，也不会启动写操作：
+
+```bash
+export YEISME_PREVIEW_PASSWORD='仅用于本次预览的临时密码'
+bun run preview:real
+```
+
+预览 UI 使用 `http://127.0.0.1:4298/`，控制中心 API 使用 `http://127.0.0.1:4312`。启动器复制现有连接定义到临时目录，退出后清理临时配置和登录密码。浏览器验收使用：
+
+```bash
+bun run test:preview:real
+```
+
+这条路径只验证真实只读合同；它不替代外部 HTTPS 部署，也不触发 Provider 生成、取消或账务操作。
+
+受控局域网开发联调可以显式绑定 `0.0.0.0`：
+
+```bash
+YEISME_PREVIEW_BIND=0.0.0.0 YEISME_PREVIEW_UI_HOST=0.0.0.0 bun run preview:real
+```
+
+该模式只用于开发预览；正式外部入口仍必须使用 HTTPS，且不把实际机器地址提交到仓库。
+
+## 外部 HTTPS 部署契约
+
+部署前必须提供一个由部署环境负责解析和签发证书的 HTTPS origin，并通过环境变量传入：
+
+```bash
+export YEISME_CONTROL_ORIGIN=https://<internal-control-center-host>
+export YEISME_CONTROL_BIND=127.0.0.1
+bun run build
+bun scripts/prepare-intranet-release.ts
+```
+
+仓库不保存实际主机名、IP、证书、账号、密码、observer token 或 Provider 凭据。反向代理只转发到 loopback 应用端口，并阻断 `/docs/`、`/source.zip` 和源码路径。
 
 ## 运行命令
 
 ```bash
-systemctl --user status yeisme-control-center.service yeisme-control-center-tls.service
+systemctl --user status yeisme-control-center.service
 systemctl --user restart yeisme-control-center.service
-systemctl --user restart yeisme-control-center-tls.service
-journalctl --user -u yeisme-control-center.service -u yeisme-control-center-tls.service --since today
+journalctl --user -u yeisme-control-center.service --since today
 ```
 
-虽然 systemd unit 名称保留了 `-tls` 以兼容已有部署脚本，但该单元当前运行的是纯 HTTP Caddy 网关，不启用 TLS。
+停止控制中心不会停止 owner 服务，也不会删除任务、资产或凭据。发布切换必须先通过候选构建和组件验证；失败时恢复 `previous_release`，不得覆盖开发目录。
 
-完全停用入口但保留账号、配置与发布快照：
+## Provider 与 owner 状态
+
+Provider transport、action contract、任务观测、内容读取和真实生成分别验收。`configured`、`transport verified` 或 `tools/list` 成功都不能直接推导业务 ready。真实 canary 只允许在明确预算和 owner 授权下运行：
 
 ```bash
-systemctl --user disable --now yeisme-control-center-tls.service yeisme-control-center.service
+bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5
 ```
 
-用户级配置位于 `~/.config/yeisme-control-center/config.json`，权限为 `0600`。控制中心重启会撤销旧会话，不会停止 Eikona、Scaena 或 Sonora。
-
-## 当前 Provider 状态
-
-| Owner | 接入 | 当前状态 |
-| --- | --- | --- |
-| Eikona | public HTTPS MCP，图像模型 | configured；已有成功 canary |
-| Scaena | public HTTPS MCP，视频模型 | transport configured；历史提交曾被 Provider `InvalidApiKey` 拒绝 |
-| Sonora | public HTTPS MCP，音频模型 | transport configured；下游 `openai-tts` credential 缺失 |
-
-这些状态只说明 transport、授权和 action contract 的观察结果，不等于三模态生成都可用。本项目只做用量、成本统计和可视化，不做发票、付款、余额扣减或客户收费。
-
-## 证据
-
-- HTTP 切换备份：`~/.local/state/yeisme-control-center/transport-http-<timestamp>/`
-- 当前发布 manifest：`~/.local/state/yeisme-control-center/deployment.json`
-- 当前应用配置：`~/.config/yeisme-control-center/config.json`
-- HTTP 验收证据写入 `temp/integration-test-runs/lan-<run-id>/`。
-
-其他设备只需访问 `http://10.10.1.101:51873` 并确认能够到达该内网地址；不需要导入证书。
+当前状态以 [当前实现状态](current-status.md) 为准；本文件不记录真实部署地址或秘密配置。

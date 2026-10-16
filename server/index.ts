@@ -4,6 +4,7 @@ import { pipeline } from "node:stream/promises";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, extname, sep } from "node:path";
 import { createApp } from "./app";
+import { validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
 const file = process.env.YEISME_CONTROL_CONFIG;
 const providerEntries: Array<[string, { owner: "eikona" | "scaena" | "sonora"; endpoint: string; credential_env: string; enabled: boolean }]> = [];
@@ -20,10 +21,11 @@ const baseConfig: ServerConfig = file
       port: Number(process.env.YEISME_CONTROL_PORT || 4312),
       principals: [],
       owners: {},
-      workspace_v18_demo: process.env.YEISME_V18_DEMO === "1",
     };
 const config: ServerConfig = {
   ...baseConfig,
+  origin: validateControlOrigin(baseConfig.origin),
+  bind: validateControlBind(process.env.YEISME_CONTROL_BIND || baseConfig.bind || "127.0.0.1"),
   ...(file ? { config_file: resolve(file) } : {}),
   providers: { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
 };
@@ -121,6 +123,6 @@ createServer(async (req, res) => {
     res.writeHead(500, { "Content-Type": "application/json" });
     res.end('{"error":"request_failed"}');
   }
-}).listen(config.port, "127.0.0.1", () =>
-  console.log("Control center listening on loopback port " + config.port),
+}).listen(config.port, config.bind, () =>
+  console.log("Control center listening on " + config.bind + ":" + config.port),
 );

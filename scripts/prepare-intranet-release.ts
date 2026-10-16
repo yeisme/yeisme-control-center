@@ -39,7 +39,7 @@ const checksums: Record<string, string> = {};
 let failed = false;
 try {
   await access(join(root, 'dist/index.html'));
-  for (const entry of ['index.html', 'workspace-v18.html']) {
+  for (const entry of ['index.html']) {
     await access(join(root, 'dist', entry));
     await cp(join(root, 'dist', entry), join(run, 'artifacts/control-center/dist', entry));
   }

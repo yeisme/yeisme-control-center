@@ -425,9 +425,10 @@ try {
       reject(Error("server_exited"));
     });
   });
+  const executablePath = process.env.CHROME_PATH || (await fs.access("/usr/bin/google-chrome").then(() => "/usr/bin/google-chrome").catch(() => undefined));
   browser = await chromium.launch({
     headless: true,
-    executablePath: "/usr/bin/google-chrome",
+    ...(executablePath ? { executablePath } : {}),
     args: ["--no-sandbox"],
   });
   page = await browser.newPage({
@@ -472,7 +473,7 @@ try {
   });
   await page.goto(base + "/#/tasks");
   await page.getByLabel("用户名", { exact: true }).fill("component-admin");
-  await page.getByLabel("个人访问密码").fill(password);
+  await page.getByLabel(/个人访问密码|管理员分发的访问 Key/).fill(password);
   await page.getByRole("button", { name: "登录个人工作区" }).click();
   await expect(
     page.getByRole("button", { name: "隔离任务", exact: true }),

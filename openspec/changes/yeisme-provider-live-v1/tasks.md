@@ -12,5 +12,5 @@
 - [ ] `bun run typecheck`
 - [ ] `bun run test`
 - [ ] `bun run build`
-- [ ] `bun run test:ui`
+- [ ] `bun run test:v18`
 - [ ] 真实 canary：`bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5`

@@ -1,5 +1,5 @@
 ## Context
-Open Design MCP 已确认主项目 yeisme-service-control-center、index.html、六入口 AdminCN v7 与能力矩阵；后续会话过期不抹除已读取证据。client/yeisme-control-center 为未初始提交的独立 Git 工作区，当前实现必须保留。10.10.1.101 是本机，三个 yeisme-lan owner unit 正在运行，但没有控制中心配置与 observer 授权证明。
+Open Design MCP 已确认主项目 yeisme-service-control-center、index.html、六入口 AdminCN v7 与能力矩阵；后续会话过期不抹除已读取证据。client/yeisme-control-center 为未初始提交的独立 Git 工作区，当前实现必须保留。configured internal origin 是本机，三个 yeisme-lan owner unit 正在运行，但没有控制中心配置与 observer 授权证明。
 
 ## Decisions
 - PHASE 分离：CONTRACT 固定协议；BACKEND 和 FRONTEND 独立验收；真实联通进入 INTEGRATION。

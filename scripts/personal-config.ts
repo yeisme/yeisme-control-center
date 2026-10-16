@@ -15,7 +15,7 @@ import { clientOrigin } from "../src/task-links";
 import type { ServerConfig, TaskConnection, ProviderOwner } from "../server/contracts";
 const [command, file, ...args] = process.argv.slice(2);
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|provider|studio|cancel|content|disable|workspace-v18|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|provider|studio|cancel|content|disable|status <config-file> [arguments]";
 if (
   !file ||
   ![
@@ -29,7 +29,6 @@ if (
     "cancel",
     "disable",
     "content",
-  "workspace-v18",
     "status",
   ].includes(command)
 )
@@ -53,6 +52,7 @@ if (command === "init") {
   const u = new URL(origin);
   save({
     origin,
+    bind: "127.0.0.1",
     port: u.protocol === "http:" && u.port ? Number(u.port) : 4312,
     auth_mode: "personal",
     personal: {
@@ -305,12 +305,6 @@ if (command === "init") {
     console.log(
       "Connection disabled; restart the local control-center process to reload configuration.",
     );
-  } else if (command === "workspace-v18") {
-    if (!config.personal || !["on", "off"].includes(args[0] || "") || args.length !== 1)
-      throw Error("workspace-v18 requires on|off in personal mode.");
-    config.workspace_v18_demo = args[0] === "on";
-    save(config);
-    console.log("Workspace v18 demo API preference saved; restart the control center to reload.");
   } else
     console.log(
       JSON.stringify(

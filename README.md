@@ -1,31 +1,56 @@
-# Yeisme 控制中心
+# Yeisme Control Center
 
-当前界面：**admincn-v7 · 六入口 AdminCN 工作区**。界面规格见 [设计与组件规范](docs/admincn-v7.md)。
-最新侧栏与全屏详情规范见 [侧栏与动效](docs/sidebar-motion.md)。
+Yeisme Control Center 是正式 TypeScript React 前端：默认读取真实授权范围、owner 任务、资产、能力和用量。当前阶段优先真实只读，未接入正式 owner 写合同的动作保持关闭。
 
-新增个人任务观测正在实施：[当前实现与未完成项](docs/task-observation-implementation.md)、[个人配置与独立激活](docs/personal-task-observation.md)、[其他工具接入候选](docs/tool-observation-backlog.md)。对应 `openspec/changes/yeisme-task-visibility-v1/`，尚未完成三owner真实进程全链路验收。
+领域状态仍由 Eikona、Scaena、Sonora 和其他 owner 持有。owner 未提供项目进度、制作单元、审阅或交付合同的字段保持未知，不使用 fixture 补齐。
 
-日常管理增量已完成本地实现：[交付状态与待授权项](docs/daily-management-delivery.md)、[现存产品与接入基线](docs/daily-management-baseline.md)。包含具名管理员、26 项服务目录与历史结果。控制中心已部署到 **https://10.10.1.101:8443**；账号、证书信任与运行命令见 [内网部署](docs/lan-deployment.md)。三服务真实接入仍待版本合同和独立observer授权。
-
-正式客户端与受控聚合层。演示和真实数据严格分离，领域真源仍由 Aigora、Scaena、Eikona、Sonora 持有。
+## 常用命令
 
 ```bash
 bun install --frozen-lockfile
 bun run typecheck
 bun run test
 bun run build
-bun run serve
+bun run preview:real
+bun run test:app
+bun run test:owner-live-read
+bun run check:public-surface
 ```
 
-默认打开 http://127.0.0.1:4312 ，未配置统一身份时显示登录接入状态。设计演示使用 `http://127.0.0.1:4312/?mode=demo`。开发：`bun run dev`；Vite 4298 将同源 API 转发至4312，登录时需保证配置的origin与实际访问origin一致。
+`test:app` 验证正式 App Shell、HashRouter、真实入口和无 demo API 请求；真实只读预览使用 `bun run test:preview:real`。
+
+前端沿用既有原型的视觉方向，不再依赖 OpenDesign。视觉审计使用项目级 Taste 快照与 `better-ui`，页面实现位于 `src/`，以正式 API 和统一 App Shell 为准。技能 profile 校验和同步：
 
 ```bash
-node scripts/configure-server.mjs
-YEISME_CONTROL_CONFIG=.local/server.json bun run serve
-bun run build:demo
-bun run test:ui
+scripts/skills.sh profile validate client/yeisme-control-center
+scripts/skills.sh sync-target client/yeisme-control-center
 ```
 
-配置文件只含非秘密端点、明确身份绑定和secret文件引用；secret文件0600，不提交或输出。未提供默认内网管理Key，不自动注册IdP，不部署owner服务。公开OpenDesign仅发布 `dist-demo`，不能发布真实配置或正文。
+默认开发入口：
 
-文档：[请求与界面规格](docs/request-visibility.md)、[来源能力矩阵](docs/source-capability-matrix.md)、[接入运行说明](docs/live-read-integration.md)。正式OpenSpec：`openspec/changes/yeisme-request-visibility-v1/`。
+```bash
+bun run dev
+```
+
+真实开发预览使用临时配置读取当前 owner 连接，退出后自动清理临时密码和配置：
+
+```bash
+export YEISME_PREVIEW_PASSWORD='仅用于本次预览的临时密码'
+bun run preview:real
+```
+
+受控局域网联调：
+
+```bash
+YEISME_PREVIEW_BIND=0.0.0.0 YEISME_PREVIEW_UI_HOST=0.0.0.0 bun run preview:real
+```
+
+## 运行边界
+
+- live 默认只读，不存在 demo 回退。
+- 前端只调用正式 session、services、connections、capabilities、usage、tasks 和 artifact 接口。
+- Provider live、项目创建、团队邀请、审阅写入和交付发送仍是独立授权合同。
+- 不提交真实内网地址、凭据、Provider payload 或任务正文。
+- 不运行 race。
+
+部署与接入说明见 [docs/lan-deployment.md](docs/lan-deployment.md)，当前状态见 [docs/current-status.md](docs/current-status.md)。

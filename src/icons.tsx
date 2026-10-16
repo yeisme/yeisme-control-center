@@ -1,4 +1,4 @@
-// AdminCN uses Lucide; keep one semantic icon entry point.
+// Workspace v18.1 uses one semantic Lucide icon entry point.
 export {
   Activity,
   ChartNoAxesCombined,

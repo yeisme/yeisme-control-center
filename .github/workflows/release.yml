@@ -1,0 +1,53 @@
+name: Release candidate artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to package (for example v0.2.0-rc.1)
+        required: true
+        type: string
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Verify and build
+        run: |
+          bun run typecheck
+          bun run test
+          bun run build
+          bun run check:public-surface
+          bun run release:manifest
+      - name: Create release archive
+        env:
+          RELEASE_NAME: ${{ inputs.tag || github.ref_name }}
+        run: tar -czf "yeisme-control-center-${RELEASE_NAME}.tar.gz" dist temp/delivery/release-manifest.json temp/delivery/sbom.spdx.json CHANGELOG.md README.md
+      - name: Attest release archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "yeisme-control-center-${{ inputs.tag || github.ref_name }}.tar.gz"
+      - name: Upload release candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yeisme-control-center-${{ inputs.tag || github.ref_name }}
+          path: |
+            yeisme-control-center-${{ inputs.tag || github.ref_name }}.tar.gz
+            temp/delivery/release-manifest.json
+            temp/delivery/sbom.spdx.json

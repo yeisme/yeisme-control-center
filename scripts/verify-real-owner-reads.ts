@@ -1,0 +1,187 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { resolve, join } from "node:path";
+import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { hashPassword } from "../server/password";
+
+const root = resolve(import.meta.dirname, "..");
+const sourcePath = join(homedir(), ".config/yeisme-control-center/config.json");
+const id = "real-owner-read-" + new Date().toISOString().replace(/[:.]/g, "-");
+const evidence = resolve(root, "temp/integration-test-runs", id);
+const base = "http://127.0.0.1:4312";
+const privateDir = await mkdtemp("/tmp/yeisme-real-owner-read-");
+const password = "real-owner-read-local-only";
+const passwordRef = join(privateDir, "password");
+const configRef = join(privateDir, "config.json");
+let child: ReturnType<typeof spawn> | undefined;
+let status: "passed" | "failed" = "failed";
+let summary: Record<string, unknown> = { status, real_owner_reads: false, provider_calls: false, mutations: false };
+let boundaryChecks: Record<string, number> = {};
+const logs: string[] = [];
+
+await mkdir(join(evidence, "artifacts"), { recursive: true, mode: 0o700 });
+await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n");
+await writeFile(join(evidence, "env.json"), JSON.stringify({
+  origin: base,
+  owner_reads: ["capabilities", "tasks.list", "tasks.get", "tasks.events"],
+  real_owner_reads: true,
+  provider_calls: false,
+  mutations: false,
+  credentials_logged: false,
+}, null, 2) + "\n");
+await writeFile(join(evidence, "stdout.log"), "");
+await writeFile(join(evidence, "stderr.log"), "");
+
+function record(value: unknown) {
+  logs.push(JSON.stringify(value));
+}
+async function waitForServer(output: { value: string }) {
+  for (let i = 0; i < 80; i++) {
+    if (output.value.includes("listening")) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("owner_read_server_start_timeout");
+}
+async function request(path: string, init: RequestInit = {}) {
+  const response = await fetch(base + path, {
+    ...init,
+    headers: { Origin: base, ...(init.headers || {}) },
+  });
+  let body: any = null;
+  try { body = await response.json(); } catch { /* empty response */ }
+  return { response, body };
+}
+
+try {
+  const config = JSON.parse(await readFile(sourcePath, "utf8"));
+  await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o600 });
+  config.origin = base;
+  config.bind = "127.0.0.1";
+  config.port = 4312;
+  config.personal = {
+    ...config.personal,
+    username: "owner-read-check",
+    role: "admin",
+    password_hash_ref: passwordRef,
+    users: [],
+  };
+  await writeFile(configRef, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+
+  const output = { value: "" };
+  child = spawn("bun", ["server/index.ts"], {
+    cwd: root,
+    env: { ...process.env, YEISME_CONTROL_CONFIG: configRef, YEISME_CONTROL_BIND: "127.0.0.1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk) => { output.value += String(chunk); });
+  child.stderr?.on("data", (chunk) => { output.value += String(chunk); });
+  await waitForServer(output);
+
+  const login = await request("/api/control-center/v1/auth/personal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "owner-read-check", password }),
+  });
+  if (login.response.status !== 200) throw new Error("owner_read_login_failed");
+  const cookie = login.response.headers.get("set-cookie")?.split(";")[0] || "";
+  const session = await request("/api/control-center/v1/session", { headers: { Cookie: cookie } });
+  if (session.response.status !== 200) throw new Error("owner_read_session_failed");
+  const scope = session.body?.scopes?.[0]?.id;
+  if (typeof scope !== "string" || !scope) throw new Error("owner_read_scope_missing");
+  const authHeaders = { Cookie: cookie };
+  const unauthenticated = await request("/api/control-center/v1/session");
+  const invalidTask = await request(`/api/control-center/v1/tasks/not-a-valid-task?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+  boundaryChecks = { unauthenticated_session: unauthenticated.response.status, invalid_task: invalidTask.response.status };
+  if (unauthenticated.response.status !== 401 || invalidTask.response.status !== 404)
+    throw new Error(`owner_read_boundary_failed:${unauthenticated.response.status}/${invalidTask.response.status}`);
+  const services = await request(`/api/control-center/v1/services?scope=${encodeURIComponent(scope)}&observe=1`, { headers: authHeaders });
+  const connections = await request(`/api/control-center/v1/connections?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+  const active = await request(`/api/control-center/v1/tasks?scope=${encodeURIComponent(scope)}&mode=active`, { headers: authHeaders });
+  const history = await request(`/api/control-center/v1/tasks?scope=${encodeURIComponent(scope)}&mode=history`, { headers: authHeaders });
+  const capabilities = await request(`/api/control-center/v1/capabilities?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+  for (const [name, result] of Object.entries({ services, connections, active, history, capabilities })) {
+    if (result.response.status !== 200) throw new Error(`owner_read_${name}_failed`);
+  }
+  const core = (connections.body?.connections || []).filter((item: any) => ["eikona", "scaena", "sonora"].includes(item.owner));
+  if (core.length < 3 || core.some((item: any) => item.state !== "ready" || item.runtime?.transport !== "verified" || item.runtime?.authorization !== "verified" || item.runtime?.contract !== "supported"))
+    throw new Error("owner_read_connection_not_ready");
+  const activeRows = Array.isArray(active.body?.rows) ? active.body.rows : [];
+  const historyRows = Array.isArray(history.body?.rows) ? history.body.rows : [];
+  const ownerRows = Object.fromEntries(["eikona", "scaena", "sonora"].map((owner) => {
+    const connectionsForOwner = core.filter((item: any) => item.owner === owner);
+    return [owner, {
+      connections: connectionsForOwner.map((item: any) => item.id),
+      state: connectionsForOwner.every((item: any) => item.state === "ready") ? "ready" : "partial",
+      task_rows_active: activeRows.filter((row: any) => row?.locator?.owner === owner).length,
+      task_rows_history: historyRows.filter((row: any) => row?.locator?.owner === owner).length,
+    }];
+  }));
+  const taskChecks: Record<string, unknown>[] = [];
+  const csrf = typeof session.body?.csrf === "string" ? session.body.csrf : "";
+  for (const owner of ["eikona", "scaena", "sonora"]) {
+    const row = [...activeRows, ...historyRows].find((candidate: any) => candidate?.locator?.owner === owner && typeof candidate.task_key === "string");
+    if (!row) {
+      taskChecks.push({ owner, detail: "no_task_observed", events: "no_task_observed", artifact_access: "no_task_observed" });
+      continue;
+    }
+    const taskBase = `/api/control-center/v1/tasks/${encodeURIComponent(row.task_key)}`;
+    const taskPath = `${taskBase}?scope=${encodeURIComponent(scope)}`;
+    const detail = await request(taskPath, { headers: authHeaders });
+    const events = await request(`${taskBase}/events?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+    if (detail.response.status !== 200 || events.response.status !== 200)
+      throw new Error(`owner_read_${owner}_task_detail_or_events_failed:${detail.response.status}/${events.response.status}:${detail.body?.error || ""}/${events.body?.error || ""}:key=${row.task_key.length}:${row.task_key.split(".").length}:connection=${row.connection_id || ""}`);
+    let artifactAccess: string = "no_artifact";
+    const artifact = Array.isArray(row.results) ? row.results.find((candidate: any) => candidate && typeof candidate.ref === "string") : undefined;
+    const canPreview = Array.isArray(row.allowed_actions) && row.allowed_actions.some((action: any) => action.action === "preview" && action.enabled === true);
+    if (artifact && canPreview && csrf) {
+      const grant = await request(`${taskBase}/artifacts/${encodeURIComponent(artifact.ref)}/access?scope=${encodeURIComponent(scope)}`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        body: JSON.stringify({ purpose: "preview" }),
+      });
+      artifactAccess = `${grant.response.status}:${grant.body?.error || "ok"}`;
+      if (![200, 403, 404, 410, 422, 503].includes(grant.response.status))
+        throw new Error(`owner_read_${owner}_artifact_access_failed:${artifactAccess}`);
+    }
+    taskChecks.push({ owner, detail: detail.response.status, events: events.response.status, artifact_access: artifactAccess, has_results: Boolean(artifact) });
+  }
+  const providerStates = Object.fromEntries((capabilities.body?.capabilities || []).map((item: any) => [item.owner, { state: item.state, supports_live_submit: item.supports_live_submit === true }]));
+  summary = {
+    schema_version: "yeisme.integration_test_evidence.v1",
+    status: "passed",
+    layer: "system",
+    real_owner_reads: true,
+    provider_calls: false,
+    mutations: false,
+    owners: ownerRows,
+    provider_discovery: providerStates,
+    task_rows: { active: activeRows.length, history: historyRows.length },
+    task_checks: taskChecks,
+    boundary_checks: boundaryChecks,
+    evidence: evidence,
+  };
+  await writeFile(join(evidence, "artifacts", "owner-read.json"), JSON.stringify({
+    owners: ownerRows,
+    connections: core.map((item: any) => ({ id: item.id, owner: item.owner, state: item.state, runtime: item.runtime })),
+    task_rows: summary.task_rows,
+    task_checks: taskChecks,
+    boundary_checks: boundaryChecks,
+    provider_discovery: providerStates,
+  }, null, 2) + "\n");
+  status = "passed";
+  record({ status, owners: ownerRows, provider_discovery: providerStates, task_rows: summary.task_rows, task_checks: taskChecks });
+} catch (error) {
+  summary = { ...summary, error: error instanceof Error ? error.message : "owner_read_failed", evidence };
+  record(summary);
+} finally {
+  child?.kill("SIGTERM");
+  setTimeout(() => child?.kill("SIGKILL"), 500);
+  await writeFile(join(evidence, "stdout.log"), logs.join("\n") + "\n");
+  await writeFile(join(evidence, "stderr.log"), status === "passed" ? "" : JSON.stringify(summary) + "\n");
+  await writeFile(join(evidence, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  if (status !== "passed")
+    await writeFile(join(evidence, "artifacts", "result.json"), JSON.stringify({ status, boundary_checks: boundaryChecks, summary }, null, 2) + "\n");
+  await rm(privateDir, { recursive: true, force: true });
+}
+console.log(JSON.stringify({ ...summary, evidence }, null, 2));
+if (status !== "passed") process.exitCode = 1;

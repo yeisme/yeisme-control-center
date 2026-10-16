@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { dedupeUsageFacts } from "../src/workspace-v18/usage-analytics";
-import type { UsageFact } from "../src/workspace-v18/types";
+import { dedupeUsageFacts } from "../src/pages/usage/UsageAnalytics";
+import type { UsageFact } from "../src/shared/types";
 
 const fact = (id: string, sourceRef: string, cost: number): UsageFact => ({
   id,

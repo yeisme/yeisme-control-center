@@ -2,12 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, chmodSync, 
 import { resolve, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { validateControlOrigin } from "../server/auth";
 
-const [command, origin = "http://10.10.1.101:51873"] = process.argv.slice(2);
-if (command !== "prepare" || process.argv.length > 4) throw new Error("Usage: bun scripts/lan-deploy.ts prepare [http://10.10.1.101:51873]");
-const url = new URL(origin);
-if (url.origin !== origin || url.hostname !== "10.10.1.101" || url.protocol !== "http:" || url.port !== "51873")
-  throw new Error("This delivery is restricted to http://10.10.1.101:51873.");
+const [command, origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312"] = process.argv.slice(2);
+if (command !== "prepare" || process.argv.length > 4) throw new Error("Usage: bun scripts/lan-deploy.ts prepare [origin]");
+validateControlOrigin(origin);
+const gatewayBind = process.env.YEISME_CONTROL_GATEWAY_BIND || "127.0.0.1";
 const root = resolve(import.meta.dirname, "..");
 const configHome = join(homedir(), ".config/yeisme-control-center");
 const state = join(homedir(), ".local/state/yeisme-control-center");
@@ -38,7 +38,7 @@ const release = join(state, "releases", releaseId);
 mkdirSync(join(release, "dist"), { recursive: true, mode: 0o700 });
 // Deploy only application bytes, not source archives, internal docs or test evidence.
 cpSync(join(root, "dist/assets"), join(release, "dist/assets"), { recursive: true });
-for (const entry of ["index.html", "workspace-v18.html"]) {
+for (const entry of ["index.html"]) {
   cpSync(join(root, "dist", entry), join(release, "dist", entry));
 }
 run(bun, ["build", "server/index.ts", "--target=bun", "--outfile=" + join(release, "server.mjs")]);
@@ -55,7 +55,7 @@ privateWrite(caddyfile, `{
   }
 }
 ${origin} {
-  bind 10.10.1.101
+  bind ${gatewayBind}
   header {
     X-Content-Type-Options nosniff
     Referrer-Policy same-origin
@@ -92,7 +92,7 @@ ${common}
 WantedBy=default.target
 `);
 privateWrite(tlsUnit, `[Unit]
-Description=Yeisme control center private LAN HTTP gateway
+Description=Yeisme control center HTTPS gateway
 After=network-online.target yeisme-control-center.service
 Wants=network-online.target yeisme-control-center.service
 

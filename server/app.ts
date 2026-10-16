@@ -11,7 +11,6 @@ import { MediaBridge } from "./media";
 import { serviceDirectory } from "./service-directory";
 import type { TaskSnapshot } from "../src/task-observation";
 import type { ServerConfig, ScopeBinding, Session, Owner } from "./contracts";
-import { createWorkspaceV18Demo } from "./workspace-v18-demo";
 import {
   ProviderRunManager,
   type ProviderRunRequest,
@@ -81,8 +80,7 @@ export function createApp(
     tasks = deps.tasks || new TaskConnections(config),
     providers = deps.providers || new ProviderRunManager(config),
     media = new MediaBridge(tasks),
-    cursorKey = randomBytes(32),
-    workspaceV18Demo = createWorkspaceV18Demo();
+    cursorKey = randomBytes(32);
   const scoped = (s: Session, id: string | null): ScopeBinding => {
     const p = auth.principal(s);
     const scope = p?.scopes.find((v) => v.id === id);
@@ -143,25 +141,13 @@ export function createApp(
         path = url.pathname.slice(prefix.length);
       if (!url.pathname.startsWith(prefix + "/"))
         return json({ error: "not_found" }, 404);
-      const v18ProxyOrigin =
-        config.workspace_v18_demo &&
-        path.startsWith("/workspace-v18/") &&
-        /^https?:\/\/127\.0\.0\.1:\d+$/.test(r.headers.get("origin") || "");
       if (
-        !v18ProxyOrigin &&
         (url.origin !== config.origin ||
           (r.headers.has("origin") && r.headers.get("origin") !== config.origin))
       )
         throw new AuthError("origin_denied", 403);
       if (r.method === "GET" && path === "/health")
         return json({ status: "ok", service: "yeisme-control-center" });
-      if (config.workspace_v18_demo && path.startsWith("/workspace-v18/")) {
-        if (config.personal || config.auth_mode === "oidc") {
-          const v18Session = auth.current(r);
-          if (r.method === "POST") auth.csrf(r, v18Session);
-        }
-        return await workspaceV18Demo(r, path);
-      }
       if (r.method === "POST" && path === "/auth/personal") {
         const raw = await r.text();
         if (raw.length > 2048)

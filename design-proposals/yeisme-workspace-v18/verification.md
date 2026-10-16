@@ -17,7 +17,7 @@
 ```bash
 cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
 bun run build
-bun run serve:v18
+bun run dev
 ```
 
 另开终端执行：
@@ -26,5 +26,5 @@ bun run serve:v18
 cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
 bun run typecheck
 bun run test
-V18_URL=http://127.0.0.1:4313/workspace-v18.html bun run test:v18
+bun run test:app
 ```

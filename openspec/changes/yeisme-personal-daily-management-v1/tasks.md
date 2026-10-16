@@ -6,7 +6,7 @@
 - [x] 4.1 FRONTEND：真实登录、全服务目录、设置与工作区；scope=src/相关组件、tests/相关测试；依赖=2.1；验证=bun run typecheck 及隔离浏览器验证；预期=六入口、异常状态和响应式可用；owner=控制中心；lane=串行；失败=保留脱敏证据、归因并重跑聚焦检查
 - [ ] 5.1 INTEGRATION：核心三服务真实只读；scope=独立运行配置与脱敏证据；依赖=3.1、4.1及合法 observer；验证=受限能力、原任务、原结果读取；预期=三服务分别有真实证据，不付费、不发真实取消；owner=控制中心；lane=串行；失败=保留脱敏证据、归因并重跑聚焦检查
 - [ ] 6.1 INTEGRATION：最终质量和安全；scope=本项目测试入口；依赖=5.1；验证=bun run typecheck && bun run test && bun run build 及目标浏览器链路；预期=无新增失败，证据六件套齐全，不运行 race；owner=控制中心；lane=串行；失败=保留脱敏证据、归因并重跑聚焦检查
-- [ ] 7.1 INTEGRATION：10.10.1.101 交付与运行说明；scope=控制中心专属运行环境及docs；依赖=6.1、部署准入与凭据安全初始化；验证=HTTPS、登录、核心读取、重启恢复；预期=实际可访问，停止不影响 owner；owner=控制中心；lane=串行；失败=保留脱敏证据、归因并重跑聚焦检查
+- [ ] 7.1 INTEGRATION：configured internal origin 交付与运行说明；scope=控制中心专属运行环境及docs；依赖=6.1、部署准入与凭据安全初始化；验证=HTTPS、登录、核心读取、重启恢复；预期=实际可访问，停止不影响 owner；owner=控制中心；lane=串行；失败=保留脱敏证据、归因并重跑聚焦检查
 
 使用 bun scripts/daily-management-spec.ts mark <编号> <证据引用> 更新，不手改状态。
 

@@ -1,15 +1,15 @@
 # Yeisme Workspace v18.1
 
-Yeisme Workspace v18.1 是面向内容制作团队的独立本地原型。它把项目、制作单元、AI 创作、任务、资产版本、审阅、交付、模型与工具、用量与成本串成一条可点击的演示旅程。
+Yeisme Workspace v18.1 是当前正式 Control Center 的视觉与交互基线。它把项目、制作单元、AI 创作、任务、资产版本、审阅、交付、模型与工具、用量与成本串成统一工作流。
 
-原型入口是客户端的独立 Vite 页面：`/workspace-v18.html`。正式控制中心、服务目录、v17 原型和 owner 服务均保持不变。
+根入口是唯一客户端页面：`/`。默认读取真实只读数据；owner 服务仍是领域真源。
 
-OpenDesign 同步入口为项目 `yeisme-service-control-center` 的根 `index.html`。当前根入口已更新为 v18.1，后续视觉原型优先从该入口读取；历史 v17 文件仍保留在 `design-proposals/control-center-v17/`。
+当前 v18.1 规范与实现共同维护，旧版本原型不再作为运行或构建输入。
 
 ## 演示边界
 
-- 所有提交、任务推进、版本采用和交付清单都只更新浏览器内存状态。
-- 不调用 Provider、不上传文件、不写入数据库、不产生真实费用。
+- 真实前端只读取正式 owner 合同。
+- Provider submit、任务推进、版本采用和交付发送没有正式合同前保持关闭。
 - 用量与成本页面只展示演示用量、可确认上游成本、内部预算观察和未知状态，不接入发票、支付、退款、余额扣减或客户计费。
 - MCP 与 Tool 的下游模型成本只在总成本中归因一次，不按页面层级重复累计。
 - `design_fixture`、`partial`、`unknown`、`waiting_review` 等状态保留其原始含义。
@@ -25,14 +25,14 @@ OpenDesign 同步入口为项目 `yeisme-service-control-center` 的根 `index.h
 cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
 bun install --frozen-lockfile
 bun run build
-bun run serve:v18
+bun run dev
 ```
 
-服务监听 `http://127.0.0.1:4313`。直接打开 `http://127.0.0.1:4313/workspace-v18.html`，或在终端二启动 Vite 代理：
+打开 `http://127.0.0.1:4298/`：
 
 ```bash
 cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
-V18_API_ORIGIN=http://127.0.0.1:4313 bun run dev:v18
+V18_API_ORIGIN=http://127.0.0.1:4312 bun run dev
 ```
 
 Vite 端口若被占用会自动选择下一个端口。
@@ -40,22 +40,21 @@ Vite 端口若被占用会自动选择下一个端口。
 ## 验证
 
 ```bash
-V18_URL=http://127.0.0.1:4313/workspace-v18.html bun run test:v18
+bun run test:app
 ```
 
 验证 Vite 代理路径时，将 `V18_URL` 替换为实际 Vite 地址。
 
 ## 本地 API
 
-- `GET /api/control-center/v1/workspace-v18/state`
-- `POST /api/control-center/v1/workspace-v18/tasks`
-- `POST /api/control-center/v1/workspace-v18/tasks/:id/advance`
-- `POST /api/control-center/v1/workspace-v18/reviews/:assetId/approve`
-- `POST /api/control-center/v1/workspace-v18/delivery/generate`
+- `GET /api/control-center/v1/session`
+- `GET /api/control-center/v1/capabilities?scope=...`
+- `GET /api/control-center/v1/usage?scope=...`
+- `GET /api/control-center/v1/tasks?scope=...&mode=active|history`
 
-演示 API 只在 `bun run serve:v18` 的 loopback 开关下开放，服务重启后状态重置。
+演示 API 只在显式 demo 配置下开放，服务重启后状态重置。
 
-v18.1 的 `state` 额外包含 `capabilityCatalog` 与 `usage` 只读投影。它们用于能力目录、成本趋势、项目归因和用量明细，不代表正式 owner 或费用合同。
+正式 API 的 `capabilities` 与 `usage` 只读投影用于能力目录、成本趋势、项目归因和用量明细，不代表正式 owner 写入合同。
 
 v18.1 增加项目 URL tab、登录态门控、图像／音频／视频／文本四类创作设置表单，以及授权演示下载。未登录时使用控制中心个人登录合同；下载只返回短时同源演示句柄，不暴露 owner URL 或凭据。
 

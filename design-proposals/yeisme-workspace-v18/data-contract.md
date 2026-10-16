@@ -1,8 +1,8 @@
 # v18 展示数据合同
 
-原型只定义前端展示模型和本地演示 API，不替代 owner 真源。
+本文定义前端展示模型和正式只读 API 消费边界，不替代 owner 真源。
 
-前端通过同源 `/api/control-center/v1/workspace-v18/*` 读取和更新内存状态。演示 API 不访问 Provider、不写数据库，也不返回真实费用、发票、支付或授权事实。
+前端通过同源 `/api/control-center/v1/session`、`capabilities`、`usage`、`tasks` 和 artifact access 接口读取 owner 投影。前端不复制领域状态，不在本地伪造正式结果。
 
 ## v18.1 能力和用量投影
 

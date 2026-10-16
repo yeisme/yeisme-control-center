@@ -1,0 +1,30 @@
+name: Owner live read
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only:
+    runs-on: [self-hosted, yeisme-owner-workspace]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout control center
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Read current owner projections
+        run: bun run test:owner-live-read
+      - name: Upload owner read evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owner-live-read-evidence
+          if-no-files-found: warn
+          path: temp/integration-test-runs/real-owner-read-*/**

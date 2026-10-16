@@ -43,8 +43,7 @@ export function clientOrigin(value: string): string {
     (u.protocol !== "https:" &&
       !(
         u.protocol === "http:" &&
-        (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) ||
-          (u.hostname === "10.10.1.101" && u.port === "51873"))
+        ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)
       ))
   )
     throw new Error("invalid_client_origin");

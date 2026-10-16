@@ -39,17 +39,21 @@ export function validateEndpoint(value: string, issuer: string) {
 export function validateControlOrigin(value: string) {
   const url = new URL(value);
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-  const approvedLanHttp = url.hostname === "10.10.1.101" && url.port === "51873";
   if (
     url.origin !== value ||
     url.username ||
     url.password ||
     url.search ||
     url.hash ||
-    (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || approvedLanHttp)))
+    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
   )
     throw new AuthError("control_origin_not_trusted", 503);
   return url.origin;
+}
+export function validateControlBind(value: string) {
+  if (!["127.0.0.1", "localhost", "::1", "0.0.0.0", "::"].includes(value))
+    throw new AuthError("control_bind_not_trusted", 503);
+  return value;
 }
 export async function boundedJSON(response: Response, max = 1048576) {
   if (!response.ok)
