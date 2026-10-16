@@ -39,6 +39,16 @@ Field 采用 label/control/description/error 分层，使用 id、htmlFor、aria
 
 ## 验证入口
 
+UI 修改后的视觉检查使用本机 Demo 预览，不进入内网开发容器：
+
+```bash
+bun run build:demo
+bun run preview:demo
+CONTROL_CENTER_URL=http://127.0.0.1:4298/?mode=demo bun run test:ui
+```
+
+浏览器预览地址为 `http://127.0.0.1:4298/?mode=demo`。内网地址只用于部署和运行验证。
+
 ```sh
 bun run typecheck
 bun run test
