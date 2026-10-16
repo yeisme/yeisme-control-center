@@ -15,7 +15,7 @@ const verification = JSON.parse(await readFile(join(proof, 'summary.json'), 'utf
 const source = join(candidate, 'artifacts/control-center');
 if (summary.status !== 'passed' || verification.status !== 'passed' || verification.release !== source) throw Error('Passing release-specific component evidence required.');
 const checksums = Object.entries(summary.checksums as Record<string,string>).filter(([file]) => file.startsWith('control-center/'));
-if (!checksums.some(([file]) => file === 'control-center/server.mjs') || !checksums.some(([file]) => file === 'control-center/dist/index.html')) throw Error('Incomplete release fingerprints.');
+if (!checksums.some(([file]) => file === 'control-center/server.mjs') || !checksums.some(([file]) => file === 'control-center/dist/index.html') || !checksums.some(([file]) => file === 'control-center/dist/workspace-v18.html')) throw Error('Incomplete release fingerprints.');
 for (const [file, digest] of checksums) {
   if (file.includes('..') || createHash('sha256').update(await readFile(join(candidate, 'artifacts', file))).digest('hex') !== digest)
     throw Error('Candidate fingerprint mismatch.');
@@ -23,7 +23,8 @@ for (const [file, digest] of checksums) {
 const state = join(homedir(), '.local/state/yeisme-control-center');
 const manifestPath = join(state, 'deployment.json');
 const originalManifest = await readFile(manifestPath, 'utf8'), manifest = JSON.parse(originalManifest);
-if (manifest.origin !== 'https://10.10.1.101:8443' || !manifest.release?.startsWith(join(state, 'releases/'))) throw Error('Unexpected deployment target.');
+const httpsOrigin = manifest.origin.startsWith('https://');
+if (manifest.origin !== 'http://10.10.1.101:51873' || !manifest.release?.startsWith(join(state, 'releases/'))) throw Error('Unexpected deployment target.');
 const unitPath = join(homedir(), '.config/systemd/user/yeisme-control-center.service');
 const originalUnit = await readFile(unitPath, 'utf8');
 if (!originalUnit.includes('WorkingDirectory=' + manifest.release + '\n') || !originalUnit.includes(manifest.release + '/server.mjs')) throw Error('Running unit differs from release baseline.');
@@ -47,7 +48,10 @@ async function atomic(file: string, content: string) {
   await rename(temporary, file);
 }
 function get(path: string) {
-  const result = spawnSync('curl', ['--silent', '--show-error', '--fail', '--max-time', '8', '--cacert', publicCA, manifest.origin + path], { encoding: 'utf8', timeout: 10000 });
+  const args = ['--silent', '--show-error', '--fail', '--max-time', '8'];
+  if (manifest.origin.startsWith('https://')) args.push('--cacert', publicCA);
+  args.push(manifest.origin + path);
+  const result = spawnSync('curl', args, { encoding: 'utf8', timeout: 10000 });
   if (result.status !== 0) throw Error('Trusted HTTPS readback failed.');
   return result.stdout;
 }
@@ -69,12 +73,14 @@ try {
   if (!ready) throw Error('Release health did not recover.');
   const html = get('/');
   if (html !== await readFile(join(destination, 'dist/index.html'), 'utf8')) throw Error('HTTPS assets differ from the candidate.');
+  const v18Html = get('/workspace-v18.html');
+  if (v18Html !== await readFile(join(destination, 'dist/workspace-v18.html'), 'utf8')) throw Error('Workspace v18 entry differs from the candidate.');
   for (const [file, digest] of checksums.filter(([file]) => /dist\/assets\/.*\.(js|css)$/.test(file))) {
     const content = get('/' + file.slice('control-center/dist/'.length));
     if (createHash('sha256').update(content).digest('hex') !== digest) throw Error('Published asset fingerprint mismatch.');
   }
   const next = { ...manifest, release: destination, previous_release: manifest.release, activated: true,
-    verified_at: new Date().toISOString(), evidence: id, verification: { health: true, static_assets: true, authenticated_read: false },
+    verified_at: new Date().toISOString(), evidence: id, verification: { transport: httpsOrigin ? 'https' : 'http', health: true, static_assets: true, authenticated_read: false },
     previous_verification: { release: manifest.release, evidence: manifest.evidence, verified_at: manifest.verified_at },
     component_evidence: proof, owner_configuration_changed: false };
   await atomic(manifestPath, JSON.stringify(next, null, 2) + '\n');
@@ -88,7 +94,7 @@ try {
   await writeFile(join(evidence, 'stderr.log'), `Activation failed; rollback=${rolledBack}.\n`);
 } finally {
   const result = { status: activated ? 'passed' : 'failed', release: destination, previous_release: manifest.release,
-    origin: manifest.origin, activated, rolled_back: rolledBack, tls_verified: activated, authenticated_read: false,
+    origin: manifest.origin, activated, rolled_back: rolledBack, tls_verified: activated && httpsOrigin, transport_verified: activated, authenticated_read: false,
     owner_configuration_changed: false, credentials_changed: false, real_owner_reads: false, component_evidence: proof };
   await writeFile(join(evidence, 'summary.json'), JSON.stringify(result, null, 2) + '\n');
   await writeFile(join(evidence, 'stdout.log'), `Control center activation=${activated}; owner configuration unchanged.\n`);

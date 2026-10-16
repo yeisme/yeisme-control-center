@@ -3,28 +3,33 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
+  statSync,
   renameSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
 import { connectionURL } from "../server/task-connections";
 import { clientOrigin } from "../src/task-links";
-import type { ServerConfig, TaskConnection } from "../server/contracts";
+import type { ServerConfig, TaskConnection, ProviderOwner } from "../server/contracts";
 const [command, file, ...args] = process.argv.slice(2);
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|connect|studio|cancel|content|disable|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|provider|studio|cancel|content|disable|workspace-v18|status <config-file> [arguments]";
 if (
   !file ||
   ![
     "init",
     "account",
     "password",
+    "user",
     "connect",
+    "provider",
     "studio",
     "cancel",
     "disable",
     "content",
+  "workspace-v18",
     "status",
   ].includes(command)
 )
@@ -38,7 +43,7 @@ const save = (config: ServerConfig) => {
     flag: "wx",
   });
   renameSync(temp, path);
-};
+  };
 if (command === "init") {
   if (existsSync(path)) throw Error("Target exists; refusing overwrite.");
   const origin = clientOrigin(args[0] || "http://127.0.0.1:4312");
@@ -153,6 +158,35 @@ if (command === "init") {
     console.log(
       "Password digest updated; existing personal sessions will be invalidated.",
     );
+  } else if (command === "user") {
+    const action = args[0];
+    if (!config.personal || !["add", "list", "revoke"].includes(action || ""))
+      throw Error("user requires add|list|revoke in personal mode.");
+    const users = config.personal.users || [];
+    if (action === "list") {
+      console.log(JSON.stringify(users.map(({ key_hash_ref: _key, ...user }) => ({ ...user, enabled: user.enabled !== false })), null, 2));
+    } else if (action === "revoke") {
+      const username = args[1];
+      if (!username || args.length !== 2) throw Error("user revoke requires <username>.");
+      if (!users.some((user) => user.username === username)) throw Error("User not found.");
+      config.personal.users = users.map((user) => user.username === username ? { ...user, enabled: false } : user);
+      save(config);
+      console.log(JSON.stringify({ username, enabled: false }));
+    } else {
+      const [_, username, role, name, ...scopeArgs] = args;
+      if (!username || !name || !["admin", "viewer"].includes(role || "") || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(username) || users.some((user) => user.username === username))
+        throw Error("user add requires <username> <admin|viewer> <display-name> [scope-id ...].");
+      const scopes = config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id));
+      const scope_ids = scopeArgs.length ? scopeArgs : scopes;
+      if (!scope_ids.length || scope_ids.some((id) => !scopes.includes(id))) throw Error("Unknown scope id.");
+      const access_key = "yk_live_" + randomBytes(32).toString("base64url");
+      const key_hash_ref = resolve(path + ".users", username + ".key");
+      mkdirSync(dirname(key_hash_ref), { recursive: true, mode: 0o700 });
+      writeFileSync(key_hash_ref, (await hashPassword(access_key)) + "\n", { mode: 0o600, flag: "wx" });
+      config.personal.users = [...users, { username, name, role: role as "admin" | "viewer", key_hash_ref, scope_ids, enabled: true, created_at: new Date().toISOString() }];
+      save(config);
+      console.log(JSON.stringify({ username, name, role, scope_ids, access_key, shown_once: true }, null, 2));
+    }
   } else if (command === "connect") {
     const [id, owner, endpoint, project, credential_ref, ...flags] = args;
     if (
@@ -199,6 +233,29 @@ if (command === "init") {
     console.log(
       "Registered endpoint and credential reference; no network call or permission change.",
     );
+  } else if (command === "provider") {
+    const [owner, endpoint, project, credential_ref, model_ref, submit, status, ...rest] = args;
+    if (!owner || !["eikona", "scaena", "sonora"].includes(owner) || !endpoint || !project || !credential_ref || !model_ref || !submit || args.length < 7)
+      throw Error("provider requires <eikona|scaena|sonora> <https-mcp-endpoint> <project> <0600-credential-file> <model-ref> <submit-action> <status-action|->");
+    const file = resolve(credential_ref);
+    if (!existsSync(file) || (statSync(file).mode & 0o077)) throw Error("Provider credential file must exist and be 0600.");
+    const allowedActions = new Set(["generate", "createVideoProviderTask", "voice.audition"]);
+    if (!allowedActions.has(submit)) throw Error("Unsupported provider submit action.");
+    const connection = {
+      owner: owner as ProviderOwner,
+      endpoint,
+      project,
+      credential_ref: file,
+      enabled: true,
+      model_refs: [model_ref],
+      action_manifest: {
+        submit,
+        ...(status && status !== "-" ? { status, reconcile: status } : {}),
+      },
+    };
+    config.providers = { ...(config.providers || {}), [owner]: connection };
+    save(config);
+    console.log(JSON.stringify({ owner, endpoint, project, model_ref, submit, status: status === "-" ? null : status, credential_configured: true, network_called: false }, null, 2));
   } else if (command === "studio") {
     const c = config.connections?.find((c) => c.id === args[0]);
     if (!c || c.owner !== "scaena" || args.length !== 2)
@@ -248,6 +305,12 @@ if (command === "init") {
     console.log(
       "Connection disabled; restart the local control-center process to reload configuration.",
     );
+  } else if (command === "workspace-v18") {
+    if (!config.personal || !["on", "off"].includes(args[0] || "") || args.length !== 1)
+      throw Error("workspace-v18 requires on|off in personal mode.");
+    config.workspace_v18_demo = args[0] === "on";
+    save(config);
+    console.log("Workspace v18 demo API preference saved; restart the control center to reload.");
   } else
     console.log(
       JSON.stringify(
@@ -266,6 +329,14 @@ if (command === "init") {
             content_requested: c.allow_content === true,
             credential_configured: existsSync(c.credential_ref),
           })),
+          providers: Object.fromEntries(Object.entries(config.providers || {}).map(([owner, p]) => [owner, {
+            endpoint: p.endpoint,
+            project: p.project,
+            enabled: p.enabled,
+            model_refs: p.model_refs,
+            credential_configured: !!p.credential_ref && existsSync(p.credential_ref),
+            action_manifest: p.action_manifest,
+          }])),
         },
         null,
         2,

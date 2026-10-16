@@ -30,7 +30,7 @@ async function command(bin: string, args: string[], cwd: string) {
   await writeFile(join(run, 'stderr.log'), result.stderr, { flag: 'a' });
   if (result.code) throw Error('candidate_build_failed');
 }
-const binaries = [
+const binaries = process.env.YEISME_CONTROL_CENTER_ONLY === "1" ? [] : [
   { owner: 'cli/eikona', name: 'eikona', entry: './cmd/eikona' },
   { owner: 'agent/scaena', name: 'scaena', entry: './cmd/scaena' },
   { owner: 'agent/scaena', name: 'scaena-api', entry: './cmd/scaena-api' },
@@ -39,8 +39,17 @@ const checksums: Record<string, string> = {};
 let failed = false;
 try {
   await access(join(root, 'dist/index.html'));
-  await cp(join(root, 'dist/index.html'), join(run, 'artifacts/control-center/dist/index.html'));
+  for (const entry of ['index.html', 'workspace-v18.html']) {
+    await access(join(root, 'dist', entry));
+    await cp(join(root, 'dist', entry), join(run, 'artifacts/control-center/dist', entry));
+  }
   await cp(join(root, 'dist/assets'), join(run, 'artifacts/control-center/dist/assets'), { recursive: true });
+  try {
+    await access(join(root, 'dist/v18'));
+    await cp(join(root, 'dist/v18'), join(run, 'artifacts/control-center/dist/v18'), { recursive: true });
+  } catch {
+    // Optional design media is omitted when the build has no public v18 assets.
+  }
   // Static files use an explicit allowlist; never copy docs, source archives or test evidence.
   for (const name of ['favicon.svg', 'favicon.ico']) {
     try { await access(join(root, 'dist', name)); } catch { continue; }
