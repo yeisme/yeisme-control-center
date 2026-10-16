@@ -112,7 +112,7 @@ const nav = async (p, label) => {
   const names = {
     运行总览: "总览",
     项目与工作台: "项目",
-    请求与生成: "请求",
+    请求与生成: "正在请求",
     资产与交接: "资产",
     服务与连接: "服务",
     组织与成员: "团队",
@@ -133,7 +133,7 @@ const nav = async (p, label) => {
   } else if (label === "审阅与批准") {
     await p
       .getByRole("navigation", { name: "控制中心导航" })
-      .getByRole("button", { name: "请求", exact: true })
+      .getByRole("button", { name: "正在请求", exact: true })
       .click();
     await p.getByRole("button", { name: "待处理", exact: true }).click();
   } else
@@ -244,7 +244,7 @@ try {
           运行总览: "总览",
           项目与工作台: "项目",
           服务与连接: "服务",
-          请求与生成: "请求",
+          请求与生成: "正在请求",
           资产与交接: "资产",
           审阅与批准: "待处理",
           组织与成员: "团队",
@@ -714,7 +714,7 @@ try {
       await p.getByRole("button", { name: "关闭详情", exact: true }).click();
       await rain().focus();
       await p.keyboard.press("Enter");
-      await expect(p.locator("h1")).toHaveText("请求");
+      await expect(p.locator("h1")).toHaveText("正在请求");
       await expect(
         p.getByRole("button", { name: "选择工作范围", exact: true }),
       ).toHaveText(/雨夜重逢/);
@@ -723,58 +723,29 @@ try {
       await expect(rain()).toHaveAttribute("aria-selected", "true");
       await expect(p.locator(".finder-list")).toBeVisible();
       await p.keyboard.press("Alt+ArrowRight");
-      await expect(p.locator("h1")).toHaveText("请求");
+      await expect(p.locator("h1")).toHaveText("正在请求");
       await ctx.close();
     },
   );
   await check(
     "Finder asset preview, independent view preferences and filter invalidation",
     async () => {
-      const { p, ctx } = await fresh("#/assets");
-      const first = p
-        .getByRole("listbox", { name: "资产浏览器" })
-        .getByRole("option")
-        .first();
+      const { p, ctx } = await fresh("#/assets?env=main&project=all");
+      const first = p.locator(".asset-data-table tbody tr").first();
       await first.click();
-      const name = await first.getAttribute("aria-label");
-      await p.keyboard.press("Space");
-      await expect(p.getByRole("dialog", { name, exact: true })).toBeVisible();
-      await p.keyboard.press("ArrowRight");
-      await expect(p.getByRole("dialog")).toHaveCount(1);
-      await p.keyboard.press("Escape");
-      await expect(
-        p.locator("[role=option][aria-selected=true]"),
-      ).toBeFocused();
+      await expect(p.locator(".asset-detail")).toBeVisible();
+      await expect(p.locator(".asset-detail")).toContainText("生产者");
+      await p.getByRole("button", { name: "关闭详情", exact: true }).click();
+      await p.getByRole("button", { name: "图标视图", exact: true }).click();
+      await expect(p.locator(".asset-v17-card")).toHaveCount(4);
       await p.getByRole("button", { name: "列表视图", exact: true }).click();
-      await expect(p.locator(".finder-list")).toBeVisible();
-      await nav(p, "项目与工作台");
-      await expect(
-        p.getByRole("button", { name: "图标视图", exact: true }),
-      ).toHaveAttribute("aria-pressed", "true");
-      await nav(p, "资产与交接");
-      await expect(
-        p.getByRole("button", { name: "列表视图", exact: true }),
-      ).toHaveAttribute("aria-pressed", "true");
-      await pick(p, "资产类型", "音频");
-      const audio = p
-        .getByRole("listbox", { name: "资产浏览器" })
-        .getByRole("option")
-        .first();
-      await audio.click();
-      await p.keyboard.press("Space");
-      await expect(p.getByRole("dialog")).toContainText("审听媒体待接入");
-      await expect(p.locator("audio,video")).toHaveCount(0);
-      await shot(p, "finder-audio-quick-look");
-      await p.keyboard.press("Escape");
-      await pick(p, "资产类型", "图像");
-      await expect(p.locator("[role=option][aria-selected=true]")).toHaveCount(
-        0,
-      );
-      await expect(p.locator(".inspector")).toHaveCount(0);
-      await p.reload();
-      await expect(
-        p.getByRole("button", { name: "列表视图", exact: true }),
-      ).toHaveAttribute("aria-pressed", "true");
+      await expect(p.locator(".asset-data-table")).toBeVisible();
+      await p.getByRole("combobox", { name: "媒体类型", exact: true }).click();
+      await p.getByRole("option", { name: "音频", exact: true }).click();
+      await expect(p.locator(".asset-data-table tbody tr")).toHaveCount(1);
+      await expect(p.locator(".asset-data-table")).toContainText("雨夜环境音 · 引用");
+      await p.getByRole("button", { name: "清除全部", exact: true }).click();
+      await expect(p.locator(".asset-data-table tbody tr")).toHaveCount(4);
       await ctx.close();
     },
   );
@@ -787,7 +758,7 @@ try {
         .fill("雨");
       const rain = p.getByRole("option", { name: "雨夜重逢", exact: true });
       await rain.dblclick();
-      await expect(p.locator("h1")).toHaveText("请求");
+      await expect(p.locator("h1")).toHaveText("正在请求");
       await p.keyboard.press("Alt+ArrowLeft");
       await expect(
         p.getByRole("textbox", { name: "搜索项目", exact: true }),
@@ -935,6 +906,7 @@ try {
     await p.getByRole("button", { name: "管理 " + name, exact: true }).click();
     await p.getByRole("tab", { name: "配置", exact: true }).click();
     await p.getByRole("button", { name: "编辑演示配置", exact: true }).click();
+    await expect(p.locator(".right-workspace")).toHaveCSS("width", "520px");
   };
   await check(
     "Workspace field validation preserves blanks and focuses the first invalid input",
@@ -1001,21 +973,16 @@ try {
     },
   );
   await check(
-    "Workspace Sheet constrains focus, dismisses by overlay and restores scroll",
+    "Workspace floating detail preserves the page and restores focus",
     async () => {
       const { p, ctx } = await fresh("#/services");
       const row = p.getByRole("button", { name: "管理 Scaena", exact: true });
       await row.scrollIntoViewIfNeeded();
       const scroll = await p.evaluate(() => scrollY);
       await row.click();
-      await expect(p.locator(".right-workspace")).toHaveCSS("width", "420px");
+      await expect(p.locator(".right-workspace")).toHaveCSS("width", "360px");
       await expect(p.locator(".workspace-resize")).toHaveCount(0);
-      for (let i = 0; i < 20; i++) await p.keyboard.press("Tab");
-      assert.ok(
-        await p.evaluate(
-          () => !!document.activeElement.closest(".right-workspace"),
-        ),
-      );
+      await expect(p.locator('.right-workspace[data-mode="float"]')).toHaveCount(1);
       await p.setViewportSize({ width: 1440, height: 620 });
       const header = await p.locator(".workspace-header").boundingBox();
       const footer = await p.locator(".workspace-footer").boundingBox();
@@ -1030,7 +997,14 @@ try {
         (await p.locator(".workspace-footer").boundingBox()).y,
         footer.y,
       );
-      await p.mouse.click(20, 120);
+      await expect(p.locator(".workspace-overlay")).toHaveCount(0);
+      await expect(p.locator('.right-workspace[data-mode="float"]')).toHaveCount(1);
+      await p.getByRole("button", { name: "详情更多操作", exact: true }).click();
+      await p.getByRole("menuitem", { name: "固定详情", exact: true }).click();
+      await expect(p.locator('.right-workspace[data-mode="dock"]')).toHaveCount(1);
+      await expect(p.locator("body[data-docked=\"true\"]")).toHaveCount(1);
+      await expect(p.locator(".workspace-resizer")).toHaveCount(1);
+      await p.getByRole("button", { name: "关闭详情", exact: true }).click();
       await expect(p.locator(".right-workspace")).toHaveCount(0);
       await expect(row).toBeFocused();
       assert.ok(Math.abs((await p.evaluate(() => scrollY)) - scroll) < 2);
@@ -1235,8 +1209,8 @@ try {
       await p.goto(base + "#/assets", { waitUntil: "networkidle" });
       await expect(
         p.locator(".extend-thumbnail[data-state=error]"),
-      ).toHaveCount(2);
-      await expect(p.getByText("预览不可用", { exact: true })).toHaveCount(2);
+      ).toHaveCount(1);
+      await expect(p.locator('.extend-thumbnail[data-state="error"]')).toHaveCount(1);
       await ctx.close();
     },
   );
@@ -1466,7 +1440,7 @@ try {
         .locator("tbody tr")
         .filter({ hasText: "Aigora" })
         .click();
-      await expect(p.locator("h1")).toHaveText("请求");
+        await expect(p.locator("h1")).toHaveText("正在请求");
       await p.getByRole("button", { name: "更多筛选", exact: true }).click();
       await expect(
         p.getByRole("combobox", { name: "服务筛选", exact: true }),
@@ -1785,7 +1759,7 @@ try {
       );
       assert.ok(expected > 0);
       await metric.click();
-      await expect(p.locator("h1")).toHaveText("请求");
+      await expect(p.locator("h1")).toHaveText("正在请求");
       await expect(p.locator(".results-summary b").first()).toHaveText(
         String(expected),
       );

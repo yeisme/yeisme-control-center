@@ -50,10 +50,14 @@ if (unpack.status !== 0) {
   stderr += unpack.stderr || String(unpack.error);
 }
 const results = [];
+const extractedRoot = path.join(directory, "artifacts");
+const projectRoot = fs.existsSync(path.join(extractedRoot, "yeisme-service-control-center"))
+  ? path.join(extractedRoot, "yeisme-service-control-center")
+  : extractedRoot;
 if (!code)
   for (const command of commands) {
     const r = spawnSync(command[0], command.slice(1), {
-      cwd: path.join(directory, "artifacts/yeisme-service-control-center"),
+      cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 12 * 1024 * 1024,
     });

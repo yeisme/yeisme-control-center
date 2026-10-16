@@ -520,13 +520,13 @@ try {
     )
   )
     throw Error("notification_sensitive_content");
-  await page.getByRole("tab", { name: /结果/ }).click();
+  await page.getByRole("tab", { name: /^结果（/ }).click();
   await expect(page.getByRole("dialog")).toContainText("Test result");
   await page.getByRole("tab", { name: "执行与证据", exact: true }).click();
   await expect(page.getByRole("dialog")).toContainText("已受理");
   await expect(page.getByText("事件历史存在缺口或尚未记录", { exact: false })).toHaveCount(0);
 
-  await page.getByRole("tab", { name: /结果/ }).click();
+  await page.getByRole("tab", { name: /^结果（/ }).click();
 
   results.push({
     name: "original task state changes without resubmission",
@@ -584,7 +584,7 @@ try {
   await page.goto(base + "/#/tasks?connection=e-content-off&project=p&family=run&ref=browser-content-off");
   await expect(page.getByRole("dialog")).toContainText("本地内容关闭任务");
   const disabledAccessCount = accessRequests.length;
-  await page.getByRole("tab", { name: /结果/ }).click();
+  await page.getByRole("tab", { name: /^结果（/ }).click();
   await expect(page.getByRole("dialog")).toContainText("本地未开启内容读取");
   await expect(page.getByRole("button", { name: "预览", exact: true }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "预览", exact: true }).nth(1)).toBeDisabled();
@@ -594,7 +594,7 @@ try {
   await page.goto(base + "/#/tasks?connection=e-owner-denied&project=p&family=run&ref=browser-owner-denied");
   await expect(page.getByRole("dialog")).toContainText("来源内容拒绝任务");
   await expect(page.getByRole("dialog")).toContainText("已完成");
-  await page.getByRole("tab", { name: /结果/ }).click();
+  await page.getByRole("tab", { name: /^结果（/ }).click();
   await expect(page.getByRole("button", { name: "预览", exact: true }).first()).toBeEnabled();
   await page.getByRole("button", { name: "预览", exact: true }).first().click();
   await expect(page.getByRole("alert")).toBeVisible();
@@ -606,7 +606,7 @@ try {
   await page.getByRole("button", { name: "刷新观察", exact: true }).click();
   await expect(page.getByRole("button", { name: "来源内容拒绝任务", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "来源内容拒绝任务", exact: true }).click();
-  await page.getByRole("tab", { name: /结果/ }).click();
+  await page.getByRole("tab", { name: /^结果（/ }).click();
   await expect(page.getByRole("button", { name: "预览", exact: true }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "下载结果", exact: true }).first()).toBeDisabled();
   expect(accessRequests.length).toBe(disabledAccessCount + 1);
@@ -628,7 +628,7 @@ try {
       );
       await expect(work).toHaveAttribute("rel", "noopener noreferrer");
     }
-    await page.getByRole("tab", { name: /结果/ }).click();
+    await page.getByRole("tab", { name: /^结果（/ }).click();
     await page.getByRole("button", { name: button, exact: true }).click();
     const media = page.getByRole("dialog").locator(tag);
     await expect(media).toBeVisible();
@@ -790,7 +790,7 @@ try {
   await page.goto(base + "/#/assets");
   await expect(page.getByRole("heading", { name: "任务结果与资产引用", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "隔离片场结果", exact: true }).click();
-  await expect(page.getByRole("tab", { name: /结果/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: /^结果（/ })).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Escape");
   await page.goto(base + "/#/overview");
   results.push({ name: "named admin, scoped service directory and historical asset results", status: "passed" });
