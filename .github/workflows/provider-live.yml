@@ -63,7 +63,7 @@ jobs:
           bun run test:provider-live -- --confirm-live --total-cny "${{ inputs.total_cny }}" --image-cny "${{ inputs.image_cny }}" --video-cny "${{ inputs.video_cny }}" --audio-cny "${{ inputs.audio_cny }}"
       - name: Upload redacted canary evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provider-live-evidence
           if-no-files-found: warn
