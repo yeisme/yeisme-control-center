@@ -5,7 +5,7 @@
 | 能力 | 状态 | 证据层 | 下一道门 |
 |---|---|---|---|
 | 控制中心前端（11 页 App Shell） | `implemented` | typed client、scope/epoch 守卫、统一读状态、详情 Sheet、亮暗主题与响应式；`test:app`、单元、构建通过 | browser CI |
-| 前端 fixture 浏览器旅程（I1/I2） | `passed: fixture-only` | `test:browser-journey` 16/16：fake owner + 真实 server 代码 + 浏览器，覆盖登录、服务、任务、事件、结果句柄、请求与正文、组织、用量、scope 切换、迟到响应丢弃、降级来源、无提交/取消；API 层由 `test:contract-integration` 补充；证据 `temp/integration-test-runs/browser-journey-*/` | 不代表真实 owner；I3 只读回读与 I4 文档门已分别记录 |
+| 前端 fixture 浏览器旅程（I1/I2） | `passed: fixture-only` | `test:browser-journey` 29/29：fake owner + 真实 server 代码 + 浏览器，覆盖登录、服务、任务、事件、结果句柄、请求与正文、组织、用量、模型与工具目录、scope 切换、迟到响应丢弃、降级来源、无提交/取消；API 层由 `test:contract-integration` 补充；证据 `temp/integration-test-runs/browser-journey-*/` | 不代表真实 owner；I3 只读回读与 I4 文档门已分别记录；自 2026-10-21 起由 CI 运行（与 `test:contract-integration` 23/23 一起） |
 | 前端真实只读冒烟 | `passed: real read-only` | `test:preview:real` 7/7（独立端口，真实 owner 只读，无 Provider 调用）；证据 `temp/integration-test-runs/preview-real-*/` | 请求/组织页需 OIDC 委托，个人会话下如实显示 `delegation_unavailable` |
 | v18 live 读取 | `implemented` | live API adapter；三 owner 真实只读证据已生成 | 继续补齐 owner 任务覆盖并保持 live submit 关闭 |
 | Eikona canary | `passed` | 已有脱敏 canary 记录 | 复验当前版本 |
@@ -37,7 +37,7 @@
 - 真实 Provider canary、owner 凭据、部署和发布是独立授权门。
 - 最近一次真实只读证据由 `bun run test:owner-live-read` 生成，保存在 `temp/integration-test-runs/real-owner-read-*/`；证据不包含凭据、Provider payload 或真实提交。
 - race 检测不属于本项目默认验收。
-- `test:task-visibility` 是针对界面重构前版本的遗留门：它断言已被替换的界面（旧区域与标签名、Studio 返回链接、浏览器通知开启流程），在当前界面上登录步骤就会失败，不作为验收依据。等价覆盖由 `test:browser-journey` 和 `test:contract-integration` 提供；CI 中对应步骤尚待替换或重写。
+- `test:task-visibility` 是针对界面重构前版本的遗留门：它断言已被替换的界面（旧区域与标签名、Studio 返回链接、浏览器通知开启流程），在当前界面上登录步骤就会失败，不作为验收依据。等价覆盖由 `test:browser-journey` 和 `test:contract-integration` 提供；CI 自 2026-10-21 起改为运行这两项，该脚本保留但不再由 CI 执行。
 - 媒体缓存只存在于当前浏览器会话；不写入 IndexedDB、localStorage、服务端磁盘或发布工件，缓存命中不能提升为新的业务证据。
 - owner 未返回提示词采集或中间检查点时，页面显示“来源没有提供提示词采集观察”或“来源尚未返回中间检查点”，不会从任务数量、历史成功或 Provider 目录推导。
 - action contract 的 `needs_contract`、`unknown`、`conflict` 和 `unavailable` 保持可见；不会把 Preview 或队列数量当成真实 Owner 写入成功。

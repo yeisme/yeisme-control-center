@@ -33,8 +33,10 @@ jobs:
         run: bun run build
       - name: App shell browser checks
         run: bun run test:ci:browser
-      - name: Task observation contract checks
-        run: bun run test:task-visibility
+      - name: Contract integration (fixture owners)
+        run: bun run test:contract-integration
+      - name: Browser journey (fixture owners)
+        run: bun run test:browser-journey
       - name: Public surface scan
         run: bun run check:public-surface
       - name: Release manifest and SBOM
