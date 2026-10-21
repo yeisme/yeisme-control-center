@@ -178,6 +178,36 @@ try {
     if (!await page.getByText("不调用 Provider").count()) throw new Error("provider_preview_gate_missing");
     await shot(page, "creation-workbench");
   });
+  await check("tool catalog lists latest owner tools read-only with inspector and pre-check link", async () => {
+    await page.goto(`${ui}/#/capabilities`, { waitUntil: "domcontentloaded" });
+    await page.getByText("最新上线").waitFor({ timeout: 20_000 });
+    for (const name of ["概览", "模型", "渠道", "工具与动作", "动态"]) await page.getByRole("tab", { name: new RegExp(name) }).waitFor();
+    await page.getByRole("tab", { name: /模型/ }).click();
+    await page.getByRole("table", { name: "当前模型" }).waitFor();
+    if (await page.getByRole("table", { name: "历史模型" }).count()) throw new Error("historical_models_visible_by_default");
+    await page.getByRole("checkbox", { name: "显示历史模型" }).click();
+    await page.getByRole("table", { name: "历史模型" }).waitFor();
+    await page.locator('[data-catalog-row="model:eikona:openai/gpt-image-2.5-sunburst@openrouter"] button').click();
+    const inspector = page.locator("[data-catalog-inspector]");
+    await inspector.waitFor();
+    if (await inspector.getByRole("button", { name: /调用|执行|提交/ }).count()) throw new Error("catalog_inspector_offers_invocation");
+    await shot(page, "capabilities-model-inspector");
+    await inspector.getByRole("button", { name: "在 AI 创作中预检" }).click();
+    await page.getByText("统一多模态工作台").waitFor();
+    const creation = hashParams(page);
+    if (creation.get("owner") !== "eikona" || creation.get("mode") !== "text_to_image") throw new Error(`precheck_link_lost_mode:${page.url()}`);
+    await page.goto(`${ui}/#/capabilities?tab=tools&owner=eikona`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-catalog-row="action:eikona:eikona.execute#upscale"] button').click();
+    await inspector.getByText("输入合同").first().waitFor();
+    await inspector.getByText("scale", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "关闭详情" }).click();
+    await fetch(`http://127.0.0.1:${ports.owner}/__fixture/catalog-revision?value=1`);
+    await page.goto(`${ui}/#/capabilities?tab=changes`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "刷新目录" }).click();
+    await page.getByText("black-forest/flux-2-pro@openrouter").first().waitFor({ timeout: 20_000 });
+    await shot(page, "capabilities-changes");
+    await fetch(`http://127.0.0.1:${ports.owner}/__fixture/catalog-revision?value=0`);
+  });
   await check("tasks list all lanes with denied lane isolated", async () => {
     await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-task="run-2410-active"]').waitFor();

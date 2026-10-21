@@ -1,18 +1,18 @@
 import { useMemo, useState, type ChangeEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AudioLines, Check, CircleAlert, Cpu, FileImage, Image, LockKeyhole, Plus, Sparkles, X, Video } from "../../icons";
 import { api, type ProviderCapabilityProjection } from "../../shared/api/control-center-client";
 import { useScopedRead } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
-import { Button, EmptyState, Field, InlineNotice, Panel, Pill, ReadStateView, Select, SkeletonRows, Textarea, cx, ownerLabel } from "../../components/ui";
+import { Button, EmptyState, Field, InlineNotice, PageToolbar, Panel, Pill, ReadStateView, Select, SkeletonRows, Textarea, cx, ownerLabel } from "../../components/ui";
+import { reasonLabel } from "../../shared/read-model/labels";
 import { collectResults, resultAction, resultMeta, type ResultEntry } from "../../shared/read-model/tasks";
 import { formatMoney } from "../../shared/read-model/format";
-import { readinessMeta } from "../capabilities/CapabilityHub";
+import { readinessMeta } from "../capabilities/readiness";
 import {
   creativeGenerationModes,
   creativeModeLabels,
   creativeModeModalities,
-  creativeReferenceRoles,
   emptyCreativeInput,
   validateCreativeInput,
   type CreativeGenerationMode,
@@ -33,19 +33,20 @@ export default function CreationPage() {
   const tasks = useTasks();
   const items = capabilities.data?.capabilities || [];
   const results = useMemo(() => collectResults(tasks.rows), [tasks.rows]);
+  const [params] = useSearchParams();
+  const requestedOwner = params.get("owner");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = items.find((item) => item.id === selectedId) || items[0];
+  const selected = items.find((item) => item.id === selectedId) || items.find((item) => item.owner === requestedOwner) || items[0];
+  // A catalog deep link pre-selects mode and model for the requested owner only; later owner switches start clean.
+  const seeded = selected && selected.owner === requestedOwner && !selectedId ? { mode: params.get("mode"), model: params.get("model") } : null;
 
   return <div className="page-enter space-y-5" data-page="creation">
     <h1 className="sr-only">AI 创作</h1>
-    <div className="flex flex-wrap items-end justify-between gap-3">
-      <div><div className="text-[26px] font-semibold leading-tight tracking-[-0.01em] text-ink" aria-hidden="true">AI 创作</div><p className="mt-1.5 text-sm text-muted">统一多模态工作台 · 页面会话草稿 · 本地预览变体</p></div>
-      <Pill tone="neutral" icon={<LockKeyhole />}>Provider 提交门：默认关闭</Pill>
-    </div>
+    <PageToolbar summary="统一多模态工作台 · 页面会话草稿 · 本地预览变体。模式与参数只来自 owner 声明的能力。" meta={<Pill tone="neutral" icon={<LockKeyhole />}>Provider 提交门：默认关闭</Pill>} actions={<Button size="sm" variant="ghost" onClick={() => navigate("/capabilities?tab=models")}>查看模型目录</Button>} />
     <ReadStateView status={capabilities.status} error={capabilities.error} onRetry={capabilities.reload} skeleton={<Panel><SkeletonRows rows={3} /></Panel>} empty={<Panel><EmptyState icon={<Cpu />} title="当前范围没有可用的创作能力" body="scope 未绑定 Provider owner，或 owner 未返回能力目录。" action={<Button size="sm" onClick={() => navigate("/capabilities")}>查看模型与工具</Button>} /></Panel>}>
       <div className="grid gap-5 xl:grid-cols-[270px_minmax(0,1fr)]">
         <CapabilityList items={items} selected={selected} onSelect={setSelectedId} />
-        {selected ? <CreationWorkbench key={selected.id} capability={selected} budget={usage.data?.budget} artifacts={results} /> : null}
+        {selected ? <CreationWorkbench key={`${selected.id}:${seeded?.mode || ""}:${seeded?.model || ""}`} capability={selected} budget={usage.data?.budget} artifacts={results} requestedMode={seeded?.mode || null} requestedModel={seeded?.model || null} /> : null}
       </div>
     </ReadStateView>
   </div>;
@@ -60,13 +61,12 @@ function CapabilityList({ items, selected, onSelect }: { items: ProviderCapabili
   </div></section>;
 }
 
-function CreationWorkbench({ capability, budget, artifacts }: { capability: ProviderCapabilityProjection; budget?: { total: number; reserved: number; remaining: number; per_owner: Record<string, number> }; artifacts: ResultEntry[] }) {
+function CreationWorkbench({ capability, budget, artifacts, requestedMode, requestedModel }: { capability: ProviderCapabilityProjection; budget?: { total: number; reserved: number; remaining: number; per_owner: Record<string, number> }; artifacts: ResultEntry[]; requestedMode: string | null; requestedModel: string | null }) {
   const declaredModes = capability.input_modes;
-  const initialMode = declaredModes[0] || "text_to_image";
+  const initialMode = declaredModes.find((mode) => mode === requestedMode) || declaredModes[0] || "text_to_image";
   const enabledBindings = capability.bindings.filter((binding) => binding.enabled);
-  const models = useMemo(() => [...new Set([capability.model_ref, ...capability.model_refs, ...enabledBindings.map((binding) => binding.model_ref)])].filter(Boolean), [capability.model_ref, capability.model_refs, enabledBindings]);
-  const [input, setInput] = useState<CreativeInputSpec>(() => ({ ...emptyCreativeInput(models[0] || capability.model_ref), generation_mode: initialMode }));
-  const [notice, setNotice] = useState<string | null>(null);
+  const models = useMemo(() => [...new Set([...(requestedModel ? [requestedModel] : []), capability.model_ref, ...capability.model_refs, ...enabledBindings.map((binding) => binding.model_ref)])].filter(Boolean), [requestedModel, capability.model_ref, capability.model_refs, enabledBindings]);
+  const [input, setInput] = useState<CreativeInputSpec>(() => ({ ...emptyCreativeInput(models[0] || capability.model_ref), generation_mode: initialMode, ...(initialMode === "keyframe_video" ? { timeline: { duration_ms: 6000, keyframes: [{ id: "kf:start", at_ms: 0, reference_refs: [] }, { id: "kf:end", at_ms: 6000, reference_refs: [] }], transition: "cut" as const } } : {}) }));
   const contract = useMemo(() => ({ input_modes: capability.input_modes, reference_roles: capability.reference_roles, timeline_support: capability.timeline_support, output_constraints: capability.output_constraints, input_schema_ref: capability.input_schema_ref, limits: capability.limits }), [capability]);
   const validation = useMemo(() => validateCreativeInput(input, contract), [input, contract]);
   const mode = input.generation_mode;
@@ -95,7 +95,7 @@ function CreationWorkbench({ capability, budget, artifacts }: { capability: Prov
         <div className="grid gap-4 sm:grid-cols-2"><Field label="输出比例"><Select value={input.output.ratio || ""} onChange={(event) => update({ output: { ...input.output, ratio: event.target.value || undefined } })}><option value="">owner 默认</option>{(capability.output_constraints.ratios || []).map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}</Select></Field><Field label="预算上限（CNY）" hint={budget ? `剩余 ${formatMoney(budget.remaining, "CNY")} · owner 上限 ${ownerCap === null ? "未提供" : formatMoney(ownerCap, "CNY")}` : "预算观察未提供"}><input type="number" min={0} step={0.5} value={amount ?? ""} onChange={(event) => update({ budget_cap: { amount: event.target.value === "" ? null : Number(event.target.value), currency: "CNY" } })} className="h-9 w-full rounded-control border border-line bg-panel px-3 text-[13px] tabular outline-none focus:border-focus focus:ring-3 focus:ring-focus/15" /></Field></div>
       </div>
     </Panel></div>
-    <PreviewPanel capability={capability} input={input} validation={validation} contract={contract} previewCount={previewCount} previewSeed={previewSeed} budgetIssue={budgetIssue} notice={notice} onNotice={setNotice} />
+    <PreviewPanel capability={capability} input={input} validation={validation} previewCount={previewCount} previewSeed={previewSeed} budgetIssue={budgetIssue} />
   </div>;
 }
 
@@ -123,8 +123,33 @@ function KeyframeCard({ frame, index, timeline, referenceOptions, onUpdate, onRe
   return <article className="rounded-[9px] border border-line bg-panel p-3"><div className="flex items-start gap-3"><span className="grid size-7 shrink-0 place-items-center rounded-full bg-primary-soft text-xs font-semibold text-primary">{index + 1}</span><div className="min-w-0 flex-1 space-y-2"><div className="flex items-center justify-between gap-2"><span className="text-[13px] font-medium">关键帧 {index + 1}</span><Button size="icon-sm" variant="quiet" aria-label="删除关键帧" onClick={() => onRemove(frame.id)}><X className="size-3.5" /></Button></div><input type="range" min={0} max={timeline.duration_ms || 1} step={100} value={Math.max(0, Math.min(timeline.duration_ms, frame.at_ms))} onChange={(event) => onUpdate(frame.id, { at_ms: Number(event.target.value) })} className="w-full accent-[var(--primary)]" /><div className="flex items-center gap-2"><span className="text-2xs text-muted">时间</span><input type="number" min={0} max={timeline.duration_ms} value={frame.at_ms} onChange={(event) => onUpdate(frame.id, { at_ms: Number(event.target.value) || 0 })} className="h-8 w-28 rounded-control border border-line bg-panel px-2 text-xs tabular" /><span className="text-2xs text-muted">ms</span></div><Select value={frame.reference_refs[0] || ""} onChange={(event) => onUpdate(frame.id, { reference_refs: event.target.value ? [event.target.value] : [] })}><option value="">选择参考素材（可选）</option>{referenceOptions.map((reference) => <option key={reference.ref} value={reference.ref}>{reference.name}</option>)}</Select><input value={frame.prompt || ""} onChange={(event) => onUpdate(frame.id, { prompt: event.target.value })} placeholder="该关键帧的局部提示（可选）" className="h-8 w-full rounded-control border border-line bg-panel px-2.5 text-xs outline-none focus:border-focus" /></div></div></article>;
 }
 
-function PreviewPanel({ capability, input, validation, contract, previewCount, previewSeed, budgetIssue, notice, onNotice }: { capability: ProviderCapabilityProjection; input: CreativeInputSpec; validation: ReturnType<typeof validateCreativeInput>; contract: object; previewCount: number; previewSeed: string; budgetIssue: boolean; notice: string | null; onNotice: (notice: string | null) => void }) {
-  return <div className="space-y-5"><Panel title="合同与预览" eyebrow="本地确定性预览" actions={<Pill tone="neutral" icon={<LockKeyhole />}>不调用 Provider</Pill>}><div className="space-y-4 p-5"><div className="flex flex-wrap gap-2"><Pill tone={validation.valid ? "success" : "warning"} icon={validation.valid ? <Check /> : <CircleAlert />}>{validation.valid ? "输入合同通过" : `${validation.errors.length} 项需要修正`}</Pill><Pill tone="info">{previewCount} 个预览变体</Pill></div>{validation.errors.length > 0 && <InlineNotice tone="warning"><ul className="list-disc space-y-1 pl-4">{validation.errors.map((error) => <li key={error}>{error}</li>)}</ul></InlineNotice>}{validation.warnings.length > 0 && <InlineNotice tone="info">{validation.warnings.join(" ")}</InlineNotice>}<details open className="rounded-[10px] border border-line bg-panel-soft"><summary className="cursor-pointer px-3 py-2.5 text-[13px] font-medium">查看输入合同摘要</summary><pre className="max-h-64 overflow-auto border-t border-line px-3 py-3 font-mono text-2xs leading-5 text-ink-soft">{JSON.stringify({ ...input, references: input.references.map(({ ref, source, name, mime, roles, access }) => ({ ref, source, name, mime, roles, access })) }, null, 2)}</pre></details><div className="grid gap-2">{Array.from({ length: previewCount }, (_, index) => <div key={`${previewSeed}:${index}`} className="rounded-[10px] border border-line bg-panel-soft p-3"><div className="flex items-center justify-between gap-2"><span className="text-[13px] font-medium">预览变体 {index + 1}</span><Pill tone="neutral">fixture</Pill></div><p className="mt-2 break-words text-2xs leading-5 text-muted">{input.prompt.trim() || "等待提示词"} · {input.output.ratio || "owner 默认比例"} · seed {previewSeed.slice(0, 12)}-{index + 1}</p></div>)}</div><div className="border-t border-line pt-4"><Button variant="primary" disabled icon={<Sparkles className="size-4" />}>提交生成</Button><p className="mt-2 text-2xs text-muted">按钮保持不可用，不创建任务、不预留预算、不产生费用。</p></div>{notice && <InlineNotice tone="info">{notice}</InlineNotice>}</div></Panel><Panel title="能力限制" eyebrow="owner 声明"><div className="p-5"><dl className="grid grid-cols-2 gap-2 text-[12px]"><Fact label="输入合同" value={capability.input_schema_ref || "未提供"} /><Fact label="参考角色" value={capability.reference_roles.length ? capability.reference_roles.map((role) => roleLabels[role]).join("、") : "未提供"} /><Fact label="最大参考数" value={capability.limits.max_references ?? "未提供"} /><Fact label="最大变体" value={capability.limits.max_variants ?? 4} /><Fact label="时间线" value={capability.timeline_support?.enabled ? "已声明" : "未声明"} /><Fact label="提交门" value={capability.submit_gate} /></dl>{capability.blocker && <InlineNotice tone="warning" className="mt-3">owner 阻塞：{capability.blocker}</InlineNotice>}</div></Panel></div>;
+function PreviewPanel({ capability, input, validation, previewCount, previewSeed, budgetIssue }: { capability: ProviderCapabilityProjection; input: CreativeInputSpec; validation: ReturnType<typeof validateCreativeInput>; previewCount: number; previewSeed: string; budgetIssue: boolean }) {
+  const roles = [...new Set(input.references.flatMap((reference) => reference.roles))];
+  const summary: { label: string; value: string | number }[] = [
+    { label: "模式", value: creativeModeLabels[input.generation_mode] },
+    { label: "模型", value: input.model_ref || "未选择" },
+    { label: "提示词", value: input.prompt.trim() ? `${input.prompt.trim().length} 字` : "未填写" },
+    { label: "参考素材", value: input.references.length ? `${input.references.length} 个 · ${roles.map((role) => roleLabels[role]).join("、") || "未分配角色"}` : "无" },
+    ...(input.timeline ? [{ label: "时间线", value: `${input.timeline.keyframes.length} 个关键帧 · ${(input.timeline.duration_ms / 1000).toFixed(1)} 秒` }] : []),
+    { label: "输出", value: [input.output.ratio, input.output.resolution].filter(Boolean).join(" · ") || "owner 默认" },
+    { label: "变体", value: `${previewCount} 个` },
+    { label: "预算上限", value: formatMoney(input.budget_cap.amount, "CNY") ?? "未设置" },
+  ];
+  const hue = [...previewSeed].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 0);
+  const Icon = modalityIcon[capability.modality] || Sparkles;
+  return <div className="space-y-5"><Panel title="合同与预览" eyebrow="本地确定性预览" actions={<Pill tone="neutral" icon={<LockKeyhole />}>不调用 Provider</Pill>}><div className="space-y-4 p-5">
+    <div className="flex flex-wrap gap-2"><Pill tone={validation.valid ? "success" : "warning"} icon={validation.valid ? <Check /> : <CircleAlert />}>{validation.valid ? "输入合同通过" : `${validation.errors.length} 项需要修正`}</Pill><Pill tone="info">{previewCount} 个预览变体</Pill></div>
+    {validation.errors.length > 0 && <InlineNotice tone="warning"><ul className="list-disc space-y-1 pl-4">{validation.errors.map((error) => <li key={error}>{error}</li>)}</ul></InlineNotice>}
+    {validation.warnings.length > 0 && <InlineNotice tone="info">{validation.warnings.join(" ")}</InlineNotice>}
+    {budgetIssue && <InlineNotice tone="warning">预算上限必须大于 0，且不能超过剩余预算或 owner 上限。</InlineNotice>}
+    <dl className="grid grid-cols-2 gap-2">{summary.map((item) => <Fact key={item.label} label={item.label} value={item.value} />)}</dl>
+    <details className="rounded-[10px] border border-line bg-panel-soft"><summary className="cursor-pointer px-3 py-2 text-2xs font-medium text-muted">原始输入合同（JSON）</summary><pre className="max-h-64 overflow-auto border-t border-line px-3 py-3 font-mono text-2xs leading-5 text-ink-soft">{JSON.stringify({ ...input, references: input.references.map(({ ref, source, name, mime, roles: referenceRoles, access }) => ({ ref, source, name, mime, roles: referenceRoles, access })) }, null, 2)}</pre></details>
+    <div className="grid grid-cols-2 gap-2">{Array.from({ length: previewCount }, (_, index) => <figure key={`${previewSeed}:${index}`} className="overflow-hidden rounded-[10px] border border-line bg-panel-soft">
+      <div aria-hidden="true" className="grid aspect-video place-items-center text-white/85 [&>svg]:size-5" style={{ background: `linear-gradient(135deg, hsl(${(hue + index * 47) % 360} 32% 46%), hsl(${(hue + index * 47 + 60) % 360} 38% 30%))` }}><Icon /></div>
+      <figcaption className="px-2.5 py-2"><span className="flex items-center justify-between gap-2 text-2xs font-medium text-ink">变体 {index + 1}<span className="font-normal text-faint">本地预览</span></span><span className="mt-0.5 block truncate text-2xs text-muted">{input.prompt.trim() || "等待提示词"}</span></figcaption>
+    </figure>)}</div>
+    <div className="border-t border-line pt-4"><Button variant="primary" disabled disabledReason="Provider 提交门默认关闭；需要 owner 独立授权" icon={<Sparkles className="size-4" />}>提交生成</Button><p className="mt-2 text-2xs text-muted">按钮保持不可用，不创建任务、不预留预算、不产生费用。</p></div>
+  </div></Panel><Panel title="能力限制" eyebrow="owner 声明"><div className="p-5"><dl className="grid grid-cols-2 gap-2 text-[12px]"><Fact label="输入合同" value={capability.input_schema_ref || "未提供"} /><Fact label="参考角色" value={capability.reference_roles.length ? capability.reference_roles.map((role) => roleLabels[role]).join("、") : "未提供"} /><Fact label="最大参考数" value={capability.limits.max_references ?? "未提供"} /><Fact label="最大变体" value={capability.limits.max_variants ?? 4} /><Fact label="时间线" value={capability.timeline_support?.enabled ? `已声明 · 最多 ${capability.timeline_support.max_keyframes ?? "?"} 帧` : "未声明"} /><Fact label="提交门" value={capability.submit_gate === "owner_authorized" ? "owner 已授权" : "默认关闭"} /></dl>{capability.blocker && <InlineNotice tone="warning" className="mt-3">owner 阻塞：{reasonLabel(capability.blocker)}</InlineNotice>}</div></Panel></div>;
 }
 
 function Fact({ label, value }: { label: string; value: string | number }) { return <div className="rounded-[8px] bg-panel-soft px-2.5 py-2"><dt className="text-2xs text-muted">{label}</dt><dd className="mt-0.5 break-words font-mono text-2xs text-ink-soft">{value}</dd></div>; }

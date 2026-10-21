@@ -138,4 +138,11 @@ export {
   Laptop,
   Paperclip,
   Table2,
+  Minus,
+  Waypoints,
+  FileJson,
+  Boxes,
+  ListTree,
+  ShieldAlert,
+  Zap,
 } from "lucide-react";

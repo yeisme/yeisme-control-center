@@ -24,8 +24,8 @@ const dotClass: Record<Tone, string> = {
   neutral: "bg-neutral",
 };
 
-export function Pill({ tone = "neutral", icon, children, className, title }: { tone?: Tone; icon?: ReactNode; children: ReactNode; className?: string; title?: string }) {
-  return <span title={title} className={cx("inline-flex h-6 max-w-full shrink-0 items-center gap-1 rounded-chip px-2 text-xs font-medium leading-none whitespace-nowrap [&>svg]:size-3.5 [&>svg]:shrink-0", toneClass[tone], className)}>
+export function Pill({ tone = "neutral", icon, children, className, title, size = "md" }: { tone?: Tone; icon?: ReactNode; children: ReactNode; className?: string; title?: string; size?: "sm" | "md" }) {
+  return <span title={title} className={cx("inline-flex max-w-full shrink-0 items-center gap-1 rounded-chip font-medium leading-none whitespace-nowrap [&>svg]:shrink-0", size === "sm" ? "h-5 px-1.5 text-2xs [&>svg]:size-3" : "h-6 px-2 text-xs [&>svg]:size-3.5", toneClass[tone], className)}>
     {icon}
     <span className="truncate">{children}</span>
   </span>;
@@ -73,7 +73,7 @@ export function CoverageChip({ state, owner, reason, className }: { state: Cover
   </Pill>;
 }
 
-export const ownerNames: Record<string, string> = { eikona: "Eikona", scaena: "Scaena", sonora: "Sonora", aigora: "Aigora" };
+export const ownerNames: Record<string, string> = { eikona: "Eikona", scaena: "Scaena", sonora: "Sonora", aigora: "Aigora", gateway: "MCP Gateway", auctra: "Auctra", muweave: "MuWeave" };
 export function ownerLabel(owner: string) {
   return ownerNames[owner] || owner;
 }

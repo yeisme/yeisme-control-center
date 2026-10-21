@@ -1,9 +1,9 @@
-import { CircleAlert, CircleDashed, CheckCircle2, Clock3, LockKeyhole, Network, RefreshCw } from "../icons";
+import { CircleAlert, CircleDashed, CheckCircle2, Clock3, Network, RefreshCw } from "../icons";
 import type { TaskConnectionState } from "../task-observation";
 import type { ServiceDirectoryEntry } from "../service-directory";
 import { formatRelative } from "../shared/read-model/format";
 import { readErrorMessage, type ReadStatus } from "../shared/read-model/read-state";
-import { Button, Panel, Pill, cx, type Tone } from "./ui";
+import { Button, Pill, Tooltip, cx, type Tone } from "./ui";
 
 type SourceState = "ready" | "partial" | "unavailable" | "forbidden" | "stale" | "needs_contract" | "not_observed";
 const sourceOwners = ["aigora", "scaena", "eikona", "sonora"] as const;
@@ -38,35 +38,38 @@ function statusFor(service: ServiceDirectoryEntry | undefined, connections: Task
 }
 
 function statusIcon(state: SourceState) {
-  if (state === "ready") return <CheckCircle2 className="size-3.5" />;
-  if (state === "unavailable" || state === "forbidden") return <CircleAlert className="size-3.5" />;
-  if (state === "stale") return <Clock3 className="size-3.5" />;
-  if (state === "needs_contract") return <Network className="size-3.5" />;
-  return <CircleDashed className="size-3.5" />;
+  if (state === "ready") return <CheckCircle2 />;
+  if (state === "unavailable" || state === "forbidden") return <CircleAlert />;
+  if (state === "stale") return <Clock3 />;
+  if (state === "needs_contract") return <Network />;
+  return <CircleDashed />;
 }
 
 export function SourceCoverage({ services, connections = [], readStatus = "ready", error, onRetry, className }: { services: ServiceDirectoryEntry[]; connections?: TaskConnectionState[]; readStatus?: ReadStatus; error?: string | null; onRetry?: () => void; className?: string }) {
   const readMessage = readStatus === "unavailable" ? "来源读取失败，未用本地或演示数据补齐。" : readStatus === "forbidden" ? "当前身份没有读取这些来源的权限。" : readStatus === "needs_contract" ? "来源尚未提供可读取合同。" : readStatus === "stale" ? "显示最近一次读取结果，当前来源可能已过期。" : readStatus === "loading" ? "正在读取来源状态。" : error ? readErrorMessage(error) : undefined;
-  return <Panel title="来源覆盖" eyebrow="只读观察" className={cx(className)} actions={readMessage && onRetry ? <Button size="sm" variant="ghost" onClick={onRetry} icon={<RefreshCw className="size-3.5" />}>重新读取</Button> : undefined}>
-    {readMessage && <div className="border-b border-line px-4 py-3 text-2xs text-muted" role={readStatus === "unavailable" || readStatus === "forbidden" ? "alert" : "status"}>{readMessage}</div>}
-    <div className="grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-4">
-      {sourceOwners.map((owner) => {
-        const service = services.find((item) => item.id === owner);
-        const state = statusFor(service, connections, readStatus);
-        const meta = stateMeta[state];
-        const observedAt = service?.observed_at || service?.coverage?.observed_at || service?.connections.find((connection) => connection.runtime)?.runtime?.checked_at;
-        const explicitReason = service?.connections.find((connection) => connection.runtime?.reason)?.runtime?.reason;
-        const reason = explicitReason || (state === "ready" ? undefined : service?.gap);
-        return <article key={owner} className="min-w-0 rounded-[10px] border border-line bg-panel-soft p-3">
-          <div className="flex items-center gap-2">
-            <span className="grid size-7 shrink-0 place-items-center rounded-[8px] bg-panel text-muted">{statusIcon(state)}</span>
-            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{sourceLabels[owner]}</span>
-            <Pill tone={meta.tone} className="h-5 px-1.5 text-2xs">{meta.label}</Pill>
-          </div>
-          <p className="mt-2 line-clamp-2 text-2xs leading-4 text-muted">{reason || (state === "ready" ? "owner 返回了当前范围的只读观察。" : "没有用本地任务或演示数据补齐来源状态。")}</p>
-          <p className="mt-2 flex items-center gap-1 text-2xs text-faint"><LockKeyhole className="size-3" />{observedAt ? `观察于 ${formatRelative(observedAt)}` : "观察时间未提供"}</p>
-        </article>;
-      })}
+  return <section aria-label="来源覆盖" className={cx("min-w-0 rounded-card border border-line bg-panel px-4 py-3 shadow-panel", className)}>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h2 className="shrink-0 text-body-sm font-semibold text-ink">来源覆盖<span className="ml-2 text-2xs font-normal text-muted">只读观察</span></h2>
+      <ul className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+        {sourceOwners.map((owner) => {
+          const service = services.find((item) => item.id === owner);
+          const state = statusFor(service, connections, readStatus);
+          const meta = stateMeta[state];
+          const observedAt = service?.observed_at || service?.coverage?.observed_at || service?.connections.find((connection) => connection.runtime)?.runtime?.checked_at;
+          const explicitReason = service?.connections.find((connection) => connection.runtime?.reason)?.runtime?.reason;
+          const reason = explicitReason || (state === "ready" ? undefined : service?.gap);
+          const detail = reason || (state === "ready" ? "owner 返回了当前范围的只读观察。" : "没有用本地任务或演示数据补齐来源状态。");
+          return <li key={owner}>
+            <Tooltip content={<><span className="block">{detail}</span><span className="mt-0.5 block opacity-75">{observedAt ? `观察于 ${formatRelative(observedAt)}` : "观察时间未提供"}</span></>}>
+              <span tabIndex={0} className="inline-flex rounded-chip outline-none focus-visible:ring-2 focus-visible:ring-focus">
+                <Pill tone={meta.tone} icon={statusIcon(state)}><span className="font-semibold">{sourceLabels[owner]}</span><span className="opacity-80"> · {meta.label}</span></Pill>
+              </span>
+            </Tooltip>
+          </li>;
+        })}
+      </ul>
+      {readMessage && onRetry && <Button size="sm" variant="ghost" onClick={onRetry} icon={<RefreshCw className="size-3.5" />}>重新读取</Button>}
     </div>
-  </Panel>;
+    {readMessage && <p className="mt-2 text-2xs text-muted" role={readStatus === "unavailable" || readStatus === "forbidden" ? "alert" : "status"}>{readMessage}</p>}
+  </section>;
 }

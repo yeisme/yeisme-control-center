@@ -1,5 +1,6 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cx } from "./cx";
+import { Tooltip } from "./Tooltip";
 
 type Variant = "primary" | "secondary" | "ghost" | "quiet" | "danger";
 type Size = "sm" | "md" | "icon" | "icon-sm";
@@ -23,10 +24,12 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
   icon?: ReactNode;
+  /** Why the action is unavailable; shown on hover and keyboard focus. Defaults to `title` when disabled. */
+  disabledReason?: ReactNode;
 }
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = "secondary", size = "md", icon, className, children, type = "button", ...props }, ref) {
-  return <button
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = "secondary", size = "md", icon, className, children, type = "button", disabledReason, ...props }, ref) {
+  const button = <button
     ref={ref}
     type={type}
     className={cx(
@@ -40,4 +43,16 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     {icon}
     {children}
   </button>;
+  const reason = props.disabled ? disabledReason ?? props.title : undefined;
+  if (!reason) return button;
+  // Disabled buttons emit no pointer or focus events, so a focusable wrapper carries the explanation.
+  return <Tooltip content={reason}>
+    <span tabIndex={0} className="inline-flex rounded-control outline-none focus-visible:ring-2 focus-visible:ring-focus">{button}</span>
+  </Tooltip>;
+});
+
+/** Square icon-only button; the label is required and doubles as its tooltip. */
+export const IconButton = forwardRef<HTMLButtonElement, Omit<ButtonProps, "children" | "icon"> & { label: string; icon: ReactNode }>(function IconButton({ label, icon, size = "icon-sm", variant = "ghost", ...props }, ref) {
+  const button = <Button ref={ref} size={size} variant={variant} aria-label={label} icon={icon} {...props} />;
+  return props.disabled ? button : <Tooltip content={label}>{button}</Tooltip>;
 });

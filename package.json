@@ -16,6 +16,7 @@
     "preview:real": "bun scripts/start-dev-preview.mjs",
     "preview:fixture": "bun scripts/fixture-preview.ts",
     "test:browser-journey": "bun scripts/verify-browser-journey.ts",
+    "test:visual-matrix": "bun scripts/capture-visual-matrix.ts",
     "test:preview:real": "node scripts/verify-dev-preview.mjs",
     "serve": "bun server/index.ts",
     "test:owners": "node scripts/verify-owners.mjs",

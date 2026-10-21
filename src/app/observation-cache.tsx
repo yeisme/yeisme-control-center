@@ -11,6 +11,8 @@ interface CacheEntry<T> {
 export interface ObservationCache {
   peek: <T>(key: string) => { data: T; stale: boolean } | null;
   read: <T>(key: string, loader: () => Promise<T>, freshMs: number, staleMs: number) => Promise<{ data: T; stale: boolean }>;
+  /** Publishes a value a page already read so other surfaces can peek without another request. */
+  put: <T>(key: string, data: T, freshMs: number, staleMs: number) => void;
   clear: () => void;
 }
 
@@ -38,6 +40,11 @@ export class ObservationCacheStore implements ObservationCache {
     this.entries.set(key, { data: existing?.data as T, expiresAt: existing?.expiresAt || 0, staleUntil: Date.now() + staleMs, promise });
     if (this.entries.size > 256) this.entries.delete(this.entries.keys().next().value as string);
     return { data: await promise, stale: false };
+  }
+
+  put<T>(key: string, data: T, freshMs: number, staleMs: number) {
+    const now = Date.now();
+    this.entries.set(key, { data, expiresAt: now + freshMs, staleUntil: now + staleMs });
   }
 
   clear() { this.entries.clear(); }

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { CircleAlert, Clock3, LockKeyhole, Plug, RefreshCw, ShieldQuestion, Unplug, Inbox, LogIn } from "../../icons";
 import { cx } from "./cx";
 import { Button } from "./Button";
@@ -18,15 +18,37 @@ export function Panel({ title, eyebrow, actions, children, className, bodyClassN
   </section>;
 }
 
-export function PageHeader({ title, description, actions, meta }: { title: string; description?: ReactNode; actions?: ReactNode; meta?: ReactNode }) {
-  return <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
-    <div className="min-w-0 max-w-3xl">
-      <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.01em] text-ink">{title}</h1>
-      {description && <p className="mt-1.5 text-sm text-muted text-pretty">{description}</p>}
-      {meta && <div className="mt-3 flex flex-wrap items-center gap-2">{meta}</div>}
-    </div>
-    {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
-  </header>;
+/**
+ * Page-level toolbar that replaces the empty band above each page: purpose and actions on the first
+ * line, key metrics and freshness/coverage meta on the second. Pages keep their `h1.sr-only`.
+ */
+export function PageToolbar({ summary, metrics, meta, actions, children, className }: { summary?: ReactNode; metrics?: ReactNode; meta?: ReactNode; actions?: ReactNode; children?: ReactNode; className?: string }) {
+  return <div className={cx("flex flex-col gap-3", className)} data-page-toolbar>
+    {(summary || actions) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      {summary ? <p className="min-w-0 max-w-3xl text-body-sm text-muted text-pretty">{summary}</p> : <span />}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+    </div>}
+    {(metrics || meta) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <div className="min-w-0">{metrics}</div>
+      {meta && <div className="flex flex-wrap items-center gap-2">{meta}</div>}
+    </div>}
+    {children}
+  </div>;
+}
+
+/** Collapses stacked page notices into the most important one plus an expandable remainder. */
+export function NoticeStack({ notices, className }: { notices: ReactNode[]; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const visible = notices.filter(Boolean);
+  if (!visible.length) return null;
+  const rest = visible.length - 1;
+  return <div className={cx("space-y-2", className)}>
+    {visible[0]}
+    {rest > 0 && open && visible.slice(1)}
+    {rest > 0 && <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="text-2xs font-medium text-muted underline-offset-2 hover:text-ink hover:underline">
+      {open ? "收起提示" : `另有 ${rest} 条提示`}
+    </button>}
+  </div>;
 }
 
 export function SegmentedTabs<T extends string>({ value, options, onChange, label, className }: { value: T; options: { id: T; label: ReactNode; count?: number | null }[]; onChange: (value: T) => void; label: string; className?: string }) {

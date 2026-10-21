@@ -8,7 +8,7 @@
   --ink: #1f2b25;
   --ink-soft: #3d4a43;
   --muted: #616e66;
-  --faint: #858f87;
+  --faint: #67726a;
   --line: #e2e6dc;
   --line-strong: #cdd6c9;
   --primary: #214b3e;
@@ -38,24 +38,30 @@
   --neutral: #5f6b64;
   --neutral-soft: #eceee8;
 
-  --kind-image: #2f6b5c;
-  --kind-image-soft: #e2eee8;
-  --kind-video: #3d5f8a;
-  --kind-video-soft: #e4ebf4;
-  --kind-audio: #6f4a7c;
-  --kind-audio-soft: #f0e8f4;
-  --kind-text: #8c5a0b;
-  --kind-text-soft: #f8eedb;
+  /* Kind hues sit outside the status families (green/blue/amber/red/purple); text >= 4.5:1 on soft. */
+  --kind-image: #0b6f82;
+  --kind-image-soft: #e3f1f4;
+  --kind-video: #434aa6;
+  --kind-video-soft: #ebecfa;
+  --kind-audio: #ad3462;
+  --kind-audio-soft: #f9e8ef;
+  --kind-text: #586d0c;
+  --kind-text-soft: #eef2dc;
 
-  /* Categorical slots validated with the dataviz validator against --panel (adjacent + all-pairs). */
-  --chart-1: #2a78d6;
-  --chart-2: #eb6834;
-  --chart-3: #1baf7a;
+  /* Owner series in fixed order eikona, scaena, sonora, aigora; dataviz validator all-pairs PASS
+     against --panel (CVD ΔE 9.3, normal 16.7). Never reused for status. */
+  --chart-1: #0a8fa8;
+  --chart-2: #4f58c2;
+  --chart-3: #d6457a;
+  --chart-4: #6f8a10;
   --chart-grid: #ebe9e2;
   --chart-axis: #8d978f;
 
   --shadow-panel: 0 1px 2px rgb(25 49 38 / 5%), 0 8px 24px rgb(25 49 38 / 5%);
+  --shadow-raised: 0 1px 2px rgb(25 49 38 / 6%), 0 10px 28px rgb(25 49 38 / 9%);
   --shadow-float: 0 18px 48px rgb(25 49 38 / 16%), 0 2px 6px rgb(25 49 38 / 8%);
+  --ring-selected: 0 0 0 1px var(--primary), 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+  --sidebar-focus: #d0e778;
   --scrim: rgb(18 30 24 / 34%);
 
   --radius-card: 14px;
@@ -85,7 +91,7 @@
   --ink: #e8efe9;
   --ink-soft: #cbd6ce;
   --muted: #a1afa6;
-  --faint: #76847b;
+  --faint: #8d9b92;
   --line: #29352f;
   --line-strong: #3b4a42;
   --primary: #d0e778;
@@ -115,22 +121,25 @@
   --neutral: #a9b5ad;
   --neutral-soft: #242d29;
 
-  --kind-image: #8fd0b8;
-  --kind-image-soft: #1b302a;
-  --kind-video: #a4c2e6;
-  --kind-video-soft: #1c2837;
-  --kind-audio: #d3b4e2;
-  --kind-audio-soft: #2b2234;
-  --kind-text: #e7bd6b;
-  --kind-text-soft: #33281a;
+  --kind-image: #6fcade;
+  --kind-image-soft: #15282d;
+  --kind-video: #a9aef2;
+  --kind-video-soft: #1f2139;
+  --kind-audio: #f09bbd;
+  --kind-audio-soft: #36202b;
+  --kind-text: #b9cf6a;
+  --kind-text-soft: #262c17;
 
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
+  /* Dark steps validated separately against the dark --panel (CVD ΔE 8.6, normal 16.2). */
+  --chart-1: #00a1bd;
+  --chart-2: #6169c5;
+  --chart-3: #bf5884;
+  --chart-4: #859e3a;
   --chart-grid: #26302b;
   --chart-axis: #76847b;
 
   --shadow-panel: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 0 0 1px rgb(255 255 255 / 2%);
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 0 0 1px rgb(255 255 255 / 5%), 0 10px 28px rgb(0 0 0 / 30%);
   --shadow-float: 0 22px 56px rgb(0 0 0 / 45%), 0 0 0 1px rgb(255 255 255 / 6%);
   --scrim: rgb(0 0 0 / 52%);
 }

@@ -48,6 +48,7 @@ export function InspectorShell({
   children,
 }: InspectorShellProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const [desktopDock, setDesktopDock] = useState(false);
   const floating = mode === "floating";
@@ -74,6 +75,24 @@ export function InspectorShell({
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = previousOverflow; };
   }, [docked, floating, maximized, open]);
+
+  // Drawer and maximized modes are modal: move focus inside and keep Tab cycling within the panel.
+  useEffect(() => {
+    if (!open || !modal) return;
+    const panel = panelRef.current;
+    if (panel && !panel.contains(document.activeElement)) panel.focus({ preventScroll: true });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !panel) return;
+      const focusable = [...panel.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")].filter((element) => element.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [modal, open]);
 
   const close = useCallback(() => {
     onClose();
@@ -103,6 +122,8 @@ export function InspectorShell({
   return createPortal(<>
     <div className="fixed inset-0 z-[54] bg-black/20 backdrop-blur-[1px] min-[1280px]:hidden" aria-hidden="true" />
     <aside
+      ref={panelRef}
+      tabIndex={-1}
       {...{ [dataAttribute]: mode }}
       {...{ [`${dataAttribute}-maximized`]: maximized ? "true" : undefined }}
       role={docked ? "complementary" : "dialog"}
@@ -118,10 +139,10 @@ export function InspectorShell({
           <div className="min-w-0 flex-1">{header}</div>
           <div className="flex shrink-0 items-center gap-1">
             {headerActions}
-            <button type="button" className="grid size-8 place-items-center rounded-[8px] text-muted hover:bg-panel-sunken hover:text-ink focus-visible:outline-2 focus-visible:outline-focus" onClick={() => onModeChange(floating ? "fixed" : "floating")} aria-label={floating ? `固定${label}侧栏` : `悬浮${label}侧栏`} title={floating ? "固定侧栏" : "悬浮侧栏"}>
+            <button type="button" className="grid size-8 place-items-center rounded-[8px] text-muted hover:bg-panel-sunken hover:text-ink focus-visible:outline-2 focus-visible:outline-focus max-md:hidden" onClick={() => onModeChange(floating ? "fixed" : "floating")} aria-label={floating ? `固定${label}侧栏` : `悬浮${label}侧栏`} title={floating ? "固定侧栏" : "悬浮侧栏"}>
               {floating ? <Pin className="size-4" /> : <PinOff className="size-4" />}
             </button>
-            <button type="button" className="grid size-8 place-items-center rounded-[8px] text-muted hover:bg-panel-sunken hover:text-ink focus-visible:outline-2 focus-visible:outline-focus" onClick={onMaximize} aria-label={maximized ? `还原${label}侧栏` : `最大化${label}侧栏`} title={maximized ? "还原" : "最大化"}>
+            <button type="button" className="grid size-8 place-items-center rounded-[8px] text-muted hover:bg-panel-sunken hover:text-ink focus-visible:outline-2 focus-visible:outline-focus max-md:hidden" onClick={onMaximize} aria-label={maximized ? `还原${label}侧栏` : `最大化${label}侧栏`} title={maximized ? "还原" : "最大化"}>
               {maximized ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
             </button>
             <button type="button" className="grid size-8 place-items-center rounded-[8px] text-muted hover:bg-panel-sunken hover:text-ink focus-visible:outline-2 focus-visible:outline-focus" onClick={close} aria-label={closeAriaLabel} title="关闭">

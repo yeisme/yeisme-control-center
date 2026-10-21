@@ -58,6 +58,8 @@
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-sidebar-focus: var(--sidebar-focus);
   --color-chart-grid: var(--chart-grid);
   --color-chart-axis: var(--chart-axis);
 
@@ -66,10 +68,25 @@
   --radius-chip: var(--radius-chip);
   --shadow-panel: var(--shadow-panel);
   --shadow-float: var(--shadow-float);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-selected: var(--ring-selected);
   --ease-out: var(--ease-out);
 
+  /* Text roles; Tailwind's xs/sm/base keep their defaults so existing sizes do not shift. */
   --text-2xs: 11px;
   --text-2xs--line-height: 16px;
+  --text-meta: 12px;
+  --text-meta--line-height: 18px;
+  --text-body-sm: 13px;
+  --text-body-sm--line-height: 20px;
+  --text-title-sm: 15px;
+  --text-title-sm--line-height: 22px;
+  --text-title: 17px;
+  --text-title--line-height: 24px;
+  --text-metric: 22px;
+  --text-metric--line-height: 28px;
+  --text-display: 26px;
+  --text-display--line-height: 32px;
 }
 
 @layer base {
@@ -87,6 +104,7 @@
   }
   ::selection { background: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--ink); }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  [data-sidebar] :focus-visible { outline-color: var(--sidebar-focus); }
   [data-theme-switching] *, [data-theme-switching] *::before, [data-theme-switching] *::after { transition: none !important; }
   * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
 }
@@ -105,7 +123,7 @@
     inset: 0;
     transform: translateX(-100%);
     background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--panel) 70%, transparent), transparent);
-    animation: shimmer 1.4s ease-in-out 3;
+    animation: shimmer 1.4s ease-in-out infinite;
   }
   .tabular { font-variant-numeric: tabular-nums; }
   .media-checker {
@@ -114,54 +132,6 @@
     background-size: 16px 16px;
     background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   }
-  .audio-preview-card {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-height: 76px;
-    padding: 12px 14px;
-    border: 1px solid color-mix(in srgb, var(--kind-audio) 26%, var(--line));
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--kind-audio-soft) 68%, var(--panel));
-  }
-  .audio-dock {
-    position: fixed;
-    z-index: 70;
-    left: 50%;
-    bottom: max(16px, env(safe-area-inset-bottom));
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    width: min(620px, calc(100vw - 24px));
-    padding: 12px 14px;
-    transform: translateX(-50%);
-    border: 1px solid color-mix(in srgb, var(--kind-audio) 32%, var(--line));
-    border-radius: 16px;
-    background: color-mix(in srgb, var(--panel) 88%, var(--kind-audio-soft));
-    box-shadow: var(--shadow-float);
-    backdrop-filter: blur(18px) saturate(125%);
-  }
-  .audio-dock-collapsed { width: min(360px, calc(100vw - 24px)); padding-block: 8px; }
-  .media-range, .media-volume {
-    display: block;
-    height: 4px;
-    accent-color: var(--kind-audio);
-    cursor: pointer;
-  }
-  .media-volume { width: 76px; }
-  .media-dialog-icon, .media-dialog-button, .media-dock-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    color: inherit;
-    border-radius: 8px;
-    transition: background-color 140ms ease, color 140ms ease;
-  }
-  .media-dialog-icon, .media-dock-icon { width: 32px; height: 32px; }
-  .media-dialog-button { height: 32px; padding: 0 10px; font-size: 12px; }
-  .media-dialog-icon:hover, .media-dialog-button:hover, .media-dock-icon:hover { background: rgb(255 255 255 / 10%); }
-  .media-stage { background: radial-gradient(circle at center, rgb(51 67 57 / 45%), transparent 58%); }
   .inspector-fixed-in { animation: inspector-fixed-in 180ms var(--ease-out) both; }
   @media (min-width: 1024px) {
     [data-task-inspector="fixed"]:not([data-task-inspector-maximized="true"]) { right: 0 !important; left: auto !important; margin-right: 0; }
@@ -187,7 +157,3 @@
   *, *::before, *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 
-@media (max-width: 639px) {
-  .audio-dock { border-radius: 14px; }
-  .audio-preview-card { gap: 10px; padding-inline: 10px; }
-}

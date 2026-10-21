@@ -12,6 +12,8 @@ import { Button, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSepar
 import { formatRelative, initials } from "../shared/read-model/format";
 import { reminderStateLabels } from "../notifications";
 import { useTheme, type ThemePreference } from "./theme";
+import { useObservationCache } from "../app/observation-cache";
+import { toolCatalogCacheKey, type ToolCatalog } from "../shared/tool-catalog";
 
 const icons: Record<WorkspacePage, typeof LayoutDashboard> = {
   home: LayoutDashboard,
@@ -86,8 +88,9 @@ function Sidebar({ page, collapsed, mobileOpen, onNavigate }: { page: WorkspaceP
   const review = tasks.rows.filter((task) => task.state === "waiting_review").length;
   return <aside
     aria-label="主导航"
+    data-sidebar
     className={cx(
-      "fixed inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col bg-sidebar text-sidebar-ink transition-transform duration-200 ease-out lg:sticky lg:top-0 lg:h-dvh lg:translate-x-0",
+      "fixed inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col bg-sidebar text-sidebar-ink transition-[transform,width] duration-200 ease-out lg:sticky lg:top-0 lg:h-dvh lg:translate-x-0",
       mobileOpen ? "translate-x-0 shadow-float" : "-translate-x-full",
       collapsed && "lg:w-[var(--sidebar-collapsed)]",
     )}
@@ -321,11 +324,22 @@ function IdentityMenu({ onNavigate }: { onNavigate: (page: WorkspacePage) => voi
   </MenuRoot>;
 }
 
+type PaletteGroup = "task" | "catalog" | "page";
+interface PaletteResult { key: string; group: PaletteGroup; label: string; meta: string; target: string }
+const paletteGroups: { id: PaletteGroup; label: string; icon: ReactNode }[] = [
+  { id: "task", label: "任务", icon: <ListTodo className="size-3.5" /> },
+  { id: "catalog", label: "模型与工具", icon: <Cpu className="size-3.5" /> },
+  { id: "page", label: "页面", icon: <LayoutDashboard className="size-3.5" /> },
+];
+const catalogKindLabel = { model: "模型", tool: "工具", action: "动作" } as const;
+
 function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigate: (target: string) => void }) {
   const tasks = useTasks();
+  const cache = useObservationCache();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<Element | null>(null);
   useEffect(() => {
     previousFocus.current = document.activeElement;
@@ -334,24 +348,51 @@ function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigat
   }, []);
   const results = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    const pages = navItems
+    const pages: PaletteResult[] = navItems
       .filter((item) => !needle || `${item.label} ${item.description}`.toLocaleLowerCase().includes(needle))
-      .map((item) => ({ key: "page:" + item.id, label: item.label, meta: item.description, target: item.id === "home" ? "/" : `/${item.id}` }));
-    const taskResults = needle ? tasks.rows
+      .map((item) => ({ key: "page:" + item.id, group: "page", label: item.label, meta: item.description, target: item.id === "home" ? "/" : `/${item.id}` }));
+    const taskResults: PaletteResult[] = needle ? tasks.rows
       .filter((task) => `${task.title} ${task.locator.task_ref} ${task.locator.owner} ${task.locator.project}`.toLocaleLowerCase().includes(needle))
-      .slice(0, 6)
-      .map((task) => ({ key: "task:" + task.task_key, label: task.title, meta: `任务 · ${ownerLabel(task.locator.owner)} · ${task.locator.task_ref}`, target: `/tasks?task=${encodeURIComponent(task.task_key || "")}` })) : [];
-    return [...taskResults, ...pages].slice(0, 10);
-  }, [query, tasks.rows]);
+      .slice(0, 5)
+      .map((task) => ({ key: "task:" + task.task_key, group: "task", label: task.title, meta: `${ownerLabel(task.locator.owner)} · ${task.locator.task_ref}`, target: `/tasks?task=${encodeURIComponent(task.task_key || "")}` })) : [];
+    const catalog = needle ? cache.peek<ToolCatalog>(toolCatalogCacheKey)?.data : null;
+    const catalogResults: PaletteResult[] = catalog ? [
+      ...catalog.models.filter((model) => model.status !== "historical").map((model) => ({ kind: "model" as const, owner: model.owner, id: model.id, label: model.model_ref, tab: "models" })),
+      ...catalog.actions.map((action) => ({ kind: "action" as const, owner: action.owner, id: action.id, label: action.name, tab: "tools" })),
+      ...catalog.tools.map((tool) => ({ kind: "tool" as const, owner: tool.owner, id: tool.id, label: tool.name, tab: "tools" })),
+    ].filter((entry) => `${entry.label} ${entry.owner}`.toLocaleLowerCase().includes(needle)).slice(0, 5).map((entry) => ({
+      key: `catalog:${entry.kind}:${entry.owner}:${entry.id}`,
+      group: "catalog",
+      label: entry.label,
+      meta: `${ownerLabel(entry.owner)} · ${catalogKindLabel[entry.kind]}`,
+      target: `/capabilities?${new URLSearchParams({ tab: entry.tab, entry: `${entry.kind}:${entry.owner}:${entry.id}` })}`,
+    })) : [];
+    return [...taskResults, ...catalogResults, ...pages].slice(0, 12);
+  }, [cache, query, tasks.rows]);
   useEffect(() => setActive(0), [query]);
-  return <div className="fixed inset-0 z-50 flex items-start justify-center px-3 pt-[12vh]" role="dialog" aria-modal="true" aria-label="搜索">
-    <button aria-label="关闭搜索" className="fade-in absolute inset-0" style={{ background: "var(--scrim)" }} onClick={onClose} />
-    <div className="pop-in relative w-full max-w-xl overflow-hidden rounded-[16px] border border-line bg-panel shadow-float">
+  const optionId = (index: number) => `command-option-${index}`;
+  const trapFocus = (event: React.KeyboardEvent) => {
+    if (event.key !== "Tab") return;
+    const focusable = [...(dialog.current?.querySelectorAll<HTMLElement>("input, button:not([tabindex='-1'])") || [])];
+    if (!focusable.length) return;
+    const index = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = event.shiftKey ? (index <= 0 ? focusable.length - 1 : index - 1) : (index === focusable.length - 1 ? 0 : index + 1);
+    event.preventDefault();
+    focusable[next].focus();
+  };
+  return <div className="fixed inset-0 z-50 flex items-start justify-center px-3 pt-[12vh]" role="dialog" aria-modal="true" aria-label="搜索" onKeyDown={trapFocus}>
+    <button aria-label="关闭搜索" tabIndex={-1} className="fade-in absolute inset-0" style={{ background: "var(--scrim)" }} onClick={onClose} />
+    <div ref={dialog} className="pop-in relative w-full max-w-xl overflow-hidden rounded-[16px] border border-line bg-panel shadow-float">
       <div className="flex items-center gap-2 border-b border-line px-4">
         <Search className="size-4 text-faint" />
         <input
           ref={input}
           value={query}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="command-results"
+          aria-activedescendant={results[active] ? optionId(active) : undefined}
+          aria-autocomplete="list"
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") onClose();
@@ -359,22 +400,27 @@ function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigat
             if (event.key === "ArrowUp") { event.preventDefault(); setActive((value) => Math.max(value - 1, 0)); }
             if (event.key === "Enter" && results[active]) onNavigate(results[active].target);
           }}
-          placeholder="搜索当前批次的任务，或跳转页面"
+          placeholder="搜索任务、模型与工具，或跳转页面"
           aria-label="搜索任务或页面"
           className="h-12 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
         />
         <Button variant="ghost" size="icon-sm" aria-label="关闭搜索" onClick={onClose}><X className="size-4" /></Button>
       </div>
-      <ul role="listbox" aria-label="搜索结果" className="max-h-[50vh] overflow-y-auto p-1.5">
-        {results.length ? results.map((result, index) => <li key={result.key} role="option" aria-selected={index === active}>
-          <button type="button" onMouseEnter={() => setActive(index)} onClick={() => onNavigate(result.target)} className={cx("flex w-full items-center gap-3 rounded-[9px] px-3 py-2.5 text-left", index === active && "bg-panel-sunken")}>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-medium">{result.label}</span>
-              <span className="block truncate text-2xs text-muted">{result.meta}</span>
+      <ul id="command-results" role="listbox" aria-label="搜索结果" className="max-h-[50vh] overflow-y-auto p-1.5">
+        {results.length ? results.map((result, index) => {
+          const group = paletteGroups.find((item) => item.id === result.group)!;
+          const firstOfGroup = index === 0 || results[index - 1].group !== result.group;
+          return <li key={result.key} id={optionId(index)} role="option" aria-selected={index === active} onMouseEnter={() => setActive(index)} onClick={() => onNavigate(result.target)} className={cx("cursor-pointer", firstOfGroup && index > 0 && "mt-1.5 border-t border-line pt-1.5")}>
+            {firstOfGroup && <span aria-hidden="true" className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-2xs font-medium text-muted">{group.icon}{group.label}</span>}
+            <span className={cx("flex w-full items-center gap-3 rounded-[9px] px-3 py-2.5", index === active && "bg-panel-sunken")}>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-body-sm font-medium">{result.label}</span>
+                <span className="block truncate text-2xs text-muted">{result.meta}</span>
+              </span>
+              {index === active && <ArrowRight className="size-4 text-muted" />}
             </span>
-            {index === active && <ArrowRight className="size-4 text-muted" />}
-          </button>
-        </li>) : <li className="px-3 py-8 text-center text-[13px] text-muted">没有匹配结果</li>}
+          </li>;
+        }) : <li className="px-3 py-8 text-center text-body-sm text-muted">没有匹配结果</li>}
       </ul>
       <div className="flex items-center gap-3 border-t border-line px-4 py-2 text-2xs text-muted"><Kbd>↑</Kbd><Kbd>↓</Kbd>选择<Kbd>↵</Kbd>打开<Kbd>Esc</Kbd>关闭</div>
     </div>

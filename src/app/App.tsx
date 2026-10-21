@@ -9,7 +9,7 @@ import { AuthLoading, AuthProblem, LoginScreen } from "./auth";
 import { AppShell } from "../app-shell/AppShell";
 import { ThemeProvider } from "../app-shell/theme";
 import { pageFromPath, type WorkspacePage } from "../app-shell/navigation";
-import { Button, EmptyState, SkeletonRows, ToastProvider } from "../components/ui";
+import { Button, EmptyState, SkeletonRows, ToastProvider, TooltipProvider } from "../components/ui";
 import { RefreshCw, Unplug } from "../icons";
 import "../styles/app.css";
 
@@ -82,10 +82,12 @@ function Workspace() {
 
 export function App() {
   return <ThemeProvider>
-    <ToastProvider>
-      <WorkspaceProvider>
-        <Workspace />
-      </WorkspaceProvider>
-    </ToastProvider>
+    <TooltipProvider>
+      <ToastProvider>
+        <WorkspaceProvider>
+          <Workspace />
+        </WorkspaceProvider>
+      </ToastProvider>
+    </TooltipProvider>
   </ThemeProvider>;
 }
