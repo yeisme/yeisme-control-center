@@ -29,13 +29,13 @@ on:
         default: '5'
         type: string
 
-environment: provider-live
 permissions:
   contents: read
 
 jobs:
   canary:
     if: inputs.confirm_live == true
+    environment: provider-live
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
