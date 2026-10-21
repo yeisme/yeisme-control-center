@@ -19,6 +19,8 @@ bun run check:public-surface
 
 `test:app` 验证正式 App Shell、HashRouter、真实入口和无 demo API 请求；真实只读预览使用 `bun run test:preview:real`。
 
+`test:app` 等页面真正渲染出来再断言，而不是依赖 Playwright 的 `networkidle`。设置 `APP_SHELL_MOUNT_DELAY_MS=2000` 会把应用入口模块推迟 2 秒，在开发服务器上复现“网络已空闲、应用还没挂载”的情形，用来回归这类竞态；找不到入口脚本（例如生产构建）时会直接报错而不是静默跳过。
+
 前端沿用既有原型的视觉方向，不再依赖 OpenDesign。视觉审计使用项目级 Taste 快照与 `better-ui`，页面实现位于 `src/`，以正式 API 和统一 App Shell 为准。技能 profile 校验和同步：
 
 ```bash
