@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { mergeConnectionObservations, mergeTaskObservation, readTaskPages } from "../src/task-polling";
+import { combineTaskPages, mergeConnectionObservations, mergeTaskObservation, readTaskPages } from "../src/task-polling";
 import { contentActionEnabled, type ConnectionObservation, type TaskPage, type TaskSnapshot } from "../src/task-observation";
 
 const runtime: ConnectionObservation = {
@@ -86,4 +86,30 @@ it("never revives denied rows from a later page in the same observation", async 
   } : page);
   expect(result.rows).toEqual([]);
   expect(calls).toBe(2);
+});
+
+it("keeps lane-specific coverage when history lacks an owner contract", () => {
+  const active = {
+    ...page,
+    rows: [task("active")],
+    connections: page.connections.map((connection) => ({
+      ...connection,
+      channels: { active: { state: "ready", observed_at: "2026-10-11T00:00:00Z" } },
+    })),
+  };
+  const history: TaskPage = {
+    rows: [],
+    connections: page.connections.map((connection) => ({
+      ...connection,
+      state: "needs_contract",
+      channels: { history: { state: "needs_contract", reason: "owner_action_contract_missing", observed_at: "2026-10-11T00:00:01Z" } },
+    })),
+    next_cursors: {},
+  };
+  const combined = combineTaskPages(active, history);
+  expect(combined.rows.map((row) => row.task_key)).toEqual(["active"]);
+  expect(combined.connections[0].channels).toMatchObject({
+    active: { state: "ready" },
+    history: { state: "needs_contract" },
+  });
 });

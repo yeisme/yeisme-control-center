@@ -1,4 +1,4 @@
-import type { TaskConnectionState, TaskPage, TaskSnapshot } from "./task-observation";
+import type { TaskChannelObservation, TaskConnectionState, TaskPage, TaskReadChannel, TaskSnapshot } from "./task-observation";
 import { contentActionEnabled } from "./task-observation";
 
 // Aggregate pages within one observation cycle; an empty page with a cursor is
@@ -7,16 +7,35 @@ export async function readTaskPages(
   read: (cursors?: Record<string, string>) => Promise<TaskPage>,
   maxPages = 100,
 ): Promise<TaskPage> {
+  const { truncated, ...page } = await collectTaskPages(read, maxPages);
+  if (truncated) throw Error(truncated);
+  return page;
+}
+
+// Same aggregation, but a page cap or repeated cursor returns the rows read so
+// far and names the reason, so a bounded batch is never shown as the full set.
+export async function readTaskPagesBounded(
+  read: (cursors?: Record<string, string>) => Promise<TaskPage>,
+  maxPages: number,
+): Promise<TaskPage & { truncated: "task_page_limit" | "task_cursor_repeated" | null }> {
+  return collectTaskPages(read, maxPages);
+}
+
+async function collectTaskPages(
+  read: (cursors?: Record<string, string>) => Promise<TaskPage>,
+  maxPages: number,
+): Promise<TaskPage & { truncated: "task_page_limit" | "task_cursor_repeated" | null }> {
   const first = await read(),
     rows = new Map(first.rows.map((t) => [t.task_key!, t])),
     connections = new Map(first.connections.map((c) => [c.id, c]));
   let cursors = first.next_cursors,
-    pages = 1;
+    pages = 1,
+    truncated: "task_page_limit" | "task_cursor_repeated" | null = null;
   const seen = new Set<string>();
   while (Object.keys(cursors).length) {
-    if (pages++ >= maxPages) throw Error("task_page_limit");
+    if (pages++ >= maxPages) { truncated = "task_page_limit"; break; }
     const key = JSON.stringify(Object.entries(cursors).sort());
-    if (seen.has(key)) throw Error("task_cursor_repeated");
+    if (seen.has(key)) { truncated = "task_cursor_repeated"; break; }
     seen.add(key);
     const page = await read(cursors);
     for (const task of page.rows) rows.set(task.task_key!, task);
@@ -35,6 +54,7 @@ export async function readTaskPages(
     rows: [...rows.values()].filter((t) => !denied.has(t.connection_id!)),
     connections: [...connections.values()],
     next_cursors: {},
+    truncated,
   };
 }
 export function mergeConnectionObservations(
@@ -49,7 +69,18 @@ export function mergeConnectionObservations(
     if (connection.state === "needs_authorization")
       return { ...connection, runtime: undefined };
     return observed
-      ? { ...connection, ...observed, runtime: observed.runtime }
+      ? {
+          ...connection,
+          ...observed,
+          channels: mergeChannels(connection.channels, observed.channels),
+          runtime: observed.runtime
+            ? {
+                ...connection.runtime,
+                ...observed.runtime,
+                channels: mergeChannels(connection.runtime?.channels, observed.runtime.channels),
+              }
+            : undefined,
+        }
       : { ...connection, runtime: undefined };
   });
   connections.push(...byId.values());
@@ -109,12 +140,30 @@ export function combineTaskPages(active: TaskPage, history: TaskPage): TaskPage 
   const connections = new Map(active.connections.map(c => [c.id, c]));
   for (const c of history.connections) {
     const old = connections.get(c.id);
-    connections.set(c.id, old?.state === 'needs_authorization' ? old
-      : c.state !== 'ready' ? c : old && old.state !== 'ready' ? old : c);
+    const selected = old?.state === 'needs_authorization' ? old
+      : c.state !== 'ready' ? c : old && old.state !== 'ready' ? old : c;
+    connections.set(c.id, {
+      ...selected,
+      channels: mergeChannels(old?.channels, c.channels),
+      runtime: selected.runtime
+        ? {
+            ...selected.runtime,
+            channels: mergeChannels(old?.runtime?.channels, c.runtime?.channels),
+          }
+        : selected.runtime,
+    });
   }
   const denied = new Set([...connections.values()].filter(c => c.state === 'needs_authorization').map(c => c.id));
   const rows = new Map<string, TaskSnapshot>();
   for (const task of [...active.rows, ...history.rows])
     if (!denied.has(task.connection_id!)) rows.set(task.task_key!, task);
   return { rows: [...rows.values()], connections: [...connections.values()], next_cursors: {} };
+}
+
+function mergeChannels(
+  first?: Partial<Record<TaskReadChannel, TaskChannelObservation>>,
+  second?: Partial<Record<TaskReadChannel, TaskChannelObservation>>,
+) {
+  if (!first && !second) return undefined;
+  return { ...first, ...second };
 }

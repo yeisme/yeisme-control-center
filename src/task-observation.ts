@@ -1,3 +1,5 @@
+import type { ProcessObservation, PromptCaptureObservation, ProcessProgress } from "./observation-contract";
+
 export const taskOwners = ["eikona", "sonora", "scaena"] as const;
 export type TaskOwner = (typeof taskOwners)[number];
 export interface TaskLocator {
@@ -22,6 +24,12 @@ export interface TaskArtifact {
   width?: number;
   height?: number;
   duration_ms?: number;
+  thumbnail?: {
+    state: "ready" | "unavailable" | "forbidden" | "needs_contract";
+    ref?: string;
+    observed_at?: string;
+    reason?: string;
+  };
 }
 export interface TaskSnapshot {
   schema_version: "yeisme.task_observation.v1";
@@ -50,12 +58,36 @@ export interface TaskSnapshot {
     reason?: string;
   }[];
   coverage: "complete" | "partial";
+  provider_recovery?: TaskProviderRecovery;
+  process?: ProcessObservation;
+  prompt_capture?: PromptCaptureObservation;
 }
 export interface TaskEvent {
   id: string;
   occurred_at: string;
   stage: string;
   state: string;
+  sequence?: number;
+  kind?: string;
+  summary?: string;
+  reason_code?: string;
+  duration_ms?: number | null;
+  attempt_ref?: string;
+  progress?: ProcessProgress;
+  evidence_refs?: string[];
+  prompt_capture?: PromptCaptureObservation;
+}
+export interface TaskProviderRecovery {
+  state: "not_submitted" | "rejected_no_generation" | "accepted_pending" | "generated" | "submission_unknown" | "blocked";
+  native_state: string | null;
+  submission_ref: string | null;
+  binding_id: string | null;
+  error_code: string | null;
+  blocker: string | null;
+  safe_to_resubmit: boolean | null;
+  review_status: string | null;
+  export_status: string | null;
+  artifact_refs: string[];
 }
 export interface TaskConnectionState {
   id: string;
@@ -66,8 +98,18 @@ export interface TaskConnectionState {
   project: string;
   state: string;
   observed_at: string;
+  channels?: Partial<Record<TaskReadChannel, TaskChannelObservation>>;
   runtime?: ConnectionObservation;
 }
+
+export type TaskReadChannel = "connection" | "active" | "history" | "detail" | "events" | "artifacts";
+
+export interface TaskChannelObservation {
+  state: string;
+  observed_at: string;
+  reason?: string;
+}
+
 export interface ConnectionObservation {
   state: string;
   checked_at: string;
@@ -77,6 +119,7 @@ export interface ConnectionObservation {
   contract: "supported" | "unsupported" | "unknown";
   task_families: string[];
   content: "not_requested" | "not_verified" | "supported" | "unsupported" | "denied";
+  channels?: Partial<Record<TaskReadChannel, TaskChannelObservation>>;
   reason?: string;
 }
 
@@ -140,8 +183,13 @@ export interface TaskFilters {
   family: string;
   modality: string;
   results: string;
+  prompt: string;
   from: string;
   through: string;
+}
+
+export function promptCaptureForTask(task: Pick<TaskSnapshot, "prompt_capture" | "process">): PromptCaptureObservation | undefined {
+  return task.prompt_capture || task.process?.prompt_capture || task.process?.checkpoints?.find((checkpoint) => checkpoint.prompt_capture)?.prompt_capture;
 }
 // Filters operate only on the bounded, authorized observation batch. Missing
 // timestamps cannot satisfy an explicit UTC creation-date range.
@@ -158,6 +206,7 @@ export function filterTasks(tasks: TaskSnapshot[], filters: TaskFilters) {
     const resultCount = task.results?.length || 0;
     if (filters.results === "yes" && resultCount === 0) return false;
     if (filters.results === "no" && resultCount > 0) return false;
+    if (filters.prompt && promptCaptureForTask(task)?.state !== filters.prompt) return false;
     if (
       needle &&
       ![

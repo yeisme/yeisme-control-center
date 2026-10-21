@@ -1,124 +1,222 @@
 import { useMemo, useState } from "react";
-import { Activity, ArrowRight, CircleAlert, Clock3, Layers, ListFilter, Wallet, X } from "../../icons";
-import type { UsageFact } from "../../shared/types";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { CircleAlert, Info, ListFilter, Receipt, Table2, Wallet } from "../../icons";
+import { api, type UsageEvent } from "../../shared/api/control-center-client";
+import { useScopedRead } from "../../app/workspace";
+import { Button, CoverageChip, EmptyState, InlineNotice, Panel, Pill, ReadStateView, SegmentedTabs, Select, SkeletonRows, StaleNotice, cx, ownerLabel } from "../../components/ui";
+import { formatFullTime, formatMoney, formatRelative } from "../../shared/read-model/format";
 
-type RangeKey = "7d" | "14d";
+type Range = "7" | "14" | "30";
+const ownerSlots: Record<string, string> = { eikona: "var(--chart-1)", scaena: "var(--chart-2)", sonora: "var(--chart-3)" };
+const costStateLabels: Record<string, string> = { confirmed: "已确认", estimated: "估算", pending: "待核算", unknown: "未知" };
+const costStateTone = { confirmed: "success", estimated: "info", pending: "warning", unknown: "neutral" } as const;
 
-const palette = ["#6d9b71", "#8f6baa", "#6d97b5", "#c6944b", "#7d8f87"];
-
-function TrendChart({ values }: { values: { label: string; cost: number }[] }) {
-  if (!values.some((value) => value.cost > 0)) return <div className="v18-chart-empty"><Clock3 size={17} /><strong>尚未观察到成本趋势</strong><span>owner 未返回已确认成本，图表保持空态。</span></div>;
-  const max = Math.max(...values.map((value) => value.cost), 1);
-  return <div className="v18-css-chart v18-trend-chart" aria-label="每日成本趋势">{values.map((value) => <div className="v18-trend-point" key={value.label}><span style={{ height: `${Math.max(8, (value.cost / max) * 100)}%` }} title={`${value.label} ¥ ${value.cost.toFixed(2)}`} /><small>{value.label}</small></div>)}</div>;
-}
-
-function DonutChart({ values }: { values: { name: string; value: number }[] }) {
-  const total = values.reduce((sum, value) => sum + value.value, 0);
-  if (!total) return <div className="v18-chart-empty"><CircleAlert size={17} /><strong>成本构成未知</strong><span>没有可确认的能力成本。</span></div>;
-  return <div className="v18-css-donut-wrap"><div className="v18-css-donut" style={{ background: `conic-gradient(${values.map((value, index) => `${palette[index % palette.length]} ${total ? (value.value / total) * 100 : 0}%`).reduce((parts, value, index) => { const previous = values.slice(0, index).reduce((sum, item) => sum + (total ? (item.value / total) * 100 : 0), 0); return [...parts, `${value.replace(/ [^ ]+%$/, ` ${previous}% ${previous + (total ? (values[index].value / total) * 100 : 0)}%`)}`]; }, [] as string[]).join(", ")})` }}><span>{total ? `¥ ${total.toFixed(2)}` : "未知"}</span></div></div>;
-}
-
-function ProjectBars({ values }: { values: { name: string; cost: number }[] }) {
-  if (!values.some((value) => value.cost > 0)) return <div className="v18-chart-empty"><CircleAlert size={17} /><strong>项目归因未提供</strong><span>owner 尚未返回可确认的项目成本。</span></div>;
-  const max = Math.max(...values.map((value) => value.cost), 1);
-  return <div className="v18-project-bars">{values.map((value) => <div key={value.name}><span>{value.name}</span><div><i style={{ width: `${(value.cost / max) * 100}%` }} /></div><strong>¥ {value.cost.toFixed(2)}</strong></div>)}</div>;
-}
-
-export function dedupeUsageFacts(facts: UsageFact[]) {
-  const unique = new Map<string, UsageFact>();
-  facts.forEach((fact) => {
-    if (!unique.has(fact.sourceRef)) unique.set(fact.sourceRef, fact);
-  });
+/** Deduplicates by owner + source_ref so a replayed receipt is counted once. */
+export function dedupeUsage(rows: UsageEvent[]) {
+  const unique = new Map<string, UsageEvent>();
+  for (const row of rows) {
+    const key = row.owner + ":" + row.source_ref;
+    if (!unique.has(key)) unique.set(key, row);
+  }
   return [...unique.values()];
 }
 
-function confirmedCost(rows: UsageFact[]) {
-  return rows.reduce((sum, row) => sum + (row.costState === "confirmed" && row.upstreamCost !== null ? row.upstreamCost : 0), 0);
+/** Sums only confirmed upstream cost, per currency; unknown cost is never counted as zero. */
+export function confirmedTotals(rows: UsageEvent[]) {
+  const totals: Record<string, number> = {};
+  for (const row of rows) if (row.cost_state === "confirmed" && row.upstream_cost !== null) totals[row.currency] = (totals[row.currency] || 0) + row.upstream_cost;
+  return totals;
 }
 
-export function UsageAnalytics({ liveMode, facts }: { liveMode: boolean; facts: UsageFact[] }) {
-  const [range, setRange] = useState<RangeKey>("7d");
-  const [project, setProject] = useState("all");
-  const [modality, setModality] = useState("all");
-  const [selectedRow, setSelectedRow] = useState<UsageFact | null>(null);
-  const uniqueFacts = useMemo(() => dedupeUsageFacts(facts), [facts]);
-  const projects = [...new Map(uniqueFacts.map((row) => [row.projectId, row.projectName])).entries()];
-  const anchorTime = uniqueFacts.reduce((latest, row) => Math.max(latest, Date.parse(row.createdAt) || 0), 0) || Date.now();
-  const anchorDate = new Date(anchorTime);
-  const visible = useMemo(() => {
-    const days = range === "7d" ? 7 : 14;
-    const cutoff = anchorTime - (days - 1) * 86400000;
-    return uniqueFacts.filter((row) => {
-      const inRange = Date.parse(row.createdAt) >= cutoff;
-      const inProject = project === "all" || row.projectId === project;
-      const inModality = modality === "all" || row.modality === modality;
-      return inRange && inProject && inModality;
-    });
-  }, [anchorTime, modality, project, range, uniqueFacts]);
+function dayKey(time: number) {
+  const date = new Date(time);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
 
-  const confirmed = confirmedCost(visible);
-  const pending = visible.filter((row) => row.costState === "pending").length;
-  const unknown = visible.filter((row) => row.costState === "unknown").length;
-  const modelCalls = visible.filter((row) => row.model.includes("Sunburst") || row.modality !== "工具").length;
-  const toolCalls = visible.filter((row) => row.tool || row.modality === "工具").length;
+export default function UsageAnalytics() {
+  const read = useScopedRead((scope, signal) => api.usage(scope, signal));
+  const [range, setRange] = useState<Range>("14");
+  const [owner, setOwner] = useState("all");
+  const [tableView, setTableView] = useState(false);
+  const rows = useMemo(() => dedupeUsage(read.data?.rows || []), [read.data]);
+  const currencies = useMemo(() => [...new Set(rows.map((row) => row.currency))].sort((a, b) => a === "CNY" ? -1 : b === "CNY" ? 1 : a.localeCompare(b)), [rows]);
+  const [currency, setCurrency] = useState<string | null>(null);
+  const activeCurrency = currency && currencies.includes(currency) ? currency : currencies[0] || "CNY";
+
+  const now = Date.now();
+  const cutoff = now - Number(range) * 86400_000;
+  const visible = rows.filter((row) => {
+    const time = Date.parse(row.created_at);
+    return Number.isFinite(time) && time >= cutoff && (owner === "all" || row.owner === owner);
+  });
+  const totals = confirmedTotals(visible);
+  const pending = visible.filter((row) => row.cost_state !== "confirmed").length;
+  const unknownCost = visible.filter((row) => row.upstream_cost === null).length;
+  const owners = [...new Set(rows.map((row) => row.owner))];
 
   const trend = useMemo(() => {
-    const days = range === "7d" ? 7 : 14;
-    const values = Array.from({ length: days }, (_, index) => {
-      const date = new Date(anchorTime);
-      date.setDate(date.getDate() - (days - 1 - index));
-      const key = date.toISOString().slice(0, 10);
-      const dayRows = visible.filter((row) => row.createdAt.slice(0, 10) === key);
-      return {
-        key,
-        label: key.slice(5),
-        cost: Number(confirmedCost(dayRows).toFixed(2)),
-        calls: dayRows.length,
-      };
+    const days = Number(range);
+    const buckets = Array.from({ length: days }, (_, index) => {
+      const time = now - (days - 1 - index) * 86400_000;
+      return { key: dayKey(time), label: new Date(time).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }), cost: 0, calls: 0, unconfirmed: 0 };
     });
-    return values;
-  }, [anchorTime, range, visible]);
+    const index = new Map(buckets.map((bucket) => [bucket.key, bucket]));
+    for (const row of visible) {
+      const bucket = index.get(dayKey(Date.parse(row.created_at)));
+      if (!bucket) continue;
+      bucket.calls += 1;
+      if (row.currency !== activeCurrency) continue;
+      if (row.cost_state === "confirmed" && row.upstream_cost !== null) bucket.cost += row.upstream_cost;
+      else bucket.unconfirmed += 1;
+    }
+    return buckets.map((bucket) => ({ ...bucket, cost: Number(bucket.cost.toFixed(2)) }));
+  }, [visible, range, activeCurrency, now]);
 
-  const byModality = useMemo(() => {
-    const grouped = new Map<string, number>();
-    visible.forEach((row) => grouped.set(row.modality, (grouped.get(row.modality) || 0) + (row.costState === "confirmed" ? row.upstreamCost || 0 : 0)));
-    return [...grouped].map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }));
-  }, [visible]);
+  const byOwner = useMemo(() => ["eikona", "scaena", "sonora"].map((id) => {
+    const ownerRows = visible.filter((row) => row.owner === id);
+    const confirmed = ownerRows.filter((row) => row.currency === activeCurrency && row.cost_state === "confirmed" && row.upstream_cost !== null).reduce((sum, row) => sum + (row.upstream_cost || 0), 0);
+    return { owner: id, calls: ownerRows.length, cost: Number(confirmed.toFixed(2)), unconfirmed: ownerRows.filter((row) => row.cost_state !== "confirmed").length };
+  }).filter((item) => item.calls > 0), [visible, activeCurrency]);
 
-  const byProject = useMemo(() => {
-    const grouped = new Map<string, number>();
-    visible.forEach((row) => grouped.set(row.projectName, (grouped.get(row.projectName) || 0) + (row.costState === "confirmed" ? row.upstreamCost || 0 : 0)));
-    return [...grouped].map(([name, cost]) => ({ name, cost: Number(cost.toFixed(2)) }));
-  }, [visible]);
+  const budget = read.data?.budget;
+  const coverage = read.data?.coverage;
 
-  return <div className="v18-page v18-page-enter" data-page="usage">
-    <div className="v18-page-header">
-      <div>
-        <p className="v18-eyebrow">资源运营</p>
-        <h1>用量与成本</h1>
-        <p className="v18-page-body">{liveMode ? "只读取 owner 返回的模型、MCP、Tool 和项目用量事实；缺失成本保持未知。" : "追踪模型、MCP、Tool 和项目的消费归因。演示数据只用于用量与成本观察。"}</p>
-      </div>
-      <span className="v18-inline-status"><Clock3 size={14} />{uniqueFacts.length ? `覆盖至 ${anchorDate.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "尚未观察到用量"}</span>
+  return <div className="page-enter space-y-5" data-page="usage">
+    <h1 className="sr-only">用量与成本</h1>
+    <div className="flex min-h-8 flex-wrap items-center justify-end gap-2 text-2xs text-muted">
+      {coverage && <>
+        <CoverageChip state={coverage.state} />
+        {coverage.observed_at && <span className="text-2xs text-muted">观察于 {formatRelative(coverage.observed_at)}</span>}
+      </>}
     </div>
-    <div className="v18-usage-filters" aria-label="用量筛选">
-      <span className="v18-filter-label"><ListFilter size={14} />筛选</span>
-      <select aria-label="时间范围" value={range} onChange={(event) => setRange(event.target.value as RangeKey)}><option value="7d">近 7 天</option><option value="14d">近 14 天</option></select>
-      <select aria-label="项目" value={project} onChange={(event) => setProject(event.target.value)}><option value="all">全部项目</option>{projects.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select>
-      <select aria-label="能力类型" value={modality} onChange={(event) => setModality(event.target.value)}><option value="all">全部能力</option><option value="图像">图像</option><option value="视频">视频</option><option value="音频">音频</option><option value="文本">文本</option><option value="工具">工具</option></select>
+    {coverage?.reason && <InlineNotice tone="info" icon={<Info />}>{coverage.reason}</InlineNotice>}
+    <StaleNotice status={read.status} error={read.error} observedAt={read.observedAt} onRetry={read.reload} />
+
+    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="用量筛选">
+      <span className="flex items-center gap-1.5 text-2xs font-medium text-muted"><ListFilter className="size-3.5" />筛选</span>
+      <SegmentedTabs label="时间范围" value={range} onChange={setRange} options={[{ id: "7", label: "近 7 天" }, { id: "14", label: "近 14 天" }, { id: "30", label: "近 30 天" }]} />
+      <Select aria-label="来源" value={owner} onChange={(event) => setOwner(event.target.value)} className="w-32">
+        <option value="all">全部来源</option>
+        {owners.map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
+      </Select>
+      {currencies.length > 1 && <Select aria-label="币种" value={activeCurrency} onChange={(event) => setCurrency(event.target.value)} className="w-28">
+        {currencies.map((item) => <option key={item} value={item}>{item}</option>)}
+      </Select>}
     </div>
-    <section className="v18-usage-kpis">
-      <article><span className="v18-kpi-icon sage"><Wallet size={16} /></span><small>已确认上游成本</small><strong>¥ {confirmed.toFixed(2)}</strong><em>只计入已确认费用</em></article>
-      <article><span className="v18-kpi-icon blue"><Activity size={16} /></span><small>模型调用</small><strong>{modelCalls.toLocaleString("zh-CN")}</strong><em>按来源事件去重</em></article>
-      <article><span className="v18-kpi-icon violet"><Layers size={16} /></span><small>MCP / Tool 调用</small><strong>{toolCalls.toLocaleString("zh-CN")}</strong><em>含嵌套调用，不等于模型请求</em></article>
-      <article><span className="v18-kpi-icon amber"><CircleAlert size={16} /></span><small>待核算记录</small><strong>{pending + unknown}</strong><em>{pending} 待结算 · {unknown} 未知</em></article>
-    </section>
-    <section className="v18-usage-chart-grid">
-      <article className="v18-panel v18-chart-panel v18-chart-wide"><div className="v18-panel-heading"><div><p className="v18-eyebrow">每日趋势</p><h2>成本与调用一起看</h2></div><span className="v18-chart-note">CNY · 已确认成本</span></div><TrendChart values={trend} /></article>
-      <article className="v18-panel v18-chart-panel"><div className="v18-panel-heading"><div><p className="v18-eyebrow">成本构成</p><h2>按能力类型</h2></div></div><DonutChart values={byModality} /><div className="v18-chart-legend">{byModality.map((entry, index) => <span key={entry.name}><i style={{ background: palette[index % palette.length] }} />{entry.name} ¥ {entry.value.toFixed(2)}</span>)}</div></article>
-      <article className="v18-panel v18-chart-panel v18-chart-wide"><div className="v18-panel-heading"><div><p className="v18-eyebrow">项目归因</p><h2>哪些项目消费最多</h2></div><span className="v18-chart-note">按可确认成本排序</span></div><ProjectBars values={byProject} /></article>
-      <article className="v18-panel v18-chart-panel"><div className="v18-panel-heading"><div><p className="v18-eyebrow">预算观察</p><h2>{liveMode ? "预算合同未提供" : "内部预警"}</h2></div></div>{liveMode ? <div className="v18-contract-note"><CircleAlert size={15} /><span>真实用量接口未提供预算上限，不从成本记录推导预算或阻断规则。</span></div> : <><div className="v18-budget-block"><div><span>Rain Studio · 演示预算</span><strong>¥ {confirmed.toFixed(2)} <small>/ ¥ 160.00</small></strong></div><div className="v18-budget-track"><span style={{ width: `${Math.min((confirmed / 160) * 100, 100)}%` }} /></div><p>这是内部观察和预警，不会阻止调用，也不会产生扣款。</p></div><div className="v18-budget-list"><span><i className="sage-dot" />已确认 <strong>¥ {confirmed.toFixed(2)}</strong></span><span><i className="amber-dot" />待核算 <strong>{pending + unknown} 条</strong></span></div></>}</article>
-    </section>
-    <section className="v18-panel v18-usage-table-panel"><div className="v18-panel-heading"><div><p className="v18-eyebrow">费用明细</p><h2>原始用量记录</h2></div><span className="v18-muted">{visible.length} 条 · 点击查看来源</span></div><div className="v18-usage-table"><div className="v18-usage-table-head"><span>时间 / 项目</span><span>模型或 Tool</span><span>计量</span><span>状态</span><span>成本</span><span /></div>{visible.slice().reverse().map((row) => <button key={row.id} className="v18-usage-row" onClick={() => setSelectedRow(row)}><span><strong>{row.createdAt.slice(5, 16).replace("T", " ")}</strong><small>{row.projectName} · {row.member}</small></span><span><strong>{row.model}</strong><small>{row.mcpServer || "直接调用"} {row.tool ? `· ${row.tool}` : ""}</small></span><span>{row.quantity === null ? "未知" : `${row.quantity.toLocaleString("zh-CN")} ${row.unit}`}</span><span className={`v18-cost-state ${row.costState}`}>{row.costState === "confirmed" ? "已确认" : row.costState === "estimated" ? "估算" : row.costState === "pending" ? "待核算" : "未知"}</span><span>{row.upstreamCost === null ? "未知" : `¥ ${row.upstreamCost.toFixed(2)}`}</span><ArrowRight size={15} /></button>)}</div></section>
-    {selectedRow && <div className="v18-usage-detail" role="dialog" aria-label="用量记录详情"><button className="v18-icon-button" aria-label="关闭明细" onClick={() => setSelectedRow(null)}><X size={16} /></button><p className="v18-eyebrow">来源记录</p><h2>{selectedRow.model}</h2><p>{selectedRow.projectName} · {selectedRow.member}</p><dl className="v18-detail-facts"><div><dt>Trace</dt><dd>{selectedRow.traceRef}</dd></div><div><dt>来源引用</dt><dd>{selectedRow.sourceRef}</dd></div><div><dt>计量</dt><dd>{selectedRow.quantity === null ? "未知" : `${selectedRow.quantity} ${selectedRow.unit}`}</dd></div><div><dt>成本状态</dt><dd>{selectedRow.costState === "confirmed" ? "已确认" : selectedRow.costState === "estimated" ? "估算" : selectedRow.costState === "pending" ? "待核算" : "未知"}</dd></div><div><dt>上游成本</dt><dd>{selectedRow.upstreamCost === null ? "未知" : `¥ ${selectedRow.upstreamCost.toFixed(2)}`}</dd></div><div><dt>耗时</dt><dd>{selectedRow.durationMs === null ? "未知" : `${selectedRow.durationMs} ms`}</dd></div></dl><div className="v18-contract-note"><CircleAlert size={15} /><span>{liveMode ? "明细只引用 owner 来源记录，不构成客户收费记录。" : "明细只引用演示来源，不构成客户收费记录。"}</span></div></div>}
+
+    <ReadStateView status={read.status === "empty" ? "ready" : read.status} error={read.error} onRetry={read.reload} skeleton={<Panel><SkeletonRows rows={4} /></Panel>}>
+      <section aria-label="用量概览" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <Kpi label="已确认上游成本" icon={<Wallet />} value={Object.keys(totals).length ? Object.entries(totals).map(([code, amount]) => formatMoney(amount, code)).join(" · ") : "未观察到"} hint="只计入 owner 回执中已确认的费用" muted={!Object.keys(totals).length} />
+        <Kpi label="用量回执" icon={<Receipt />} value={visible.length.toLocaleString("zh-CN")} hint="按 owner + source_ref 去重" />
+        <Kpi label="待核算" icon={<CircleAlert />} value={pending.toLocaleString("zh-CN")} hint={`其中 ${unknownCost} 条成本未知`} muted={pending === 0} />
+        <BudgetTile budget={budget} />
+      </section>
+
+      {rows.length === 0 ? <Panel><EmptyState icon={<Receipt />} title="尚无用量回执" body="用量只来自经控制中心提交的 Provider 运行回执；提交门关闭时这里保持为空。历史 owner 账本仍按来源读取。" /></Panel> : <>
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+          <Panel title={`每日已确认成本 · ${activeCurrency}`} actions={<Button size="sm" variant={tableView ? "secondary" : "ghost"} aria-pressed={tableView} onClick={() => setTableView((value) => !value)} icon={<Table2 className="size-3.5" />}>表格视图</Button>}>
+            {tableView ? <TrendTable data={trend} currency={activeCurrency} /> : <div className="h-[260px] px-2 pb-3 pt-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={trend} margin={{ top: 8, right: 12, bottom: 0, left: 0 }} barCategoryGap="28%">
+                  <CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeWidth={1} />
+                  <XAxis dataKey="label" tickLine={false} axisLine={{ stroke: "var(--chart-grid)" }} tick={{ fill: "var(--chart-axis)", fontSize: 11 }} interval="preserveStartEnd" minTickGap={16} />
+                  <YAxis tickLine={false} axisLine={false} width={44} tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickFormatter={(value: number) => value.toLocaleString("zh-CN")} allowDecimals />
+                  <Tooltip cursor={{ fill: "color-mix(in srgb, var(--chart-1) 8%, transparent)" }} content={<TrendTooltip currency={activeCurrency} />} />
+                  <Bar dataKey="cost" name="已确认成本" fill="var(--chart-1)" radius={[4, 4, 0, 0]} maxBarSize={24} isAnimationActive={false} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>}
+          </Panel>
+
+          <Panel title={`按来源 · ${activeCurrency}`}>
+            <ul className="space-y-4 p-5">
+              {byOwner.map((item) => {
+                const max = Math.max(...byOwner.map((entry) => entry.cost), 0.01);
+                return <li key={item.owner}>
+                  <div className="flex items-baseline justify-between gap-3 text-[13px]">
+                    <span className="flex items-center gap-2 font-medium"><span aria-hidden="true" className="size-2.5 rounded-[3px]" style={{ background: ownerSlots[item.owner] }} />{ownerLabel(item.owner)}</span>
+                    <span className="tabular text-ink">{formatMoney(item.cost, activeCurrency)}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-panel-sunken">
+                    <div className="h-full rounded-full" style={{ width: `${(item.cost / max) * 100}%`, background: ownerSlots[item.owner] }} />
+                  </div>
+                  <p className="mt-1.5 text-2xs text-muted tabular">{item.calls} 条回执{item.unconfirmed ? ` · ${item.unconfirmed} 条未确认成本未计入` : ""}</p>
+                </li>;
+              })}
+              {byOwner.length === 0 && <li className="text-[13px] text-muted">所选范围内没有回执。</li>}
+            </ul>
+          </Panel>
+        </div>
+
+        <Panel title="原始用量回执" actions={<span className="text-2xs text-muted tabular">{visible.length} 条</span>} bodyClassName="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-[13px]">
+              <thead>
+                <tr className="border-b border-line bg-panel-soft text-left text-2xs text-muted">
+                  <th scope="col" className="px-4 py-2 font-medium">时间</th>
+                  <th scope="col" className="px-3 py-2 font-medium">来源 · 模型</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">计量</th>
+                  <th scope="col" className="px-3 py-2 font-medium">成本状态</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">上游成本</th>
+                  <th scope="col" className="px-4 py-2 font-medium">引用</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {visible.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 100).map((row) => <tr key={row.owner + row.source_ref} className="hover:bg-panel-soft">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-ink-soft tabular" title={formatFullTime(row.created_at)}>{formatRelative(row.created_at)}</td>
+                  <td className="max-w-[260px] px-3 py-2.5"><span className="block truncate font-medium">{ownerLabel(row.owner)}</span><span className="block truncate font-mono text-2xs text-muted">{row.model_ref}</span></td>
+                  <td className="whitespace-nowrap px-3 py-2.5 text-right tabular">{row.quantity === null ? <span className="text-faint">未知</span> : `${row.quantity.toLocaleString("zh-CN")} ${row.unit}`}</td>
+                  <td className="px-3 py-2.5"><Pill tone={costStateTone[row.cost_state as keyof typeof costStateTone] || "neutral"}>{costStateLabels[row.cost_state] || row.cost_state}</Pill></td>
+                  <td className={cx("whitespace-nowrap px-3 py-2.5 text-right tabular", row.upstream_cost === null && "text-faint")}>{row.upstream_cost === null ? "未知" : formatMoney(row.upstream_cost, row.currency)}</td>
+                  <td className="max-w-[200px] px-4 py-2.5"><span className="block truncate font-mono text-2xs text-muted" title={row.source_ref}>{row.source_ref}</span></td>
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </>}
+    </ReadStateView>
+  </div>;
+}
+
+function Kpi({ label, value, hint, icon, muted = false }: { label: string; value: string; hint: string; icon: React.ReactNode; muted?: boolean }) {
+  return <div className="flex min-w-0 flex-col gap-1 rounded-card border border-line bg-panel p-4 shadow-panel">
+    <span className="flex items-center gap-1.5 text-2xs text-muted [&>svg]:size-3.5">{icon}{label}</span>
+    <span className={cx("truncate text-xl font-semibold tracking-tight", muted && "text-faint")}>{value}</span>
+    <span className="truncate text-2xs text-faint">{hint}</span>
+  </div>;
+}
+
+function BudgetTile({ budget }: { budget?: { total: number; reserved: number; remaining: number; per_owner: Record<string, number> } }) {
+  if (!budget) return <Kpi label="内部预算观察" icon={<Wallet />} value="未提供" hint="服务端未返回预算观察" muted />;
+  const ratio = Math.min(1, budget.reserved / Math.max(budget.total, 0.01));
+  return <div className="flex min-w-0 flex-col gap-1 rounded-card border border-line bg-panel p-4 shadow-panel">
+    <span className="flex items-center gap-1.5 text-2xs text-muted"><Wallet className="size-3.5" />内部预算观察</span>
+    <span className="truncate text-xl font-semibold tracking-tight">{formatMoney(budget.remaining, "CNY")}<span className="ml-1 text-xs font-normal text-muted">剩余</span></span>
+    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-primary-soft" role="meter" aria-label="预算已预留比例" aria-valuemin={0} aria-valuemax={budget.total} aria-valuenow={budget.reserved}>
+      <div className={cx("h-full rounded-full", ratio > 0.85 ? "bg-danger" : ratio > 0.6 ? "bg-warning" : "bg-primary")} style={{ width: `${ratio * 100}%` }} />
+    </div>
+    <span className="truncate text-2xs text-faint tabular">已预留 {formatMoney(budget.reserved, "CNY")} / {formatMoney(budget.total, "CNY")} · {Object.entries(budget.per_owner).map(([id, cap]) => `${ownerLabel(id)} ${cap}`).join(" · ")}</span>
+  </div>;
+}
+
+function TrendTooltip({ active, payload, currency }: { active?: boolean; payload?: { payload: { label: string; cost: number; calls: number; unconfirmed: number } }[]; currency: string }) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0].payload;
+  return <div className="rounded-[10px] border border-line bg-panel px-3 py-2 text-xs shadow-float">
+    <p className="font-semibold text-ink tabular">{formatMoney(point.cost, currency)}</p>
+    <p className="mt-0.5 flex items-center gap-1.5 text-muted"><span aria-hidden="true" className="h-0.5 w-3 rounded-full" style={{ background: "var(--chart-1)" }} />{point.label} · 已确认成本</p>
+    <p className="mt-1 text-muted tabular">{point.calls} 条回执{point.unconfirmed ? ` · ${point.unconfirmed} 条成本未确认` : ""}</p>
+  </div>;
+}
+
+function TrendTable({ data, currency }: { data: { key: string; label: string; cost: number; calls: number; unconfirmed: number }[]; currency: string }) {
+  return <div className="max-h-[276px] overflow-y-auto">
+    <table className="w-full text-[13px]">
+      <thead className="sticky top-0 bg-panel-soft"><tr className="text-left text-2xs text-muted"><th scope="col" className="px-4 py-2 font-medium">日期</th><th scope="col" className="px-3 py-2 text-right font-medium">已确认成本</th><th scope="col" className="px-3 py-2 text-right font-medium">回执</th><th scope="col" className="px-4 py-2 text-right font-medium">未确认</th></tr></thead>
+      <tbody className="divide-y divide-line">
+        {data.map((row) => <tr key={row.key}><td className="px-4 py-2 tabular">{row.key}</td><td className="px-3 py-2 text-right tabular">{formatMoney(row.cost, currency)}</td><td className="px-3 py-2 text-right tabular">{row.calls}</td><td className="px-4 py-2 text-right tabular">{row.unconfirmed}</td></tr>)}
+      </tbody>
+    </table>
   </div>;
 }

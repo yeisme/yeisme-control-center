@@ -32,6 +32,18 @@ scripts/skills.sh sync-target client/yeisme-control-center
 bun run dev
 ```
 
+前端实时开发（夹具 owner + 真实 server 代码 + Vite HMR，不访问任何真实 owner 或 Provider）：
+
+```bash
+FIXTURE_PASSWORD='至少 12 位的本地口令' bun run preview:fixture
+# 打开 http://127.0.0.1:4300/ ，用户名 fixture-admin
+# FIXTURE_SCENARIO=rich|degraded|empty 切换场景；FIXTURE_LATENCY_MS=900 观察加载态与迟到响应丢弃
+bun run test:browser-journey        # 夹具全链路浏览器旅程（独立端口 4320–4324）
+bun run test:contract-integration   # 夹具全链路 API 合同验证
+```
+
+夹具 scope 标签带 "Fixture"，只用于开发和 I1 证据，不是应用的 demo 模式。
+
 真实开发预览使用临时配置读取当前 owner 连接，退出后自动清理临时密码和配置：
 
 ```bash

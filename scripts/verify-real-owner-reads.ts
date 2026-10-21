@@ -2,14 +2,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
+import { createServer as createNetServer } from "node:net";
 import { hashPassword } from "../server/password";
 
 const root = resolve(import.meta.dirname, "..");
 const sourcePath = join(homedir(), ".config/yeisme-control-center/config.json");
 const id = "real-owner-read-" + new Date().toISOString().replace(/[:.]/g, "-");
 const evidence = resolve(root, "temp/integration-test-runs", id);
-const base = "http://127.0.0.1:4312";
 const privateDir = await mkdtemp("/tmp/yeisme-real-owner-read-");
+const port = await findFreePort(Number(process.env.YEISME_OWNER_READ_PORT || 0));
+const base = `http://127.0.0.1:${port}`;
 const password = "real-owner-read-local-only";
 const passwordRef = join(privateDir, "password");
 const configRef = join(privateDir, "config.json");
@@ -19,10 +21,24 @@ let summary: Record<string, unknown> = { status, real_owner_reads: false, provid
 let boundaryChecks: Record<string, number> = {};
 const logs: string[] = [];
 
+async function findFreePort(preferred: number): Promise<number> {
+  const probe = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(preferred, "127.0.0.1", () => resolve());
+  });
+  const address = probe.address();
+  const selected = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+  if (!selected) throw new Error("owner_read_port_unavailable");
+  return selected;
+}
+
 await mkdir(join(evidence, "artifacts"), { recursive: true, mode: 0o700 });
 await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n");
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
+  port,
   owner_reads: ["capabilities", "tasks.list", "tasks.get", "tasks.events"],
   real_owner_reads: true,
   provider_calls: false,
@@ -57,7 +73,7 @@ try {
   await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o600 });
   config.origin = base;
   config.bind = "127.0.0.1";
-  config.port = 4312;
+  config.port = port;
   config.personal = {
     ...config.personal,
     username: "owner-read-check",
@@ -70,7 +86,7 @@ try {
   const output = { value: "" };
   child = spawn("bun", ["server/index.ts"], {
     cwd: root,
-    env: { ...process.env, YEISME_CONTROL_CONFIG: configRef, YEISME_CONTROL_BIND: "127.0.0.1" },
+    env: { ...process.env, YEISME_CONTROL_CONFIG: configRef, YEISME_CONTROL_BIND: "127.0.0.1", YEISME_CONTROL_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.on("data", (chunk) => { output.value += String(chunk); });
@@ -145,7 +161,18 @@ try {
     }
     taskChecks.push({ owner, detail: detail.response.status, events: events.response.status, artifact_access: artifactAccess, has_results: Boolean(artifact) });
   }
-  const providerStates = Object.fromEntries((capabilities.body?.capabilities || []).map((item: any) => [item.owner, { state: item.state, supports_live_submit: item.supports_live_submit === true }]));
+  const providerStates = Object.fromEntries((capabilities.body?.capabilities || []).map((item: any) => [item.owner, {
+    state: item.state,
+    readiness: item.readiness || item.state,
+    submit_gate: item.submit_gate || "disabled_by_default",
+    supports_live_submit: item.supports_live_submit === true,
+    blocker: item.blocker || item.diagnostic?.blocker || null,
+    diagnostic_code: item.diagnostic?.code || null,
+    binding_count: Array.isArray(item.bindings) ? item.bindings.length : 0,
+  }]));
+  for (const [owner, projection] of Object.entries(providerStates) as Array<[string, any]>) {
+    if (projection.submit_gate !== "disabled_by_default") throw new Error(`provider_submit_gate_open:${owner}`);
+  }
   summary = {
     schema_version: "yeisme.integration_test_evidence.v1",
     status: "passed",

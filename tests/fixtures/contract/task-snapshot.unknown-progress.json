@@ -1,0 +1,43 @@
+{
+  "schema_version": "yeisme.task_observation.v1",
+  "locator": {
+    "owner": "scaena",
+    "instance_id": "scaena-main",
+    "project": "project-1",
+    "task_family": "delegation",
+    "task_ref": "delegation-0001"
+  },
+  "title": "Episode 3 storyboard pass",
+  "state": "running",
+  "native_state": "processing",
+  "stage": "render",
+  "revision": "rev-9",
+  "created_at": "2026-10-12T07:40:00Z",
+  "updated_at": "2026-10-12T07:55:00Z",
+  "started_at": "2026-10-12T07:41:00Z",
+  "observed_at": "2026-10-12T07:55:01Z",
+  "progress": { "kind": "count", "completed": 4, "total": null, "percent": null },
+  "source": "provider",
+  "actor": "user-1",
+  "parent_ref": null,
+  "results": [
+    { "ref": "artifact-0", "name": "shot-01.mp4", "mime": "video/mp4", "bytes": null, "state": "pending" }
+  ],
+  "allowed_actions": [
+    { "action": "cancel", "enabled": false, "reason": "owner_terminal_pending" },
+    { "action": "preview", "enabled": true }
+  ],
+  "coverage": "partial",
+  "provider_recovery": {
+    "state": "accepted_pending",
+    "native_state": "queued",
+    "submission_ref": "provider-job-77",
+    "binding_id": "binding-video",
+    "error_code": null,
+    "blocker": null,
+    "safe_to_resubmit": false,
+    "review_status": null,
+    "export_status": null,
+    "artifact_refs": []
+  }
+}

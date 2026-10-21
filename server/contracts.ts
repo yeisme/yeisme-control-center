@@ -18,6 +18,7 @@ export interface ScopeBinding {
       { tenant: string; project: string; actor: string; audience: string }
     >
   >;
+  collection?: Partial<Record<"auctra", { tenant: string; project: string; actor: string; audience: string }>>;
 }
 export interface PrincipalBinding {
   issuer: string;
@@ -71,6 +72,8 @@ export interface ServerConfig {
     scope_ids: string[];
     users?: PersonalUser[];
   };
+  /** Optional SQLite persistence location; defaults beside the config file. */
+  database?: { path?: string };
   /** User-level config file path; populated by the server loader, never sent to clients. */
   config_file?: string;
   connections?: TaskConnection[];
@@ -80,7 +83,27 @@ export interface ServerConfig {
   port: number;
   oidc?: { issuer: string; clientId: string; clientSecretRef?: string };
   principals: PrincipalBinding[];
-  owners: Partial<Record<Owner, { origin: string; audience: string }>>;
+  owners: Partial<
+    Record<
+      Owner,
+      {
+        origin: string;
+        audience: string;
+        /** Optional 0600 service credential for personal (non-OIDC) sessions. */
+        credential_ref?: string;
+      }
+    >
+  >;
+  collection?: Partial<Record<"auctra", {
+    origin: string;
+    audience: string;
+    credential_ref?: string;
+    enabled?: boolean;
+  }>>;
+  clients?: Partial<Record<"muweave", {
+    origin: string;
+    enabled?: boolean;
+  }>>;
   providers?: Partial<Record<ProviderOwner, ProviderConnection>>;
   allowInsecureLoopback?: boolean;
 }
@@ -105,6 +128,8 @@ export interface Session {
   personal?: boolean;
   last_seen?: number;
   credential_version?: string;
+  /** Monotonic per-session epoch; bumped when permission bindings change. */
+  epoch: number;
 }
 export interface OwnerPage {
   rows: RequestProjection[];

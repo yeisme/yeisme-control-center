@@ -25,7 +25,7 @@ const config: ServerConfig = {
     eikona: { owner: "eikona", endpoint: "https://provider.example/mcp", credential_env: "TEST_PROVIDER_TOKEN", enabled: true },
   },
 };
-const session = { id: "s", issuer: "local", subject: "u", name: "U", accessToken: "", accessAudience: [], expires: Date.now() + 10000, csrf: "c" };
+const session = { id: "s", issuer: "local", subject: "u", name: "U", accessToken: "", accessAudience: [], expires: Date.now() + 10000, csrf: "c", epoch: 1 };
 process.env.TEST_PROVIDER_TOKEN = "test-token";
 const request = (key = "canary-image-0001") => ({
   mode: "live" as const,

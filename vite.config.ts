@@ -2,8 +2,17 @@ import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
-import { cpSync } from "node:fs";
+import { cpSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+
+// Machine-specific dev-preview settings stay out of git (.local/ is ignored):
+// { "control_origin": "https://<host>:<port>", "allowed_hosts": ["<host>"] }
+const local: { control_origin?: string; allowed_hosts?: string[] } = (() => {
+  try { return JSON.parse(readFileSync(fileURLToPath(new URL("./.local/dev-preview.json", import.meta.url)), "utf8")); } catch { return {}; }
+})();
+const controlOrigin = process.env.V18_CONTROL_ORIGIN || local.control_origin || "http://127.0.0.1:4312";
+const controlOriginUrl = new URL(controlOrigin);
+
 export default defineConfig(() => ({
   root: "app",
   base: "./",
@@ -43,6 +52,7 @@ export default defineConfig(() => ({
     },
   },
   server: {
+    allowedHosts: [...(local.allowed_hosts ?? []), ...(process.env.V18_ALLOWED_HOSTS?.split(",").map((host) => host.trim()).filter(Boolean) ?? [])],
     fs: { allow: [".."] },
     proxy: {
       "/api/control-center": {
@@ -50,7 +60,14 @@ export default defineConfig(() => ({
         changeOrigin: true,
         configure(proxy) {
           proxy.on("proxyReq", (request) => {
-            request.setHeader("Origin", process.env.V18_API_ORIGIN || "http://127.0.0.1:4312");
+            request.setHeader("Host", controlOriginUrl.host);
+            request.setHeader("Origin", controlOriginUrl.origin);
+          });
+          proxy.on("proxyRes", (response) => {
+            const cookies = response.headers["set-cookie"];
+            if (cookies) {
+              response.headers["set-cookie"] = cookies.map((cookie) => cookie.replace(/;\s*Secure\b/gi, ""));
+            }
           });
         },
       },

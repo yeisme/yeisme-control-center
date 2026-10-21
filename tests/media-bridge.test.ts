@@ -10,12 +10,12 @@ const scope: ScopeBinding = {
   label: "P",
   owners: {},
 };
-const session = { id: "one" } as Session;
-function setup(mime = "image/png", status = 200) {
+const session = { id: "one", personal: true } as Session;
+function setup(mime = "image/png", status = 200, name = "结果") {
   const artifact = vi.fn(async () => ({
     url: new URL("http://127.0.0.1/api/v1/artifact-access/acc_test"),
     expires: Date.now() + 100000,
-    artifact: { ref: "ref" },
+    artifact: { ref: "ref", name, mime },
   }));
   const fetcher = vi.fn(
     async (_url: unknown, init?: RequestInit) =>
@@ -111,9 +111,23 @@ it("streams only session-bound content and repeats owner authorization", async (
     scope,
   );
   expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("content-disposition")).toContain('filename="__.png"');
+  expect(response.headers.get("content-disposition")).toContain("filename*=UTF-8''%E7%BB%93%E6%9E%9C.png");
   expect((await response.arrayBuffer()).byteLength).toBe(3);
   expect(detail).toHaveBeenCalledTimes(1);
   expect(fetcher.mock.calls[0][1]?.redirect).toBe("error");
+});
+
+it("preserves the owner name and repairs the extension in grants and downloads", async () => {
+  const { bridge, fetcher } = setup("video/mp4", 200, "雨巷推镜头.mov");
+  const grant = await bridge.issue(session, scope, "task", "ref", "download");
+  expect(grant.filename).toBe("雨巷推镜头.mp4");
+  const key = new URL(grant.url, "http://localhost").pathname.split("/").pop()!;
+  const response = await bridge.read(key, new Request("http://localhost"), session, scope);
+  expect(response.headers.get("content-disposition")).toContain('filename="_____.mp4"');
+  expect(response.headers.get("content-disposition")).toContain("filename*=UTF-8''%E9%9B%A8%E5%B7%B7%E6%8E%A8%E9%95%9C%E5%A4%B4.mp4");
+  await response.arrayBuffer();
+  expect(fetcher).toHaveBeenCalled();
 });
 it("requires a new explicit access request after the owner grant expires", async () => {
   const { bridge, artifact, fetcher } = setup();
@@ -123,14 +137,23 @@ it("requires a new explicit access request after the owner grant expires", async
   fetcher.mockImplementation(async () => new Response(null, { status: 410 }));
   await expect(
     bridge.read(key, new Request("http://localhost"), session, scope),
-  ).rejects.toThrow("media_unavailable");
+  ).rejects.toThrow("media_grant_expired");
   expect(artifact).toHaveBeenCalledTimes(1);
   expect(fetcher).toHaveBeenCalledTimes(issueCalls + 1);
   await expect(
     bridge.read(key, new Request("http://localhost"), session, scope),
-  ).rejects.toThrow("media_unavailable");
+  ).rejects.toThrow("media_grant_expired");
   expect(artifact).toHaveBeenCalledTimes(1);
   expect(fetcher).toHaveBeenCalledTimes(issueCalls + 2);
+});
+
+it("keeps owner transfer failures distinguishable", async () => {
+  for (const [status, code] of [[401, "media_source_unauthorized"], [404, "media_source_not_found"], [410, "media_grant_expired"], [503, "media_unavailable"]] as const) {
+    const setupResult = setup("audio/wav", status);
+    const grant = await setupResult.bridge.issue(session, scope, "t", "r", "preview");
+    const key = new URL(grant.url, "http://localhost").pathname.split("/").pop()!;
+    await expect(setupResult.bridge.read(key, new Request("http://localhost"), session, scope)).rejects.toThrow(code);
+  }
 });
 it("accepts a single Range and HEAD, rejects multipart and unsafe MIME", async () => {
   const { bridge } = setup("image/png", 206);
@@ -173,4 +196,20 @@ it("accepts a single Range and HEAD, rejects multipart and unsafe MIME", async (
       scope,
     ),
   ).rejects.toThrow("media_limits_exceeded");
+});
+
+it("streams chunked audio when the owner omits Content-Length", async () => {
+  const { bridge, fetcher } = setup("audio/wav");
+  fetcher.mockImplementation(async (_url, init) => new Response(
+    init?.method === "HEAD" ? null : new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); controller.close(); },
+    }),
+    { headers: { "Content-Type": "audio/wav" } },
+  ));
+  const grant = await bridge.issue(session, scope, "t", "r", "preview");
+  const key = new URL(grant.url, "http://localhost").pathname.split("/").pop()!;
+  const response = await bridge.read(key, new Request("http://localhost"), session, scope);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-length")).toBeNull();
+  expect((await response.arrayBuffer()).byteLength).toBe(3);
 });

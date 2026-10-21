@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import {
   filterTasks,
+  promptCaptureForTask,
   taskNeedsAttention,
   type TaskFilters,
   type TaskSnapshot,
@@ -14,6 +15,7 @@ const filters: TaskFilters = {
   project: "",
   modality: "",
   results: "",
+  prompt: "",
   from: "",
   through: "",
 };
@@ -84,4 +86,10 @@ it("filters authorized rows without merging same-name instances or inventing dat
   expect(filterTasks(rows, { ...filters, owner: "sonora", results: "no" })).toEqual([rows[2]]);
   expect(filterTasks(rows, { ...filters, project: "p", owner: "eikona" })).toEqual([rows[0], rows[1]]);
   expect(rows.filter(taskNeedsAttention)).toEqual([rows[0], rows[2]]);
+});
+
+it("filters by the owner-reported prompt capture state", () => {
+  const captured = { ...rows[0], process: { schema_version: "yeisme.process_observation.v1" as const, state: "complete" as const, freshness: "fresh" as const, coverage: "complete" as const, observed_at: "2026-10-01T00:00:00Z", checkpoints: [], gap: false, prompt_capture: { state: "captured" as const, source: "task" as const, readable: true, observed_at: "2026-10-01T00:00:00Z" } } };
+  expect(promptCaptureForTask(captured)?.state).toBe("captured");
+  expect(filterTasks([captured, rows[1]], { ...filters, prompt: "captured" })).toEqual([captured]);
 });

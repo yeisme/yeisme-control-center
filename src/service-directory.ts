@@ -7,7 +7,7 @@ export interface ServiceDefinition {
   kind: ServiceKind;
   owner_path: string;
   purpose: string;
-  integration: "task_observation" | "request_projection" | "not_integrated";
+  integration: "task_observation" | "request_projection" | "collection_projection" | "not_integrated";
   gap: string;
 }
 export interface ServiceConnectionProjection {
@@ -25,7 +25,15 @@ export interface ServiceConnectionProjection {
 export interface ServiceDirectoryEntry extends ServiceDefinition {
   connections: ServiceConnectionProjection[];
   configuration: "configured" | "not_configured" | "needs_contract";
+  /** Fixed literal kept for compatibility; freshness now uses coverage. */
   observation: "not_checked";
+  /** Freshness: latest observation time propagated from connections/owners. */
+  observed_at?: string;
+  /** Aggregated read coverage for this service entry. */
+  coverage?: {
+    state: "complete" | "partial" | "needs_contract" | "not_recorded" | "unavailable" | "forbidden" | "stale";
+    observed_at?: string;
+  };
 }
 export interface ServiceDirectory {
   schema_version: "yeisme.service_directory.v1";
@@ -56,7 +64,7 @@ export const serviceDefinitions: readonly ServiceDefinition[] = [
   { id: "gateway", name: "个人 MCP Gateway", kind: "service", owner_path: "mcp/gateway", purpose: "个人工具目录、连接与调用事实", integration: "not_integrated", gap: "尚无控制中心适配；不复用 Agent 管理凭据。" },
   { id: "aigora", name: "Aigora", kind: "service", owner_path: "apigateway/aigora", purpose: "企业网关请求、调查与用量引用", integration: "request_projection", gap: "需独立 OIDC 用户委托；不与个人网关合并权限。" },
   { id: "drivebridge", name: "DriveBridge", kind: "service", owner_path: "cli/drivebridge", purpose: "文件空间、传输与交付引用", integration: "not_integrated", gap: "控制中心传输、容量和授权投影尚未接入。" },
-  { id: "auctra", name: "Auctra", kind: "service", owner_path: "cli/auctra", purpose: "作品修订、审阅与制作交接", integration: "not_integrated", gap: "控制中心管理读取合同待核验；不复制正文。" },
+  { id: "auctra", name: "Auctra", kind: "service", owner_path: "cli/auctra", purpose: "文本创作记录、候选、审阅、版本与运行证据收集", integration: "collection_projection", gap: "需要服务端 collection binding；只收集 refs、状态、摘要和时间，不保存正文。" },
   { id: "anatomia", name: "Anatomia", kind: "service", owner_path: "agent/anatomia", purpose: "拉片进度、证据覆盖与快照", integration: "not_integrated", gap: "任务和诊断投影尚未接入。" },
   { id: "pinax", name: "Pinax", kind: "local_tool", owner_path: "cli/pinax", purpose: "笔记库、索引状态与知识引用", integration: "not_integrated", gap: "远程管理 backing 未确认；不读取私有 vault。" },
   { id: "capsa", name: "Capsa", kind: "service", owner_path: "backend-server/capsa", purpose: "设备、同步积压与冲突摘要", integration: "not_integrated", gap: "只读摘要待适配；不解密用户内容。" },
@@ -65,7 +73,6 @@ export const serviceDefinitions: readonly ServiceDefinition[] = [
   { id: "quaestor", name: "Quaestor", kind: "local_tool", owner_path: "cli/quaestor", purpose: "研究项目、论点与实验记录", integration: "not_integrated", gap: "远程管理合同未确认。" },
   { id: "digital-human", name: "Digital Human / OpenTalking", kind: "service", owner_path: "agent/digital-human", purpose: "数字人会话、声音与运行时", integration: "not_integrated", gap: "现行 OpenTalking 与旧目录描述不同；须按当前公开合同接入。" },
   { id: "opendesign", name: "Open Design", kind: "service", owner_path: "OpenDesign MCP", purpose: "设计项目、运行与产物交接", integration: "not_integrated", gap: "设计读取已用于本次交接，浏览器用户接入未配置。" },
-  { id: "scaena-studio", name: "片场", kind: "workspace", owner_path: "client/scaena-studio", purpose: "作品创作与当前任务工作区", integration: "not_integrated", gap: "需固定 Studio origin 与明确作品引用；不承诺跨应用 SSO。" },
   { id: "solocut", name: "SoloCut", kind: "design", owner_path: "OpenDesign / solocut-agent-editor", purpose: "剪辑工作台设计", integration: "not_integrated", gap: "当前仅确认设计原型，不是已部署业务应用。" },
   { id: "layerlab", name: "LayerLab", kind: "design", owner_path: "OpenDesign / layerlab-agent-design-studio", purpose: "图层工作台设计", integration: "not_integrated", gap: "当前仅确认设计原型，不是已部署业务应用。" },
   { id: "firecrawl", name: "Firecrawl", kind: "service", owner_path: "backend-server/firecrawl", purpose: "采集任务与来源引用", integration: "not_integrated", gap: "任务、限流与审计投影尚未接入。" },

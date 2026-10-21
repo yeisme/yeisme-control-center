@@ -1,3 +1,5 @@
+import type { ProcessObservation, PromptCaptureObservation } from "./observation-contract";
+
 export const owners = ["aigora", "scaena", "eikona", "sonora"] as const;
 export type Owner = (typeof owners)[number];
 export type CoverageState =
@@ -71,6 +73,10 @@ export interface RequestProjection {
   submitted: Record<string, string | number | boolean | null>;
   effective: Record<string, string | number | boolean | null>;
   coverage: Coverage;
+  process?: ProcessObservation;
+  prompt_capture?: PromptCaptureObservation;
+  task_ref?: string;
+  trace_ref?: string;
   finance?: {
     currency: string;
     amount: number | null;
@@ -97,6 +103,16 @@ export interface ContentRead {
   truncated?: boolean;
   receipt_ref?: string;
   bytes?: number;
+}
+/** Attachment body read: text inline, or bytes behind a short-lived media handle. */
+export interface AttachmentRead {
+  state: CoverageState;
+  text?: string;
+  truncated?: boolean;
+  receipt_ref?: string;
+  mime?: string;
+  bytes?: number;
+  sha256?: string;
 }
 export interface RequestMetric {
   value: number | null;

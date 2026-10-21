@@ -56,6 +56,10 @@ try {
     await cp(join(root, 'dist', name), join(run, 'artifacts/control-center/dist', name));
   }
   await command('bun', ['build', 'server/index.ts', '--target=bun', '--outfile=' + join(run, 'artifacts/control-center/server.mjs')], root);
+  await access(join(root, 'server/db/migrations'));
+  await cp(join(root, 'server/db/migrations'), join(run, 'artifacts/control-center/migrations'), { recursive: true });
+  await access(join(root, 'node_modules/drizzle-orm'));
+  await cp(join(root, 'node_modules/drizzle-orm'), join(run, 'artifacts/control-center/node_modules/drizzle-orm'), { recursive: true });
   for (const binary of binaries) {
     const target = join(run, 'artifacts', binary.name);
     await command('go', ['build', '-p', '2', '-trimpath', '-o', target, binary.entry], join(workspace, binary.owner));

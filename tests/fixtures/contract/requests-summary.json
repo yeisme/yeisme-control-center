@@ -1,0 +1,31 @@
+{
+  "sources": [
+    {
+      "owner": "eikona",
+      "summary": {
+        "gateway": { "value": null, "state": "unknown" },
+        "generation": { "value": 3, "state": "complete" },
+        "operation": { "value": 1, "state": "complete" },
+        "attempts": { "value": 4, "state": "complete" },
+        "outputs": { "value": 3, "state": "partial" },
+        "succeeded": { "value": 3, "state": "complete" },
+        "failed": { "value": 0, "state": "complete" },
+        "uploaded_files": { "value": null, "state": "unknown" },
+        "uploaded_bytes": { "value": null, "state": "unknown" },
+        "referenced_assets": { "value": 2, "state": "partial" },
+        "coverage": [{ "owner": "eikona", "state": "complete", "observed_at": "2026-10-12T08:00:20Z" }],
+        "from": "2026-10-11T08:00:00Z",
+        "to": "2026-10-12T08:00:00Z"
+      }
+    },
+    {
+      "owner": "scaena",
+      "coverage": { "owner": "scaena", "state": "forbidden", "observed_at": "2026-10-12T08:00:21Z", "reason": "owner_forbidden" }
+    }
+  ],
+  "from": "2026-10-11T08:00:00Z",
+  "to": "2026-10-12T08:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "complete": false,
+  "epoch": 1
+}

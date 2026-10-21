@@ -91,6 +91,36 @@ describe("task observation transport", () => {
       progressLabel({ kind: "count", total: 0, completed: 0, percent: null }),
     ).toBe("未提供百分比");
   });
+  it("keeps only safe thumbnail metadata from an owner result", () => {
+    const projected = safeTask({
+      ...row,
+      results: [{ ref: "source-image", name: "image.png", mime: "image/png", bytes: 20, thumbnail: { state: "ready", ref: "thumb-1", observed_at: "2026-10-01T00:00:00Z", url: "https://secret.example/thumb.png" } }],
+    }, c);
+    expect(projected.results[0].thumbnail).toMatchObject({ state: "ready", ref: "thumb-1" });
+    expect(JSON.stringify(projected)).not.toContain("secret.example");
+  });
+  it("preserves Scaena provider recovery without exposing owner payloads", () => {
+    const scaena: TaskConnection = { ...c, id: "s", owner: "scaena", project: "p" };
+    const projected = safeTask({
+      ...row,
+      locator: { ...row.locator, owner: "scaena" },
+      provider_recovery: {
+        state: "rejected_no_generation",
+        submission_ref: "video-provider-task:ref",
+        binding_id: "wan3-dashscope-cn",
+        error_code: "InvalidApiKey",
+        blocker: "provider credential rejected",
+        safe_to_resubmit: false,
+        review_status: "pending_review",
+        export_status: "blocked",
+        artifact_refs: ["artifact:one"],
+        native_state: "rejected",
+        private_payload: "secret sentinel",
+      },
+    }, scaena);
+    expect(projected.provider_recovery).toMatchObject({ state: "rejected_no_generation", submission_ref: "video-provider-task:ref", binding_id: "wan3-dashscope-cn", safe_to_resubmit: false });
+    expect(JSON.stringify(projected)).not.toContain("secret sentinel");
+  });
   it("disables content actions locally while preserving cancel gating", () => {
     const projected = safeTask(
       {
@@ -112,6 +142,21 @@ describe("task observation transport", () => {
       { action: "preview", enabled: false, reason: "owner-denied" },
       { action: "download", enabled: true, reason: "" },
       { action: "cancel", enabled: false, reason: "" },
+    ]);
+  });
+  it("treats owner_result_access_requested as a requestable result action", () => {
+    const projected = safeTask({
+      ...row,
+      locator: { ...row.locator, owner: "sonora" },
+      results: [{ ref: "sonora://audio/result", name: "voice.wav", mime: "audio/wav" }],
+      allowed_actions: [
+        { action: "preview", enabled: false, reason: "owner_result_access_requested" },
+        { action: "download", enabled: false, reason: "owner_result_access_requested" },
+      ],
+    }, { ...c, owner: "sonora", allow_content: true });
+    expect(projected.allowed_actions).toEqual([
+      { action: "preview", enabled: true, reason: "owner_result_access_requested" },
+      { action: "download", enabled: true, reason: "owner_result_access_requested" },
     ]);
   });
   it("hides owner result references and rejects disabled media actions", async () => {
@@ -160,7 +205,25 @@ describe("task observation transport", () => {
       "control_center.tasks.list",
       "control_center.tasks.get",
     ]);
-    await expect(t.call(c, "generate", {})).rejects.toThrow();
+    await expect(t.call(c, "generate", {})).rejects.toThrow("owner_action_contract_missing");
+  });
+
+  it("maps owner 405 responses to a missing read contract", async () => {
+    const t = new TaskConnections(cfg, (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
+      return new Response(null, { status: 405 });
+    }) as typeof fetch);
+    await expect(t.call(c, "control_center.tasks.list", {})).rejects.toThrow("owner_action_contract_missing");
+  });
+
+  it("maps structured operation_not_allowed errors to a missing read contract", async () => {
+    const t = new TaskConnections(cfg, (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
+      return Response.json({ id: body.id, result: { structuredContent: { error: { code: "operation_not_allowed" } } } });
+    }) as typeof fetch);
+    await expect(t.call(c, "control_center.tasks.list", {})).rejects.toThrow("needs_contract");
   });
   it("reports denied or absent contracts rather than success with zero jobs", async () => {
     const t = new TaskConnections(
@@ -311,7 +374,7 @@ describe("task observation transport", () => {
         task_family: "voice-render-job",
       },
       results: [{ ref: artifactRef }],
-      allowed_actions: [{ action: "preview", enabled: true }, { action: "download", enabled: true }],
+      allowed_actions: [{ action: "preview", enabled: false, reason: "owner_result_access_requested" }, { action: "download", enabled: false, reason: "owner_result_access_requested" }],
     };
     const goodURL =
       "http://127.0.0.1:1234/api/v1/artifact-access/" +
@@ -607,8 +670,8 @@ describe("task observation transport", () => {
   it("validates paged Scaena and Sonora task events", async () => {
     for (const owner of ["scaena", "sonora"] as const) {
       let page = 0; const connection = { ...c, owner }; const task = { ...row, locator: { ...row.locator, owner, task_family: owner === "sonora" ? "workflow-run" : "run" } };
-      const t = new TaskConnections({ ...cfg, connections: [connection] }, (async (_url, init) => { const b = JSON.parse(String(init?.body)); if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } }); const args = b.params.arguments.args; if (b.params.arguments.action.endsWith(".events")) { if (owner === "scaena") expect(args).toEqual({ path: { project_id: "p", task_ref: "run-1" }, query: { task_family: "run", ...(args.query.cursor ? { cursor: args.query.cursor } : {}), limit: "100" } }); return Response.json({ id: b.id, result: { structuredContent: { data: page++ ? { events: [{ id: "two", occurred_at: "2026-10-01T00:00:01Z", stage: "running", state: "running" }], gap: false } : { events: [{ id: "one", occurred_at: "2026-10-01T00:00:00Z", stage: "queued", state: "queued" }], next_cursor: "next", gap: false } } } }); } return Response.json({ id: b.id, result: { structuredContent: owner === "sonora" ? { result: { data: { projection: { rows: [task] } } } } : { data: { rows: [task] } } } }); }) as typeof fetch);
-      const key = (await t.list(scope, "history")).rows[0].task_key!; const first = await t.events(key, scope); const second = await t.events(key, scope, first.next_cursor); expect([first.events[0].stage, second.events[0].stage]).toEqual(["queued", "running"]);
+      const t = new TaskConnections({ ...cfg, connections: [connection] }, (async (_url, init) => { const b = JSON.parse(String(init?.body)); if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } }); const args = b.params.arguments.args; if (b.params.arguments.action.endsWith(".events")) { if (owner === "scaena") expect(args).toEqual({ path: { project_id: "p", task_ref: "run-1" }, query: { task_family: "run", ...(args.query.cursor ? { cursor: args.query.cursor } : {}), limit: "100" } }); return Response.json({ id: b.id, result: { structuredContent: { data: page++ ? { events: [{ id: "two", occurred_at: "2026-10-01T00:00:01Z", stage: "running", state: "running" }], gap: false } : { events: [{ id: "one", occurred_at: "2026-10-01T00:00:00Z", stage: "queued", state: "queued" }], next_cursor: "next", gap: false, coverage: owner === "scaena" ? "partial" : undefined, reason: owner === "scaena" ? "source checkpoint gap" : undefined, observation: owner === "scaena" ? { state: "partial", coverage: "partial", freshness: "fresh", observed_at: "2026-10-01T00:00:00Z", checkpoints: [], gap: true } : undefined } } } }); } return Response.json({ id: b.id, result: { structuredContent: owner === "sonora" ? { result: { data: { projection: { rows: [task] } } } } : { data: { rows: [task] } } } }); }) as typeof fetch);
+      const key = (await t.list(scope, "history")).rows[0].task_key!; const first = await t.events(key, scope); const second = await t.events(key, scope, first.next_cursor); expect([first.events[0].stage, second.events[0].stage]).toEqual(["queued", "running"]); if (owner === "scaena") expect(first).toMatchObject({ coverage: "partial", reason: "source checkpoint gap", observation: { coverage: "partial" } });
     }
   });
 

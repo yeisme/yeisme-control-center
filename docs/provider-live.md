@@ -28,3 +28,12 @@ bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --vid
 - Sonora：`voice.audition` 在 Provider 提交前因 `credential_missing` 阻塞，没有 run ref，也没有费用。
 
 上述结果是 owner 实时回执，不等同于三模态全部成功；修复 Scaena Provider 凭据和 Sonora 对应 Provider 凭据后，使用原有 scope 与新的明确幂等键继续。未知结果仍只核对原始引用。
+
+## 只读 Provider 目录与恢复
+
+控制中心默认只做以下只读观察：
+
+- Scaena：读取 `scaena://video-tasks/guide`、binding 能力、`getVideoProviderTask` 和 `reconcileVideoProviderTask`。
+- Sonora：读取 provider、model、voice 目录、`credential.status` 和 `doctor.run`。
+
+页面加载不执行 `voice.audition` 或 `createVideoProviderTask`，也不自动刷新 Sonora 远程 catalog。`credential_missing`、`InvalidApiKey`、binding disabled 和 owner unavailable 会分别保留为配置、Provider、能力或服务阻塞状态。

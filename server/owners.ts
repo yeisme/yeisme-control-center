@@ -1,12 +1,14 @@
-import { AuthError, boundedJSON } from "./auth";
+import { AuthError, boundedJSON, secret } from "./auth";
 import {
   owners,
   type ContentRead,
+  type AttachmentRead,
   type CoverageState,
   type RequestQuery,
   type RequestProjection,
   type RequestSummary,
 } from "../src/request-visibility";
+import { normalizeCheckpoint, normalizeProcessObservation, normalizePromptObservation, type ProcessCheckpoint, type ProcessObservation } from "../src/observation-contract";
 import type {
   ServerConfig,
   Session,
@@ -29,6 +31,13 @@ const coverageState = (v: any): CoverageState =>
   ].includes(v)
     ? v
     : "unknown";
+const originOf = (value: string): string | null => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+};
 const normalizedState = (v: unknown) =>
   typeof v !== "string"
     ? "unknown"
@@ -145,6 +154,10 @@ export function safeProjection(
       observed_at: text(value.coverage?.observed_at, 40),
       reason: text(value.coverage?.reason, 300),
     },
+    ...(normalizeProcessObservation(value.process) ? { process: normalizeProcessObservation(value.process) } : {}),
+    ...(normalizePromptObservation(value.prompt_capture) ? { prompt_capture: normalizePromptObservation(value.prompt_capture) } : {}),
+    ...(text(value.task_ref, 512) ? { task_ref: text(value.task_ref, 512) } : {}),
+    ...(text(value.trace_ref, 512) ? { trace_ref: text(value.trace_ref, 512) } : {}),
   };
 }
 export function aigoraProjection(
@@ -226,19 +239,21 @@ export class OwnerReaders {
     private config: ServerConfig,
     private fetcher: typeof fetch = fetch,
   ) {}
-  private binding(owner: Owner, s: Session, scope: ScopeBinding) {
+  private binding(owner: Owner, _s: Session, scope: ScopeBinding) {
     const target = this.config.owners[owner],
       b = scope.owners[owner];
     if (!target) throw new AuthError("source_not_configured", 503);
-    if (
-      !b ||
-      !b.actor ||
-      b.audience !== target.audience ||
-      !s.accessAudience.includes(target.audience) ||
-      !s.accessToken
-    )
+    if (!b || !b.actor || b.audience !== target.audience)
       throw new AuthError("delegation_unavailable", 403);
     return { target, b };
+  }
+  /** Session (OIDC) delegation wins; a per-owner service credential backs personal sessions. */
+  private bearer(owner: Owner, s: Session, scope: ScopeBinding): string {
+    const { target } = this.binding(owner, s, scope);
+    if (s.accessToken && s.accessAudience.includes(target.audience))
+      return s.accessToken;
+    if (target.credential_ref) return secret(target.credential_ref);
+    throw new AuthError("delegation_unavailable", 403);
   }
   private async request(
     owner: Owner,
@@ -246,8 +261,10 @@ export class OwnerReaders {
     scope: ScopeBinding,
     path: string,
     init: RequestInit = {},
+    responseLimit = 2 * 1048576,
   ) {
     const { target, b } = this.binding(owner, s, scope),
+      token = this.bearer(owner, s, scope),
       url = new URL(path, target.origin);
     if (owner === "aigora") {
       const check = new URL("/operator/v1/control-center/scope", target.origin);
@@ -258,7 +275,7 @@ export class OwnerReaders {
       }).toString();
       const gate = await boundedJSON(
         await this.fetcher(check, {
-          headers: { Authorization: "Bearer " + s.accessToken },
+          headers: { Authorization: "Bearer " + token },
           redirect: "error",
           signal: AbortSignal.timeout(5000),
         }),
@@ -270,12 +287,12 @@ export class OwnerReaders {
       )
         throw new AuthError("scope_mismatch", 403);
     }
-    if (url.origin !== new URL(target.origin).origin)
+    if (url.origin !== originOf(target.origin))
       throw new AuthError("upstream_not_allowed", 403);
     const response = await this.fetcher(url, {
       ...init,
       headers: {
-        Authorization: "Bearer " + s.accessToken,
+        Authorization: "Bearer " + token,
         "Content-Type": "application/json",
         ...(init.headers || {}),
       },
@@ -291,7 +308,7 @@ export class OwnerReaders {
             : "owner_unavailable",
         response.status === 403 || response.status === 401 ? 403 : 503,
       );
-    return boundedJSON(response, 2 * 1048576);
+    return boundedJSON(response, responseLimit);
   }
   private path(owner: Owner, scope: ScopeBinding) {
     return owner === "aigora"
@@ -384,6 +401,33 @@ export class OwnerReaders {
       ? aigoraProjection(value.data, b)
       : safeProjection(value, owner, b);
   }
+  async observations(owner: Owner, id: string, after: string | undefined, s: Session, scope: ScopeBinding): Promise<{ observation?: ProcessObservation; events: ProcessCheckpoint[]; next_cursor?: string; resume_cursor?: string; gap: boolean; freshness: "fresh" | "stale" | "unknown"; observed_at: string }> {
+    const { b } = this.binding(owner, s, scope);
+    const raw = await this.request(
+      owner,
+      s,
+      scope,
+      (owner === "aigora" ? "/operator/v1/request-traces/" + encodeURIComponent(id) : this.path(owner, scope) + "/" + encodeURIComponent(id)) + "/observations?" + new URLSearchParams({
+        project_id: b.project,
+        tenant_id: b.tenant,
+        ...(after ? { after } : {}),
+      }),
+    );
+    const value = ["eikona", "scaena"].includes(owner) ? raw.data : raw;
+    if (!value || typeof value !== "object" || !Array.isArray(value.events)) throw new AuthError("needs_contract", 422);
+    const events = value.events.slice(0, 100).flatMap((item: unknown) => {
+      const checkpoint = normalizeCheckpoint(item); return checkpoint ? [checkpoint] : [];
+    });
+    return {
+      ...(normalizeProcessObservation(value.observation || value.process) ? { observation: normalizeProcessObservation(value.observation || value.process) } : {}),
+      events,
+      next_cursor: text(value.next_cursor, 2048) || undefined,
+      resume_cursor: text(value.resume_cursor || value.next_after_cursor, 2048) || undefined,
+      gap: value.gap === true,
+      freshness: value.freshness === "fresh" || value.freshness === "stale" ? value.freshness : "unknown",
+      observed_at: text(value.observed_at, 40) || new Date().toISOString(),
+    };
+  }
   async summary(
     owner: Owner,
     s: Session,
@@ -427,6 +471,9 @@ export class OwnerReaders {
           },
         ]),
       );
+      // SAFETY: metric keys are a fixed allowlist projected onto the frozen
+      // RequestSummary wire shape; the runtime normalization above already
+      // constrained every value to the metric contract.
       return {
         ...metrics,
         from: q.from,
@@ -540,6 +587,75 @@ export class OwnerReaders {
       truncated: !!value.truncated || value.text?.length > 65536,
       receipt_ref: text(value.receipt_ref) || undefined,
     };
+  }
+  /**
+   * Attachment body read (Eikona wire contract, adopted by Scaena/Sonora):
+   * text inline or base64 bytes; state-only rows stay truthful.
+   */
+  async attachmentContent(
+    owner: Owner,
+    id: string,
+    attachmentRef: string,
+    direction: "input" | "output",
+    purpose: string,
+    s: Session,
+    scope: ScopeBinding,
+  ): Promise<AttachmentRead & { data?: Uint8Array }> {
+    if (owner === "aigora")
+      throw new AuthError("attachment_not_supported", 422);
+    const b = scope.owners[owner];
+    const raw = await this.request(
+      owner,
+      s,
+      scope,
+      this.path(owner, scope) +
+        "/" +
+        encodeURIComponent(id) +
+        "/attachments/" +
+        encodeURIComponent(attachmentRef) +
+        "/content:read",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          direction,
+          purpose,
+          max_bytes: 8 * 1024 * 1024,
+          project_id: b?.project,
+          tenant_id: b?.tenant,
+        }),
+      },
+      12 * 1024 * 1024,
+    );
+    const value = ["eikona", "scaena"].includes(owner) ? raw.data : raw;
+    if (!value || typeof value !== "object")
+      throw new AuthError("content_contract_invalid", 503);
+    if (
+      value.schema_version !== undefined &&
+      value.schema_version !== "yeisme.request_attachment_content.v1"
+    )
+      throw new AuthError("content_contract_invalid", 503);
+    const result: AttachmentRead & { data?: Uint8Array } = {
+      state: coverageState(value.state),
+      truncated: value.truncated === true,
+      receipt_ref: text(value.receipt_ref) || undefined,
+      mime: text(value.mime, 100) || undefined,
+      sha256: /^[a-f0-9]{64}$/.test(value.sha256) ? value.sha256 : undefined,
+    };
+    if (typeof value.text === "string" && value.text) {
+      result.text = value.text.slice(0, 65536);
+      result.truncated = result.truncated || value.text.length > 65536;
+      return result;
+    }
+    if (typeof value.data === "string" && value.data) {
+      // SAFETY: base64 payload is bounded by the 12MB JSON cap; the decoded
+      // size is re-checked against the 8MB attachment limit before use.
+      const bytes = new Uint8Array(Buffer.from(value.data, "base64"));
+      if (!bytes.length || bytes.length > 8 * 1024 * 1024)
+        throw new AuthError("attachment_limit_exceeded", 422);
+      result.data = bytes;
+      result.bytes = bytes.length;
+    }
+    return result;
   }
   async organization(owner: Owner, s: Session, scope: ScopeBinding) {
     const { b } = this.binding(owner, s, scope);

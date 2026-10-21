@@ -111,7 +111,7 @@ describe("personal login", () => {
         username, password: "test-only-password-123",
       }));
       expect(denied.status).toBe(401);
-      expect(await denied.json()).toEqual({ error: "invalid_credentials" });
+      expect(await denied.json()).toEqual({ error: "invalid_credentials", class: "login_required" });
     }
     expect(auth.sessions.size).toBe(0);
     expect((await app(request("/auth/personal", "POST", {
@@ -192,7 +192,7 @@ describe("personal login", () => {
     );
     const cookie = r.headers.get("set-cookie")!;
     const s = [...auth.sessions.values()][0];
-    s.last_seen = Date.now() - 31 * 60_000;
+    auth.sessions.set(s.id, { ...s, last_seen: Date.now() - 31 * 60_000 });
     expect(
       (await app(request("/session", "GET", undefined, cookie))).status,
     ).toBe(401);

@@ -492,7 +492,7 @@ try {
   ).toBeVisible();
   await page.getByRole("button", { name: "隔离任务", exact: true }).click();
   phase = "running";
-  await expect(page.getByRole("dialog")).toContainText("执行中", {
+  await expect(page.locator('[data-task-inspector]')).toContainText("执行中", {
     timeout: 5000,
   });
   await page.keyboard.press("Escape");
@@ -505,7 +505,7 @@ try {
     .toBeGreaterThan(0);
   await page.getByRole("tab", { name: "任务历史与结果", exact: true }).click();
   await page.getByRole("button", { name: "隔离任务", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("已完成", {
+  await expect(page.locator('[data-task-inspector]')).toContainText("已完成", {
     timeout: 5000,
   });
   await expect
@@ -522,9 +522,9 @@ try {
   )
     throw Error("notification_sensitive_content");
   await page.getByRole("tab", { name: /^结果（/ }).click();
-  await expect(page.getByRole("dialog")).toContainText("Test result");
+  await expect(page.locator('[data-task-inspector]')).toContainText("Test result");
   await page.getByRole("tab", { name: "执行与证据", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("已受理");
+  await expect(page.locator('[data-task-inspector]')).toContainText("已受理");
   await expect(page.getByText("事件历史存在缺口或尚未记录", { exact: false })).toHaveCount(0);
 
   await page.getByRole("tab", { name: /^结果（/ }).click();
@@ -583,18 +583,18 @@ try {
     status: "passed",
   });
   await page.goto(base + "/#/tasks?connection=e-content-off&project=p&family=run&ref=browser-content-off");
-  await expect(page.getByRole("dialog")).toContainText("本地内容关闭任务");
+  await expect(page.locator('[data-task-inspector]')).toContainText("本地内容关闭任务");
   const disabledAccessCount = accessRequests.length;
   await page.getByRole("tab", { name: /^结果（/ }).click();
-  await expect(page.getByRole("dialog")).toContainText("本地未开启内容读取");
+  await expect(page.locator('[data-task-inspector]')).toContainText("本地未开启内容读取");
   await expect(page.getByRole("button", { name: "预览", exact: true }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "预览", exact: true }).nth(1)).toBeDisabled();
   await expect(page.getByRole("button", { name: "下载结果", exact: true }).first()).toBeDisabled();
   await expect(page.getByRole("button", { name: "下载结果", exact: true }).nth(1)).toBeDisabled();
   await page.keyboard.press("Escape");
   await page.goto(base + "/#/tasks?connection=e-owner-denied&project=p&family=run&ref=browser-owner-denied");
-  await expect(page.getByRole("dialog")).toContainText("来源内容拒绝任务");
-  await expect(page.getByRole("dialog")).toContainText("已完成");
+  await expect(page.locator('[data-task-inspector]')).toContainText("来源内容拒绝任务");
+  await expect(page.locator('[data-task-inspector]')).toContainText("已完成");
   await page.getByRole("tab", { name: /^结果（/ }).click();
   await expect(page.getByRole("button", { name: "预览", exact: true }).first()).toBeEnabled();
   await page.getByRole("button", { name: "预览", exact: true }).first().click();
@@ -678,7 +678,7 @@ try {
   );
   await refreshed;
   await page.getByRole("button", { name: "确认取消", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText(
+  await expect(page.locator('[data-task-inspector]')).toContainText(
     "任务版本已变化，未取消",
   );
   if (cancelCalls !== 0) throw new Error("confirmation_revision_drifted");
@@ -714,7 +714,7 @@ try {
   await page
     .getByRole("button", { name: "查询原取消回执", exact: true })
     .click();
-  await expect(page.getByRole("dialog")).toContainText("禁止自动重发");
+  await expect(page.locator('[data-task-inspector]')).toContainText("禁止自动重发");
   await expect(
     page.getByRole("button", { name: "请求取消", exact: true }),
   ).toBeDisabled();
@@ -722,7 +722,7 @@ try {
   await page
     .getByRole("button", { name: "查询原取消回执", exact: true })
     .click();
-  await expect(page.getByRole("dialog")).toContainText("取消请求已受理");
+  await expect(page.locator('[data-task-inspector]')).toContainText("取消请求已受理");
   await expect(
     page.getByRole("button", { name: "请求取消", exact: true }),
   ).toBeDisabled();
@@ -730,7 +730,7 @@ try {
   await page
     .getByRole("button", { name: "查询原取消回执", exact: true })
     .click();
-  await expect(page.getByRole("dialog")).toContainText("已取消");
+  await expect(page.locator('[data-task-inspector]')).toContainText("已取消");
   await expect(
     page.getByRole("button", { name: "查询原取消回执", exact: true }),
   ).toHaveCount(0);
@@ -744,7 +744,7 @@ try {
     base +
       "/#/tasks?connection=scaena&project=p&family=delegation&ref=media-original",
   );
-  await expect(page.getByRole("dialog")).toContainText("隔离片场结果");
+  await expect(page.locator('[data-task-inspector]')).toContainText("隔离片场结果");
   await page.keyboard.press("Escape");
   await page.goto(
     base +

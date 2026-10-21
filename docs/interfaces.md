@@ -12,7 +12,38 @@
 
 聚合层只做认证、范围映射、固定动作适配、展示转换与有界缓存；不拥有第二任务调度器、账本、资产库或配置真源，不访问 owner 私有存储，不接受浏览器传入可执行程序、任意 URL、参数列表或 Provider payload。注册表与凭据引用由受控服务端配置提供；Aigora 继续拥有网关 registry、路由、policy 和 MCP 迁移。Runtime Plane 是实验性本机 broker，不自动成为远程控制中心依赖。
 
+媒体预览的有界缓存只属于浏览器当前会话。它缓存已经通过 artifact grant 授权的 Blob/Object URL，不缓存 owner 地址、凭据或原始 Provider payload；缓存到期、登出和 scope/session epoch 变化时必须清理。过程观察投影只保留 owner 明确提供的提示词采集和中间检查点，并携带 coverage、freshness、gap 与 reason；缺失字段保持未知或未提供。
+
 ## 最小消费合同
+
+### 工作队列与跨项目交接
+
+控制中心通过 `GET /api/control-center/v1/work-queue` 读取当前授权范围的派生工作项。接口支持 `scope`、签名 `cursor`、`limit`、`kind`、`owner` 和 `state`，返回 `yeisme.work_queue.v1`、session epoch、来源覆盖度、统计和安全引用。
+
+工作项来自任务、提醒账本、服务观测和 owner typed projection，不写入 owner 状态，也不创建第二任务真源。剧本到分镜链路消费 Auctra `creative.flow.read` 与 Scaena `storyboard_workspace_projection.v1`；同一 revision 按 scope/owner/object/source/revision 去重。点击工作项先打开控制中心 Inspector；跳转 Auctra、Scaena 或 Muweave 使用 `yeisme.control_center.launch_context.v1`，不接受任意 URL。Muweave 尚无直接读取合同时显示 `needs_contract`。
+
+工作项动作只显示 allowlist 中的 Preview。Preview 只返回规范化输入、digest、阻断原因和所需审批，不代表 Owner 已写入；Confirm、Provider 调用、凭据变更和账本写入仍由既有独立合同与授权门控制。
+
+### Auctra authoring owner
+
+Auctra 作为文本创作 owner 使用独立的 `authoring` scope binding，不加入媒体 request owner union。服务端固定调用 Auctra `/v1/authoring/capabilities` 和 `/v1/operations/{operation_id}:invoke`，浏览器只调用同源 `/api/control-center/v1/auctra/*` 投影。正文读取必须携带 opaque `unit_ref` 与 byte budget；候选生成、working-copy 写入和 review decision 复用 preview/confirm/receipt，Control Center 不写 `.auctra`、SQLite 或本地文件。
+
+## 统一写入动作合同（本地实现）
+
+控制中心的写入入口只接受服务端 allowlist 中的动作。浏览器不能提交任意 Owner 路径、MCP action 名称、凭据或 Provider 原始 payload。
+
+```text
+GET  /api/control-center/v1/actions?scope=<scope_id>
+POST /api/control-center/v1/actions/preview?scope=<scope_id>
+POST /api/control-center/v1/actions/confirm?scope=<scope_id>
+GET  /api/control-center/v1/actions/receipts/<receipt_ref>?scope=<scope_id>
+```
+
+Preview/Confirm 使用 `scope_id`、`owner`、`target_kind`、`target_ref`、`action`、`expected_revision` 和稳定 `idempotency_key`。Preview 只返回规范化输入、摘要、过期时间、阻断原因和所需审批；Confirm 只在 Preview 仍有效且摘要一致时执行。
+
+当前控制中心本地可执行的动作是任务取消、Provider run 创建/对账和个人用户管理。审阅、交付、Owner 配置与成员动作已经进入 allowlist，但在对应 Owner adapter 合同发布前返回 `needs_contract`，不会用本地状态伪造成功。
+
+所有 Confirm 都写入审计、遵守 CSRF、scope 和会话 epoch；超时或未知结果只能读取原 receipt，不能自动重试或生成新的 idempotency key。
 
 - `CapabilityDescriptor`：复用现有 owner/capability、风险批准、幂等、执行、readiness 与 schema 引用；仅声明能力不等于当前可执行。
 - `InvocationContext`：复用 request/idempotency、project/actor、purpose、budget 和 evidence metadata；领域 body 保持 owner 原生 schema。

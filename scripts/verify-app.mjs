@@ -17,6 +17,7 @@ page.setDefaultTimeout(8000);
 const errors = [];
 const requests = [];
 page.on("pageerror", (error) => errors.push(error.message));
+page.on("console", (message) => { if (message.type() === "error" && !/status of 401/.test(message.text())) errors.push("console: " + message.text()); });
 page.on("request", (request) => requests.push({ method: request.method(), url: request.url() }));
 const checks = [];
 
@@ -34,7 +35,7 @@ try {
     assert.equal(body.includes(legacyPathToken), false);
   });
   await check("hash routes remain addressable", async () => {
-    for (const route of ["tasks", "review", "assets", "usage", "capabilities"]) {
+    for (const route of ["tasks", "requests", "review", "assets", "services", "usage", "capabilities", "team"]) {
       await page.goto(`${base}#/${route}`, { waitUntil: "networkidle" });
       assert.equal(new URL(page.url()).hash, `#/${route}`);
     }
@@ -42,6 +43,7 @@ try {
   await check("responsive shell has no horizontal overflow", async () => {
     for (const width of [1440, 1280, 768, 390]) {
       await page.setViewportSize({ width, height: 900 });
+      await page.goto(base, { waitUntil: "networkidle" });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false, `overflow at ${width}`);
     }
   });

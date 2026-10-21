@@ -1,119 +1,119 @@
-import { useMemo, useState } from "react";
-import {
-  Activity,
-  ArrowRight,
-  CheckCircle2,
-  CircleAlert,
-  Clock3,
-  Cpu,
-  Network,
-  Plug,
-  Server,
-  Wrench,
-} from "../../icons";
-import type { CapabilityCategory, CapabilityReadiness, CapabilityRecord } from "../../shared/types";
-import type { ServiceConnectionObservation, ServiceDirectoryEntry } from "../../shared/api/control-center-client";
+import { useState } from "react";
+import { AudioLines, CheckCircle2, CircleAlert, Clock3, Cpu, Image, LockKeyhole, Plug, RefreshCw, Video, Wrench } from "../../icons";
+import { api, type ProviderCapabilityProjection, type ProviderReadiness } from "../../shared/api/control-center-client";
+import { useScopedRead } from "../../app/workspace";
+import { Button, CopyRef, EmptyState, Facts, InlineNotice, Panel, Pill, ReadStateView, SkeletonRows, StaleNotice, Unknown, cx, ownerLabel, type Tone } from "../../components/ui";
+import { formatRelative } from "../../shared/read-model/format";
+import { SourceCoverage } from "../../components/SourceCoverage";
 
-const categoryMeta: Record<CapabilityCategory, { label: string; icon: typeof Cpu }> = {
-  model: { label: "AI 模型", icon: Cpu },
-  mcp: { label: "MCP 服务", icon: Network },
-  tool: { label: "Tool 目录", icon: Wrench },
-  analysis: { label: "能力分析", icon: Activity },
+export const readinessMeta: Record<ProviderReadiness, { label: string; tone: Tone; body: string }> = {
+  observed: { label: "已观察", tone: "success", body: "近期观察到真实调用结果。" },
+  configured: { label: "能力已发现", tone: "success", body: "owner 能力目录可读；提交仍受独立提交门控制。" },
+  needs_configuration: { label: "凭据或下游未就绪", tone: "warning", body: "已登记，但凭据、binding 或下游能力尚未就绪。" },
+  needs_contract: { label: "待合同", tone: "review", body: "只有目录信息，缺少能力合同，不显示为可调用。" },
+  forbidden: { label: "无权限", tone: "danger", body: "当前身份不能读取该能力。" },
+  unavailable: { label: "不可用", tone: "danger", body: "发现过程失败或超时。" },
+  stale: { label: "数据过期", tone: "warning", body: "观察结果已过期。" },
 };
 
-const readinessTone: Record<CapabilityReadiness, string> = {
-  registered: "neutral",
-  configured: "info",
-  authorized: "info",
-  callable: "success",
-  observed: "success",
-  needs_contract: "warning",
-};
+const modalityIcon = { image: Image, video: Video, audio: AudioLines };
+const modalityLabel = { image: "图像", video: "视频", audio: "音频" };
 
-function ReadinessBadge({ record }: { record: CapabilityRecord }) {
-  const tone = readinessTone[record.readiness];
-  const Icon = record.readiness === "observed" || record.readiness === "callable"
-    ? CheckCircle2
-    : record.readiness === "needs_contract"
-      ? CircleAlert
-      : Clock3;
-  return <span className={`v18-status v18-status-${tone}`}><Icon size={13} />{record.readinessLabel}</span>;
-}
+export default function CapabilityHub() {
+  const read = useScopedRead((scope, signal) => api.capabilities(scope, signal), { isEmpty: (data) => data.capabilities.length === 0 });
+  const services = useScopedRead((scope, signal) => api.services(scope, signal));
+  const capabilities = read.data?.capabilities || [];
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = capabilities.find((item) => item.id === selectedId) || capabilities[0];
+  const ready = capabilities.filter((item) => item.readiness === "configured" || item.readiness === "observed").length;
 
-export function CapabilityHub({ catalog, services = [], connections = [] }: { catalog: CapabilityRecord[]; services?: ServiceDirectoryEntry[]; connections?: ServiceConnectionObservation[] }) {
-  const [category, setCategory] = useState<CapabilityCategory | "all">("all");
-  const [selectedId, setSelectedId] = useState(catalog[0]?.id || "");
-  const visible = useMemo(() => {
-    if (category !== "analysis") return catalog.filter((record) => category === "all" || record.category === category);
-    return catalog.map((record) => ({
-      ...record,
-      id: `analysis:${record.id}`,
-      category: "analysis" as const,
-      name: `${record.name} · 调用分析`,
-      description: `${record.description}。调用量、成功率、延迟和失败原因只引用已观察数据。`,
-      readinessLabel: record.observedAt ? "已观察" : "未记录",
-    }));
-  }, [catalog, category]);
-  const selected = catalog.find((record) => record.id === selectedId) || visible[0];
-  const observedCount = catalog.filter((record) => ["observed", "callable"].includes(record.readiness)).length;
-  const providerHealth = (["eikona", "scaena", "sonora"] as const).map((owner) => {
-    const capability = catalog.find((record) => record.owner === owner);
-    const service = services.find((item) => item.id === owner);
-    const connection = connections.find((item) => item.owner === owner);
-    const state = capability?.readiness || (service?.configuration === "configured" ? "configured" : service?.configuration === "needs_contract" ? "needs_contract" : "unknown");
-    const label = state === "callable" || state === "observed" ? "能力已发现" : state === "configured" ? "已配置，等待正式提交门" : state === "needs_contract" ? "待正式合同" : "未观察";
-    const tone = state === "callable" || state === "observed" ? "success" : state === "needs_contract" ? "warning" : state === "configured" ? "info" : "neutral";
-    return { owner, label: owner[0].toUpperCase() + owner.slice(1), state: label, tone, connection };
-  });
-
-  return <div className="v18-page v18-page-enter" data-page="capabilities">
-    <div className="v18-page-header">
-      <div>
-        <p className="v18-eyebrow">资源运营</p>
-        <h1>模型与工具</h1>
-        <p className="v18-page-body">统一查看模型能力、MCP 连接、Tool 目录和当前接入状态。</p>
-      </div>
-      <span className="v18-inline-status"><Activity size={14} />{observedCount} 项最近已观察</span>
-    </div>
-    <section className="v18-provider-strip" aria-label="Provider 真实接入状态">{providerHealth.map((item) => <article key={item.owner} className="v18-provider-health"><span className="v18-provider-health-mark"><Server size={16} /></span><div><strong>{item.label}</strong><small>{item.state}</small></div><span className={`v18-status v18-status-${item.tone}`}>{item.connection?.runtime?.transport === "verified" ? "传输已验证" : item.connection ? "连接已登记" : "未连接"}</span></article>)}</section>
-    <div className="v18-hub-tabs" role="tablist" aria-label="能力类型">
-      <button className={category === "all" ? "active" : ""} role="tab" aria-selected={category === "all"} onClick={() => setCategory("all")}>全部 <span>{catalog.length}</span></button>
-      {(Object.keys(categoryMeta) as CapabilityCategory[]).map((key) => {
-        const Icon = categoryMeta[key].icon;
-        return <button key={key} className={category === key ? "active" : ""} role="tab" aria-selected={category === key} onClick={() => setCategory(key)}><Icon size={15} />{categoryMeta[key].label} <span>{key === "analysis" ? catalog.length : catalog.filter((record) => record.category === key).length}</span></button>;
-      })}
-    </div>
-    <div className="v18-capability-hub-layout">
-      <section className="v18-panel v18-capability-directory">
-        <div className="v18-panel-heading"><div><p className="v18-eyebrow">能力目录</p><h2>{visible.length} 个登记条目</h2></div><span className="v18-muted">状态分层展示</span></div>
-        <div className="v18-capability-directory-list">
-          {visible.map((record) => {
-            const CategoryIcon = categoryMeta[record.category].icon;
-            return <button key={record.id} className={`v18-capability-directory-row ${record.id === selected?.id ? "selected" : ""}`} onClick={() => setSelectedId(record.id)}>
-              <span className={`v18-capability-icon ${record.accent}`}><CategoryIcon size={18} /></span>
-              <span className="v18-capability-directory-copy"><strong>{record.name}</strong><small>{record.provider} · {record.version}</small></span>
-              <ReadinessBadge record={record} />
-              <ArrowRight size={15} />
+  return <div className="page-enter space-y-5" data-page="capabilities">
+    <h1 className="sr-only">模型与工具</h1>
+    <div className="flex flex-wrap items-center justify-end gap-2"><Button size="sm" onClick={() => { read.reload(); services.reload(); }} icon={<RefreshCw className="size-3.5" />}>重新发现</Button>{read.data && <>
+        <Pill tone="success" icon={<CheckCircle2 />}>{ready}/{capabilities.length} 能力已发现</Pill>
+        <Pill tone="neutral" icon={<LockKeyhole />}>Provider 提交默认关闭</Pill>
+      </>}</div>
+    <StaleNotice status={read.status} error={read.error} observedAt={read.observedAt} onRetry={read.reload} />
+    <SourceCoverage services={services.data?.services || []} />
+    <ReadStateView status={read.status} error={read.error} onRetry={read.reload} skeleton={<Panel><SkeletonRows rows={3} /></Panel>} empty={<Panel><EmptyState icon={<Cpu />} title="当前范围没有绑定 Provider owner" body="scope 未绑定 Eikona、Scaena 或 Sonora 时不发起能力发现。" /></Panel>}>
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.9fr)]">
+        <div className="space-y-3" role="list" aria-label="能力目录">
+          {capabilities.map((item, index) => {
+            const meta = readinessMeta[item.readiness] || readinessMeta.needs_configuration;
+            const Icon = modalityIcon[item.modality] || Cpu;
+            const active = item.id === selected?.id;
+            const enabled = item.bindings.filter((binding) => binding.enabled).length;
+            return <button key={item.id} type="button" role="listitem" aria-pressed={active} onClick={() => setSelectedId(item.id)} style={{ "--i": index } as React.CSSProperties} className={cx(
+              "stagger-in flex w-full items-start gap-4 rounded-card border bg-panel p-4 text-left shadow-panel transition-[border-color,box-shadow] duration-150",
+              active ? "border-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_12%,transparent)]" : "border-line hover:border-line-strong",
+            )}>
+              <span className={cx("grid size-11 shrink-0 place-items-center rounded-[11px] [&>svg]:size-5", item.modality === "image" ? "bg-kind-image-soft text-kind-image" : item.modality === "video" ? "bg-kind-video-soft text-kind-video" : "bg-kind-audio-soft text-kind-audio")}><Icon /></span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-ink">{item.name}</span>
+                  <Pill tone={meta.tone}>{meta.label}</Pill>
+                </span>
+                <span className="mt-1 block truncate font-mono text-2xs text-muted">{item.model_ref}</span>
+                <span className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-2xs text-muted">
+                  <span>{modalityLabel[item.modality]}</span>
+                  <span>MCP</span>
+                  {item.bindings.length > 0 && <span className="tabular">binding {enabled}/{item.bindings.length} 启用</span>}
+                  {item.voice_refs.length > 0 && <span className="tabular">{item.voice_refs.length} 个声线</span>}
+                  <span>观察于 {formatRelative(item.observed_at)}</span>
+                </span>
+                {item.blocker && <span className="mt-2 flex items-center gap-1.5 text-2xs text-warning"><CircleAlert className="size-3.5 shrink-0" /><span className="truncate">{item.blocker}</span></span>}
+              </span>
             </button>;
           })}
+          <InlineNotice tone="neutral" icon={<Wrench />}>MCP Server 与 Tool 目录尚无 owner 读取合同（needs_contract），因此不展示虚构的工具列表。</InlineNotice>
         </div>
-      </section>
-      {selected ? <aside className="v18-panel v18-capability-detail">
-        <div className="v18-capability-detail-head"><span className={`v18-capability-icon ${selected.accent}`}><Server size={19} /></span><div><p className="v18-eyebrow">{categoryMeta[selected.category].label}</p><h2>{selected.name}</h2><p>{selected.description}</p></div></div>
-        <ReadinessBadge record={selected} />
-        <div className="v18-detail-facts">
-          <div><span>Provider</span><strong>{selected.provider}</strong></div>
-          <div><span>维护方</span><strong>{selected.owner}</strong></div>
-          <div><span>计量单位</span><strong>{selected.metering}</strong></div>
-          <div><span>最近观察</span><strong>{selected.observedAt || "尚未观察"}</strong></div>
-          <div><span>成功率</span><strong>{selected.successRate === null ? "未知" : `${(selected.successRate * 100).toFixed(1)}%`}</strong></div>
-          <div><span>延迟</span><strong>{selected.latencyMs === null ? "未知" : `${selected.latencyMs} ms`}</strong></div>
-        </div>
-        <div className="v18-capability-detail-section"><span className="v18-detail-label">支持能力</span><div className="v18-chip-row">{selected.modalities.map((item) => <span className="v18-detail-chip" key={item}>{item}</span>)}</div></div>
-        <div className="v18-capability-detail-section"><span className="v18-detail-label">约束</span><ul className="v18-constraint-list">{selected.constraints.map((item) => <li key={item}>{item}</li>)}</ul></div>
-        {selected.toolCount !== undefined && <div className="v18-capability-callout"><Plug size={15} /><span>公开 Tool <strong>{selected.toolCount}</strong> 个，调用费用沿下游 Model Call 归因。</span></div>}
-        {selected.readiness === "needs_contract" && <div className="v18-contract-note"><CircleAlert size={15} /><span>当前只有目录信息，未显示为可调用。</span></div>}
-      </aside> : <div className="v18-empty"><strong>没有匹配的能力</strong><p>切换上方分类查看其他条目。</p></div>}
-    </div>
+        {selected && <CapabilityDetail item={selected} />}
+      </div>
+    </ReadStateView>
   </div>;
+}
+
+function CapabilityDetail({ item }: { item: ProviderCapabilityProjection }) {
+  const meta = readinessMeta[item.readiness] || readinessMeta.needs_configuration;
+  return <Panel className="xl:sticky xl:top-[calc(var(--topbar-height)+20px)] xl:self-start" title={item.name} eyebrow={`${ownerLabel(item.owner)} · ${modalityLabel[item.modality]}`} actions={<Pill tone={meta.tone}>{meta.label}</Pill>}>
+    <div className="space-y-4 p-5">
+      <p className="text-[13px] text-muted">{meta.body}</p>
+      <Facts columns={2} items={[
+        { label: "默认模型", value: <CopyRef value={item.model_ref} label="模型引用" />, wide: true },
+        { label: "传输", value: item.transport.toUpperCase() },
+        { label: "提交门", value: item.submit_gate === "owner_authorized" ? "owner 已授权" : "默认关闭" },
+        { label: "最近发现", value: formatRelative(item.observed_at) },
+        { label: "支持实时提交", value: item.supports_live_submit ? "能力具备（仍受提交门约束）" : "否" },
+      ]} />
+      {item.bindings.length > 0 && <section className="space-y-2">
+        <h3 className="text-[13px] font-semibold">Provider bindings</h3>
+        <ul className="divide-y divide-line rounded-[10px] border border-line">
+          {item.bindings.map((binding) => <li key={binding.binding_id} className="flex items-center gap-3 px-3 py-2.5">
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-2 text-[13px] font-medium"><span className="truncate">{binding.binding_id}</span>{binding.default && <Pill tone="info" className="h-5 px-1.5 text-2xs">默认</Pill>}</span>
+              <span className="block truncate text-2xs text-muted">{[binding.model_ref, binding.resolution, binding.ratio, binding.duration_seconds ? `${binding.duration_seconds}s` : null, binding.requires_reference ? "需参考图" : null].filter(Boolean).join(" · ")}</span>
+            </span>
+            <Pill tone={binding.enabled ? "success" : "warning"}>{binding.enabled ? "已启用" : binding.disabled_reason || "已关闭"}</Pill>
+          </li>)}
+        </ul>
+      </section>}
+      {item.diagnostic && <section className="space-y-2">
+        <h3 className="text-[13px] font-semibold">诊断</h3>
+        <Facts columns={2} items={[
+          { label: "状态", value: readinessMeta[item.diagnostic.status]?.label || item.diagnostic.status },
+          { label: "代码", value: item.diagnostic.code || <Unknown /> },
+          { label: "凭据已配置", value: item.diagnostic.configured === null ? <Unknown /> : item.diagnostic.configured ? "是" : "否" },
+          { label: "诊断时间", value: formatRelative(item.diagnostic.observed_at) },
+        ]} />
+      </section>}
+      {(item.provider_refs.length > 0 || item.voice_refs.length > 0 || item.model_refs.length > 1) && <section className="space-y-2">
+        <h3 className="text-[13px] font-semibold">目录引用</h3>
+        <div className="flex flex-wrap gap-1.5">
+          {[...item.model_refs, ...item.provider_refs, ...item.voice_refs].slice(0, 24).map((ref) => <span key={ref} className="rounded-[6px] bg-panel-sunken px-2 py-1 font-mono text-2xs text-ink-soft">{ref}</span>)}
+        </div>
+      </section>}
+      {item.blocker && <InlineNotice tone="warning">{item.blocker}</InlineNotice>}
+      <InlineNotice tone="neutral" icon={item.submit_gate === "owner_authorized" ? <Plug /> : <Clock3 />}>Provider 提交是独立授权门。控制中心当前不发起任何付费生成；能力目录可读不代表可以提交。</InlineNotice>
+    </div>
+  </Panel>;
 }

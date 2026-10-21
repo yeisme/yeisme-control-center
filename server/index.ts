@@ -6,7 +6,21 @@ import { resolve, extname, sep } from "node:path";
 import { createApp } from "./app";
 import { validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
+import {
+  defaultDatabasePath,
+  migrateDatabase,
+  openDatabase,
+} from "./db/client";
+import { RunStore } from "./db/run-store";
 const file = process.env.YEISME_CONTROL_CONFIG;
+const loadBaseConfig = (path: string): ServerConfig => {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ServerConfig;
+  } catch {
+    console.error("Invalid control center config file: " + path);
+    process.exit(1);
+  }
+};
 const providerEntries: Array<[string, { owner: "eikona" | "scaena" | "sonora"; endpoint: string; credential_env: string; enabled: boolean }]> = [];
 for (const owner of ["eikona", "scaena", "sonora"] as const) {
   const upper = owner.toUpperCase();
@@ -15,7 +29,7 @@ for (const owner of ["eikona", "scaena", "sonora"] as const) {
   if (endpoint) providerEntries.push([owner, { owner, endpoint, credential_env, enabled: true }]);
 }
 const baseConfig: ServerConfig = file
-  ? JSON.parse(readFileSync(file, "utf8"))
+  ? loadBaseConfig(file)
   : {
       origin: process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312",
       port: Number(process.env.YEISME_CONTROL_PORT || 4312),
@@ -29,7 +43,14 @@ const config: ServerConfig = {
   ...(file ? { config_file: resolve(file) } : {}),
   providers: { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
 };
-const app = createApp(config),
+// Persistence: explicit config wins, then beside the config file, then memory.
+const dbPath =
+  config.database?.path ||
+  (config.config_file ? defaultDatabasePath(config.config_file) : ":memory:");
+const db = openDatabase(dbPath);
+migrateDatabase(db);
+const interrupted = new RunStore(db).markInterrupted();
+const app = createApp(config, { db }),
   root = resolve("dist"),
   types: Record<string, string> = {
     ".html": "text/html; charset=utf-8",
@@ -52,7 +73,8 @@ createServer(async (req, res) => {
       let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > 16384) {
+        const limit = url.pathname.includes("/notifications/") ? 262144 : 16384;
+        if (bytes > limit) {
           res.writeHead(413);
           res.end();
           return;
@@ -124,5 +146,11 @@ createServer(async (req, res) => {
     res.end('{"error":"request_failed"}');
   }
 }).listen(config.port, config.bind, () =>
-  console.log("Control center listening on " + config.bind + ":" + config.port),
+  console.log(
+    "Control center listening on " + config.bind + ":" + config.port,
+    dbPath === ":memory:"
+      ? "(persistence: memory only)"
+      : "(persistence: " + dbPath + ")",
+    interrupted > 0 ? "(recovered " + interrupted + " interrupted provider run(s) as unknown)" : "",
+  ),
 );

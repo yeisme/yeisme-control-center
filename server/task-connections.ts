@@ -14,7 +14,12 @@ import type {
   TaskPage,
   TaskConnectionState,
   ConnectionObservation,
+  TaskChannelObservation,
+  TaskReadChannel,
+  TaskProviderRecovery,
 } from "../src/task-observation";
+import { normalizeCheckpoint, normalizeProcessObservation, normalizePromptObservation } from "../src/observation-contract";
+import type { CoverageState } from "../src/request-visibility";
 const actions = new Set([
   "control_center.capabilities",
   "control_center.tasks.list",
@@ -28,6 +33,24 @@ const actions = new Set([
 const contentAction = (action: string) =>
   action === "artifact.access" ||
   action === "control_center.tasks.artifact_access";
+const contractErrorCodes = new Set(["operation_not_allowed", "METHOD_NOT_ALLOWED", "NOT_SUPPORTED", "unsupported_operation"]);
+
+function connectionStateFor(error: unknown): string {
+  if (!(error instanceof AuthError)) return "source_unavailable";
+  if (error.code.includes("contract") || error.code === "owner_action_contract_missing") return "needs_contract";
+  if (error.code === "needs_authorization") return "needs_authorization";
+  if (error.status === 403) return "forbidden";
+  if (error.status === 429 || error.code === "source_busy") return error.code;
+  return error.code || "source_unavailable";
+}
+
+function channelObservation(error: unknown): TaskChannelObservation {
+  return {
+    state: connectionStateFor(error),
+    observed_at: new Date().toISOString(),
+    ...(error instanceof AuthError ? { reason: error.code } : {}),
+  };
+}
 function checkedURL(value: string, code: string) {
   try {
     return new URL(value);
@@ -59,7 +82,40 @@ const safeText = (v: unknown, max = 300) =>
 const safeTime = (v: unknown) =>
   typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null;
 const count = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+const observationCoverage = (v: unknown): CoverageState => {
+  const allowed: CoverageState[] = ["complete", "partial", "pending", "unknown", "not_recorded", "forbidden", "unavailable", "expired", "integrity_failed", "needs_contract"];
+  return typeof v === "string" && allowed.includes(v as CoverageState) ? v as CoverageState : "unknown";
+};
 const eventField = (value: unknown, key: string) => value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+function safeProviderRecovery(value: unknown): TaskProviderRecovery | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const rawState = typeof raw.state === "string" ? raw.state.toLowerCase() : "submission_unknown";
+  const state: TaskProviderRecovery["state"] = rawState.includes("not_submitted") ? "not_submitted" : rawState.includes("rejected") || rawState.includes("invalid") ? "rejected_no_generation" : rawState.includes("generated") || rawState.includes("succeeded") || rawState.includes("completed") ? "generated" : rawState.includes("accepted") || rawState.includes("queued") || rawState.includes("running") || rawState.includes("pending") ? "accepted_pending" : rawState.includes("blocked") || rawState.includes("credential") || rawState.includes("disabled") ? "blocked" : "submission_unknown";
+  const refs = raw.artifact_refs || raw.output_refs || raw.artifacts;
+  return {
+    state,
+    native_state: safeText(raw.native_state || raw.provider_state || raw.status || raw.state, 100) || null,
+    submission_ref: safeText(raw.submission_ref || raw.task_ref || raw.task_id, 512) || null,
+    binding_id: safeText(raw.binding_id || raw.binding, 160) || null,
+    error_code: safeText(raw.error_code || raw.code || raw.error, 160) || null,
+    blocker: safeText(raw.blocker || raw.blocked_reason || raw.reason, 300) || null,
+    safe_to_resubmit: typeof raw.safe_to_resubmit === "boolean" ? raw.safe_to_resubmit : null,
+    review_status: safeText(raw.review_status, 100) || null,
+    export_status: safeText(raw.export_status, 100) || null,
+    artifact_refs: Array.isArray(refs) ? refs.flatMap((item) => { const ref = typeof item === "string" ? item : item && typeof item === "object" ? (item as Record<string, unknown>).ref || (item as Record<string, unknown>).artifact_ref : undefined; return typeof ref === "string" && ref.length <= 512 ? [ref] : []; }).slice(0, 50) : [],
+  };
+}
+function safeThumbnail(value: unknown): TaskSnapshot["results"][number]["thumbnail"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  return {
+    state: raw.state === "ready" || raw.state === "forbidden" || raw.state === "needs_contract" ? raw.state : "unavailable",
+    ...(typeof raw.ref === "string" && raw.ref.length <= 512 ? { ref: raw.ref } : {}),
+    ...(safeTime(raw.observed_at) ? { observed_at: safeTime(raw.observed_at) || undefined } : {}),
+    ...(safeText(raw.reason, 200) ? { reason: safeText(raw.reason, 200) } : {}),
+  };
+}
 export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
   if (
     v?.schema_version !== "yeisme.task_observation.v1" ||
@@ -77,6 +133,7 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
     .flatMap((a: unknown, index: number) => {
       if (!a || typeof a !== "object" || !("ref" in a)) return [];
       const value = a as Record<string, unknown>;
+      const thumbnail = safeThumbnail(value.thumbnail);
       return typeof value.ref === "string" && value.ref.length <= 512
         ? [{
             ref: `artifact-${index}`,
@@ -87,6 +144,7 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
             width: count(value.width) ?? undefined,
             height: count(value.height) ?? undefined,
             duration_ms: count(value.duration_ms) ?? undefined,
+            ...(thumbnail ? { thumbnail } : {}),
           }]
         : [];
     });
@@ -96,15 +154,17 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
       const action = a.action;
       if (action !== "cancel" && action !== "preview" && action !== "download") return [];
       const contentBlocked = action !== "cancel" && c.allow_content !== true;
+      const reason = safeText("reason" in a ? a.reason : undefined, 200);
+      const ownerResultAccessRequested = action !== "cancel" && c.allow_content === true && reason === "owner_result_access_requested";
       return [{
         action,
         enabled:
-          "enabled" in a && a.enabled === true &&
+          (("enabled" in a && a.enabled === true) || ownerResultAccessRequested) &&
           (action !== "cancel" || c.allow_cancel === true) &&
           !contentBlocked,
         reason: contentBlocked
           ? "content_not_authorized"
-          : safeText("reason" in a ? a.reason : undefined, 200),
+          : reason,
       }];
     });
   if (c.allow_content === true && results.length > 0) {
@@ -112,6 +172,9 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
       if (!allowedActions.some((item) => item.action === action))
         allowedActions.push({ action, enabled: true, reason: "owner_result_access_requested" });
   }
+  const providerRecovery = c.owner === "scaena" ? safeProviderRecovery(v.provider_recovery || v.recovery) : undefined;
+  const process = normalizeProcessObservation(v.process);
+  const promptCapture = normalizePromptObservation(v.prompt_capture);
   return {
     schema_version: "yeisme.task_observation.v1",
     locator: {
@@ -147,6 +210,9 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
     results,
     allowed_actions: allowedActions,
     coverage: v.coverage === "complete" ? "complete" : "partial",
+    ...(providerRecovery ? { provider_recovery: providerRecovery } : {}),
+    ...(process ? { process } : {}),
+    ...(promptCapture ? { prompt_capture: promptCapture } : {}),
   };
 }
 function rawResultRef(value: unknown, index: number): string | undefined {
@@ -168,6 +234,7 @@ export class TaskConnections {
   private pending = new Map<string, number>();
   private observations = new Map<string, ConnectionObservation>();
   private observing = new Map<string, Promise<ConnectionObservation>>();
+  private channels = new Map<string, Partial<Record<TaskReadChannel, TaskChannelObservation>>>();
   constructor(
     private config: ServerConfig,
     private fetcher: typeof fetch = fetch,
@@ -189,6 +256,7 @@ export class TaskConnections {
     const project = (observation: ConnectionObservation) => {
       const runtime: ConnectionObservation = {
         ...observation,
+        channels: { ...this.channels.get(c.id), ...observation.channels },
         content: c.allow_content !== true
           ? "not_requested"
           : this.contentDenied.has(c.id) ? "denied" : observation.content,
@@ -197,7 +265,7 @@ export class TaskConnections {
           last_success_at: null, task_families: [], reason: "needs_authorization",
         } : {}),
       };
-      return { state: runtime.state, observed_at: runtime.last_success_at || "", runtime };
+      return { state: runtime.state, observed_at: runtime.last_success_at || "", channels: runtime.channels, runtime };
     };
     // The same fixed credential/project can be shared by authorized scopes;
     // only non-content connection facts are cached, never task rows or grants.
@@ -211,6 +279,7 @@ export class TaskConnections {
           last_success_at: previous?.last_success_at || null,
           transport: "unknown", authorization: "unknown", contract: "unknown",
           task_families: [], content: c.allow_content === true ? "not_verified" : "not_requested",
+          channels: { ...this.channels.get(c.id) },
         };
         try {
           const caps = await this.call(c, "control_center.capabilities", {});
@@ -221,10 +290,12 @@ export class TaskConnections {
             throw new AuthError("needs_contract", 422);
           value.contract = "supported";
           value.task_families = caps.task_families;
+          this.setChannel(c, "connection", { state: "ready", observed_at: new Date().toISOString() });
           const page = await this.call(c, "control_center.tasks.list", { mode: "active", limit: 1 });
           if (!Array.isArray(page?.rows) || page.rows.length > 1)
             throw new AuthError("invalid_task_page", 503);
           for (const row of page.rows) safeTask(row, c);
+          this.setChannel(c, "active", { state: "ready", observed_at: new Date().toISOString() });
           value.authorization = "verified";
           value.state = "ready";
           value.last_success_at = new Date().toISOString();
@@ -234,8 +305,9 @@ export class TaskConnections {
               : caps.artifact_access === false ? "unsupported" : "not_verified";
           }
         } catch (error) {
-          value.state = error instanceof AuthError ? error.code : "source_unavailable";
-          value.reason = value.state;
+          this.setChannel(c, value.contract === "supported" ? "active" : "connection", channelObservation(error));
+          value.state = connectionStateFor(error);
+          value.reason = error instanceof AuthError ? error.code : "source_unavailable";
           if (this.denied.has(c.id) || value.state === "owner_action_denied") {
             value.authorization = "denied";
             value.state = "needs_authorization";
@@ -244,6 +316,7 @@ export class TaskConnections {
           }
           if (value.state === "needs_contract") value.contract = "unsupported";
         }
+        value.channels = { ...this.channels.get(c.id), ...value.channels };
         this.observations.set(c.id, value);
         return value;
       })();
@@ -274,17 +347,24 @@ export class TaskConnections {
       throw new AuthError(
         response.status === 401 || response.status === 403
           ? content ? "content_not_authorized" : "needs_authorization"
+          : response.status === 404 || response.status === 405
+            ? "owner_action_contract_missing"
           : response.status === 429
             ? "source_rate_limited"
             : "source_unavailable",
-        response.status === 401 || response.status === 403 ? 403 : 503,
+        response.status === 401 || response.status === 403
+          ? 403
+          : response.status === 404 || response.status === 405
+            ? 422
+            : 503,
       );
     }
     return boundedJSON(response, 2 * 1024 * 1024);
   }
   async call(c: TaskConnection, action: string, args: Record<string, unknown>) {
-    if (!actions.has(action) || (contentAction(action) && c.allow_content !== true))
-      throw new AuthError("operation_not_allowed", 403);
+    if (!actions.has(action)) throw new AuthError("owner_action_contract_missing", 422);
+    if (contentAction(action) && c.allow_content !== true)
+      throw new AuthError("content_not_authorized", 403);
     if (this.denied.has(c.id)) throw new AuthError("needs_authorization", 403);
     const pending = this.pending.get(c.id) || 0;
     if (pending >= 8) throw new AuthError("source_busy", 429);
@@ -369,6 +449,8 @@ export class TaskConnections {
             : rawToolCode === "CONSUMER_IDEMPOTENCY_CONFLICT"
               ? "IDEMPOTENCY_CONFLICT"
               : rawToolCode;
+        if (contractErrorCodes.has(String(toolCode)))
+          throw new AuthError("needs_contract", 422);
         if (
           [
             "AUTH_ACTION_DENIED",
@@ -415,6 +497,8 @@ export class TaskConnections {
             }
             throw new AuthError("needs_contract", 422);
           }
+          if (contractErrorCodes.has(String(result.error.code)))
+            throw new AuthError("needs_contract", 422);
           throw new AuthError("owner_action_denied", 403);
         }
         if (result?.result !== undefined) {
@@ -578,8 +662,10 @@ export class TaskConnections {
             });
             if (!Array.isArray(data?.rows) || data.rows.length > 50)
               throw new AuthError("invalid_task_page", 503);
+            this.setChannel(c, mode, { state: "ready", observed_at: new Date().toISOString() });
             return {
               coverage,
+              channels: this.channels.get(c.id),
               rows: data.rows.map((r: any) => this.project(r, c, scope)),
               cursor:
                 typeof data.next_cursor === "string" && data.next_cursor
@@ -593,9 +679,9 @@ export class TaskConnections {
                   : undefined,
             };
           } catch (e) {
-            coverage.state =
-              e instanceof AuthError ? e.code : "source_unavailable";
-            return { coverage, rows: [], cursor: undefined };
+            coverage.state = connectionStateFor(e);
+            this.setChannel(c, mode, channelObservation(e));
+            return { coverage: { ...coverage, channels: this.channels.get(c.id) }, rows: [], cursor: undefined };
           }
         }),
     );
@@ -609,32 +695,95 @@ export class TaskConnections {
   }
   async detail(raw: string, scope: ScopeBinding) {
     const { c, ref, family } = this.locate(raw, scope);
-    const task = this.project(
-      await this.call(c, "control_center.tasks.get", {
-        task_ref: ref,
-        task_family: family,
-      }),
-      c,
-      scope,
-    );
+    let task: TaskSnapshot;
+    try {
+      task = this.project(
+        await this.call(c, "control_center.tasks.get", {
+          task_ref: ref,
+          task_family: family,
+        }),
+        c,
+        scope,
+      );
+      this.setChannel(c, "detail", { state: "ready", observed_at: new Date().toISOString() });
+    } catch (error) {
+      this.setChannel(c, "detail", channelObservation(error));
+      throw error;
+    }
     if (task.locator.task_ref !== ref || task.locator.task_family !== family)
       throw new AuthError("task_identity_mismatch", 403);
     return task;
   }
-  async events(raw: string, scope: ScopeBinding, cursor?: string) {
+  async events(raw: string, scope: ScopeBinding, cursor?: string, after?: string) {
     const { c, ref, family } = this.locate(raw, scope);
-    const r = await this.call(c, "control_center.tasks.events", {
-      task_ref: ref,
-      task_family: family,
-      cursor,
-      limit: 100,
-    });
-    if (!Array.isArray(r?.events) || typeof r.gap !== "boolean" || (r.next_cursor !== undefined && typeof r.next_cursor !== "string")) throw new AuthError("needs_contract", 422);
-    return { events: r.events.slice(0, 100).map((e: unknown): TaskEvent => ({ id: safeText(eventField(e, "id"), 150), occurred_at: safeTime(eventField(e, "occurred_at")) || "", stage: safeText(eventField(e, "stage"), 80), state: safeText(eventField(e, "state"), 80) })), next_cursor: safeText(r.next_cursor, 2048) || undefined, gap: r.gap };
+    let r: any;
+    try {
+      r = await this.call(c, "control_center.tasks.events", {
+        task_ref: ref,
+        task_family: family,
+        cursor,
+        after_cursor: after,
+        limit: 100,
+      });
+    } catch (error) {
+      this.setChannel(c, "events", channelObservation(error));
+      throw error;
+    }
+    if (!Array.isArray(r?.events) || typeof r.gap !== "boolean" || (r.next_cursor !== undefined && typeof r.next_cursor !== "string")) {
+      const error = new AuthError("needs_contract", 422);
+      this.setChannel(c, "events", channelObservation(error));
+      throw error;
+    }
+    this.setChannel(c, "events", { state: "ready", observed_at: new Date().toISOString() });
+    const observation = normalizeProcessObservation(r.observation || r.process);
+    return {
+      events: r.events.slice(0, 100).flatMap((e: unknown): TaskEvent[] => {
+        const checkpoint = normalizeCheckpoint(e);
+        if (!checkpoint) return [];
+        return [{
+          id: checkpoint.id,
+          occurred_at: checkpoint.occurred_at,
+          stage: checkpoint.stage,
+          state: checkpoint.state,
+          sequence: checkpoint.sequence,
+          kind: checkpoint.kind,
+          summary: checkpoint.summary,
+          reason_code: checkpoint.reason_code,
+          duration_ms: checkpoint.duration_ms,
+          attempt_ref: checkpoint.attempt_ref,
+          progress: checkpoint.progress,
+          evidence_refs: checkpoint.evidence_refs,
+          prompt_capture: checkpoint.prompt_capture,
+        }];
+      }),
+      next_cursor: safeText(r.next_cursor, 2048) || undefined,
+      resume_cursor: safeText(r.resume_cursor || r.next_after_cursor, 2048) || undefined,
+      gap: r.gap,
+      ...(observation ? { observation } : {}),
+      coverage: observationCoverage(r.coverage),
+      ...(safeText(r.reason, 300) ? { reason: safeText(r.reason, 300) } : {}),
+      freshness: r.freshness === "fresh" || r.freshness === "stale" ? r.freshness : "unknown",
+      observed_at: safeTime(r.observed_at) || new Date().toISOString(),
+    };
   }
   async artifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download" = "preview") {
+    const { c } = this.locate(raw, scope);
+    try {
+      const result = await this.readArtifact(raw, scope, artifactRef, action);
+      this.setChannel(c, "artifacts", { state: "ready", observed_at: new Date().toISOString() });
+      return result;
+    } catch (error) {
+      this.setChannel(c, "artifacts", channelObservation(error));
+      throw error;
+    }
+  }
+
+  private async readArtifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download") {
     const { c, ref, family } = this.locate(raw, scope);
-    if (c.allow_content !== true) throw new AuthError("content_not_authorized", 403);
+    if (c.allow_content !== true) {
+      const error = new AuthError("content_not_authorized", 403);
+      throw error;
+    }
     const task = await this.detail(raw, scope);
     const rawTask = await this.call(c, "control_center.tasks.get", { task_ref: ref, task_family: family });
     const rawResults = rawTask && typeof rawTask === "object" && "results" in rawTask && Array.isArray(rawTask.results)
@@ -648,7 +797,7 @@ export class TaskConnections {
     const artifact = task.results.find((item) => item.ref === `artifact-${artifactIndex}`);
     if (!sourceRef || !artifact) throw new AuthError("artifact_not_found", 404);
     const allowed = task.allowed_actions.find((item) => item.action === action);
-    if (allowed && !allowed.enabled) throw new AuthError(allowed.reason || "content_not_authorized", 403);
+    if (allowed && !allowed.enabled && allowed.reason !== "owner_result_access_requested") throw new AuthError(allowed.reason || "content_not_authorized", 403);
     if (c.owner === "sonora" || c.owner === "scaena") {
       const grant = await this.call(c, "control_center.tasks.artifact_access", {
         task_ref: task.locator.task_ref,
@@ -748,6 +897,13 @@ export class TaskConnections {
     return c.owner !== "eikona"
       ? { Authorization: "Bearer " + secret(c.credential_ref) }
       : {};
+  }
+
+  private setChannel(c: TaskConnection, channel: TaskReadChannel, value: TaskChannelObservation) {
+    const next = { ...(this.channels.get(c.id) || {}), [channel]: value };
+    this.channels.set(c.id, next);
+    const previous = this.observations.get(c.id);
+    if (previous) this.observations.set(c.id, { ...previous, channels: next });
   }
   async cancel(
     raw: string,

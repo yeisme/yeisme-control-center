@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
 import type { ControlCenterRole } from "../src/service-directory";
 import { checkPassword, credentialVersion, hashPassword } from "./password";
+import { SessionStore } from "./db/session-store";
+import { createMemoryDB } from "./db/client";
 const nonce = () => randomBytes(32).toString("base64url");
 export class AuthError extends Error {
   constructor(
@@ -134,7 +136,7 @@ export function verifyIDToken(
   return claims;
 }
 export class SessionAuth {
-  sessions = new Map<string, Session>();
+  sessions: SessionStore;
   private challenges = new Map<
     string,
     { state: string; verifier: string; nonce: string; expires: number }
@@ -142,7 +144,10 @@ export class SessionAuth {
   constructor(
     private config: ServerConfig,
     private fetcher: typeof fetch = fetch,
-  ) {}
+    sessions?: SessionStore,
+  ) {
+    this.sessions = sessions ?? new SessionStore(createMemoryDB());
+  }
   private loginAttempts: number[] = [];
   private loginBusy = false;
   private personalUsers() {
@@ -238,6 +243,7 @@ export class SessionAuth {
         personal: true,
         last_seen: now,
         credential_version: credentialVersion(encoded),
+        epoch: 1,
       });
       return { cookie: this.cookie(id, 12 * 3600) };
     } finally {
@@ -276,6 +282,9 @@ export class SessionAuth {
     const temp = path + "." + process.pid + ".users.tmp";
     writeFileSync(temp, JSON.stringify({ ...this.config, config_file: undefined }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
     renameSync(temp, path);
+    // Permission bindings changed: every live session moves to a new epoch so
+    // connected clients refetch /session and drop stale scoped responses.
+    this.sessions.bumpAll();
   }
   cookie(value: string, maxAge: number) {
     return `yeisme_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(this.config.origin).protocol === "https:" ? "; Secure" : ""}`;
@@ -418,6 +427,7 @@ export class SessionAuth {
       accessAudience,
       expires,
       csrf: nonce(),
+      epoch: 1,
     });
     return {
       cookie: this.cookie(id, Math.floor((expires - Date.now()) / 1000)),
@@ -458,8 +468,7 @@ export class SessionAuth {
       throw new AuthError("csrf_denied", 403);
   }
   private prune() {
-    for (const [k, v] of this.sessions)
-      if (v.expires <= Date.now()) this.sessions.delete(k);
+    this.sessions.prune();
     for (const [k, v] of this.challenges)
       if (v.expires <= Date.now()) this.challenges.delete(k);
   }

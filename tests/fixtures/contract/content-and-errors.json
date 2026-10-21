@@ -1,0 +1,22 @@
+{
+  "content": {
+    "state": "not_recorded",
+    "truncated": false
+  },
+  "media": {
+    "url": "/api/control-center/v1/media/handle?scope=scope-1",
+    "mime": "video/mp4",
+    "expires_at": "2026-10-12T09:00:00Z"
+  },
+  "errors": {
+    "forbidden": { "error": "owner_forbidden", "class": "forbidden" },
+    "conflict": { "error": "cursor_expired", "class": "conflict" },
+    "revision_conflict": { "error": "version_conflict", "class": "conflict" },
+    "unavailable": { "error": "source_unavailable", "class": "unavailable" },
+    "login": { "error": "login_required", "class": "login_required" },
+    "needs_contract": { "error": "needs_contract", "class": "invalid" },
+    "rate_limited": { "error": "source_busy", "class": "rate_limited" },
+    "expired_handle": { "error": "media_handle_expired", "class": "expired" },
+    "audit_first": { "error": "audit_unavailable", "class": "unavailable" }
+  }
+}

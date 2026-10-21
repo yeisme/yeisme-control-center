@@ -3,27 +3,36 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const args = new Set(process.argv.slice(2));
+const dryRun = args.has("--dry-run");
 const value = (name: string, fallback: string) => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] || fallback : fallback;
 };
-if (!args.has("--confirm-live")) throw Error("Refusing live calls. Re-run with --confirm-live and explicit budget flags.");
+if (!dryRun && !args.has("--confirm-live")) throw Error("Refusing live calls. Re-run with --confirm-live and explicit budget flags.");
 const total = Number(value("--total-cny", "0"));
 const caps = { eikona: Number(value("--image-cny", "0")), scaena: Number(value("--video-cny", "0")), sonora: Number(value("--audio-cny", "0")) };
 if (!Number.isFinite(total) || total <= 0 || Object.values(caps).some((v) => !Number.isFinite(v) || v <= 0) || Object.values(caps).reduce((a, b) => a + b, 0) > total)
   throw Error("Invalid budget. Example: --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5");
 const origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312";
 const loginFile = process.env.YEISME_CONTROL_LOGIN_FILE || join(homedir(), ".config/yeisme-control-center/test-login.json");
+if (dryRun) {
+  console.log(JSON.stringify({ status: "passed", dry_run: true, provider_calls: false, mutations: false, total_budget_cny: total, per_owner_cny: caps }));
+  process.exit(0);
+}
 const login = JSON.parse(await readFile(loginFile, "utf8"));
 const evidence = join(process.cwd(), "temp/integration-test-runs/provider-live-" + new Date().toISOString().replace(/[:.]/g, "-"));
 await mkdir(join(evidence, "artifacts"), { recursive: true });
 const started = Date.now();
-const redact = (value: unknown): unknown => {
+type RedactedValue = null | boolean | number | string | RedactedValue[] | { [key: string]: RedactedValue };
+const redact = (value: unknown): RedactedValue => {
   if (Array.isArray(value)) return value.map(redact);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !/token|authorization|password|prompt|payload/i.test(key)).map(([key, item]) => [key, redact(item)]));
+  if (value === null || typeof value !== "object") return value as RedactedValue;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !/token|authorization|password|prompt|payload/i.test(key))
+      .map(([key, item]) => [key, redact(item)]),
+  ) as { [key: string]: RedactedValue };
 };
-const output: string[] = [];
 const request = async (path: string, init: RequestInit = {}) => fetch(origin + "/api/control-center/v1" + path, { ...init, headers: { ...(init.headers || {}), ...(cookie ? { Cookie: cookie } : {}) }});
 let cookie = "";
 const loginResponse = await fetch(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: login.username, password: login.password }) });
