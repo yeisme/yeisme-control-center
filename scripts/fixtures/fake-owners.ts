@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { buildRequests, buildWorld, png, taskRow, type RequestRow, type Scenario, type TaskSpec } from "./world";
+import { eikonaChannels, eikonaModels, eikonaRuntimeCapabilities, providerTools, scaenaGuide, sonoraDiscovery } from "./provider-catalog";
 
 export const observerToken = "fixture-observer-token";
 export const providerToken = "fixture-provider-token";
@@ -27,6 +28,8 @@ export function startFakeOwners(options: FakeOwnerOptions) {
   const grants = new Map<string, { media: string; expires: number }>();
   const requestsByScope = new Map(options.scopes.map((scope) => [scope.project, buildRequests(options.scenario, scope.tenant, scope.project)]));
   const origin = `http://127.0.0.1:${options.port}`;
+  /** Fixture-only owner catalog drift switch, toggled by GET /__fixture/catalog-revision?value=N. */
+  let catalogRevision = 0;
 
   const lookup = (connection: string, ref: string) => world.tasks[connection]?.find((task) => task.ref === ref);
 
@@ -101,17 +104,23 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     if (options.scenario === "degraded" && owner === "scaena") return new Response("unavailable", { status: 503 });
     if (body?.method === "initialize") return json({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18" } });
     if (body?.method === "notifications/initialized") return new Response(null, { status: 202 });
-    if (body?.method === "tools/list") return json({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: `${owner}.execute` }, ...(owner === "sonora" ? [{ name: "sonora.search" }] : [])] } });
+    if (body?.method === "tools/list") {
+      const pages = providerTools(owner, catalogRevision);
+      const page = Math.max(0, Number(String(body.params?.cursor || "page-0").replace("page-", "")) || 0);
+      const tools = pages[page] || [];
+      return json({ jsonrpc: "2.0", id: body.id, result: { tools, ...(page + 1 < pages.length ? { nextCursor: `page-${page + 1}` } : {}) } });
+    }
     if (body?.method === "resources/read") {
-      const creative_input = owner === "eikona"
-        ? { input_modes: ["text_to_image", "image_to_image", "image_upscale"], reference_roles: ["subject", "style", "composition"], timeline_support: null, output_constraints: { ratios: ["1:1", "16:9", "9:16"], formats: ["png", "webp"] }, input_schema_ref: "eikona://creative-input/v1", limits: { max_prompt_length: 8000, max_references: 8, max_variants: 4 } }
-        : owner === "sonora"
-          ? { input_modes: ["text_to_audio", "text_to_text"], reference_roles: ["style"], timeline_support: null, output_constraints: { formats: ["mp3", "wav"] }, input_schema_ref: "sonora://creative-input/v1", limits: { max_prompt_length: 10000, max_references: 2, max_variants: 4 } }
-          : { input_modes: ["text_to_video", "image_to_video", "keyframe_video"], reference_roles: ["subject", "composition", "motion", "first_frame", "last_frame", "keyframe"], timeline_support: { enabled: true, requires_start_end: true, max_keyframes: 8, transitions: ["cut"] }, output_constraints: { ratios: ["16:9", "9:16"], resolutions: ["720P", "1080P"], durations_ms: [5000, 8000] }, input_schema_ref: "scaena://creative-input/v1", limits: { max_prompt_length: 8000, max_references: 8, max_keyframes: 8, max_duration_ms: 8000, max_variants: 2 } };
-      return json({ jsonrpc: "2.0", id: body.id, result: { contents: [{ uri: body.params?.uri, text: JSON.stringify({ creative_input, bindings: [
-        { binding_id: "seedance-720p-16x9", model: "seedance25-ark-text-720p", enabled: true, default: true, duration_seconds: 5, resolution: "720P", ratio: "16:9" },
-        { binding_id: "seedance-1080p-9x16", model: "seedance25-ark-text-1080p", enabled: false, duration_seconds: 5, resolution: "1080P", ratio: "9:16", disabled_reason: "binding_disabled" },
-      ] }) }] } });
+      const uri = String(body.params?.uri || "");
+      const documents: Record<string, unknown> = {
+        "eikona://runtime/capabilities": eikonaRuntimeCapabilities(),
+        "eikona://models/readiness": eikonaModels(catalogRevision),
+        "eikona://channels": eikonaChannels(catalogRevision),
+        "sonora://capabilities": sonoraDiscovery(),
+        "scaena://video-tasks/guide": scaenaGuide(catalogRevision),
+      };
+      if (!uri.startsWith(owner + "://") || !(uri in documents)) return json({ jsonrpc: "2.0", id: body.id, error: { code: -32002, message: "Resource not found" } });
+      return json({ jsonrpc: "2.0", id: body.id, result: { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(documents[uri]) }] } });
     }
     if (body?.method === "tools/call") {
       const name = body.params?.name;
@@ -269,6 +278,10 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       const path = url.pathname;
       const auth = request.headers.get("authorization");
       if (options.latencyMs) await sleep(options.latencyMs * (url.searchParams.get("project_id") === "coast-letters" || path.includes("coast") ? 3 : 1));
+      if (path === "/__fixture/catalog-revision") {
+        catalogRevision = Math.max(0, Math.min(1, Number(url.searchParams.get("value") || 0) || 0));
+        return json({ catalog_revision: catalogRevision });
+      }
       if (path.startsWith("/api/v1/artifact-access/") || path.includes("/access-grants/")) return media(path, request);
       const task = path.match(/^\/mcp\/([a-z0-9-]+)$/);
       if (task) {

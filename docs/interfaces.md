@@ -24,6 +24,25 @@
 
 工作项动作只显示 allowlist 中的 Preview。Preview 只返回规范化输入、digest、阻断原因和所需审批，不代表 Owner 已写入；Confirm、Provider 调用、凭据变更和账本写入仍由既有独立合同与授权门控制。
 
+### 工具目录（yeisme.tool_catalog.v1）
+
+`GET /api/control-center/v1/tool-catalog?scope=<scope>[&refresh=1]` 返回当前授权范围的跨 owner 只读目录。目录包含：
+- 服务器：协议、版本、覆盖状态与新鲜度；
+- MCP 工具：分页 `tools/list`、注解、输入字段摘要与 digest；
+- owner 动作：风险等级、运行时可用性、确认/幂等要求；
+- 模型：只透传 owner 声明的 `latest_ready | latest_unverified | unavailable | historical | drifted | unknown_cost`，未声明时为 `unknown`；
+- 渠道：`channel.summary.v1`；
+- 近 7 天变化：控制中心按 digest 观察，首次读取只建基线。
+
+只允许调用 owner 的只读发现面：`initialize`、`tools/list`、`resources/read`，以及 `getProjectMediaCapabilities`、`credential.status`、`doctor.run`、`sonora.search`。任何目录条目都不会被调用。
+
+刷新与容错：
+- 每个 owner 的发现结果缓存 60 秒，`refresh=1` 每 15 秒最多强制刷新一次；
+- 瞬时失败时返回上次成功结果，标为 `stale`；
+- Aigora、MCP Gateway 和 Auctra 在获得只读合同前显示 `needs_contract`。
+
+旧服务端没有该路由时会返回 405 `operation_not_allowed` 且不带允许方法，页面据此降级显示 `/capabilities` 的基础投影。
+
 ### Auctra authoring owner
 
 Auctra 作为文本创作 owner 使用独立的 `authoring` scope binding，不加入媒体 request owner union。服务端固定调用 Auctra `/v1/authoring/capabilities` 和 `/v1/operations/{operation_id}:invoke`，浏览器只调用同源 `/api/control-center/v1/auctra/*` 投影。正文读取必须携带 opaque `unit_ref` 与 byte budget；候选生成、working-copy 写入和 review decision 复用 preview/confirm/receipt，Control Center 不写 `.auctra`、SQLite 或本地文件。

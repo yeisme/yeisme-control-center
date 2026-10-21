@@ -39,7 +39,7 @@ await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n")
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
   port,
-  owner_reads: ["capabilities", "tasks.list", "tasks.get", "tasks.events"],
+  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events"],
   real_owner_reads: true,
   provider_calls: false,
   mutations: false,
@@ -173,6 +173,16 @@ try {
   for (const [owner, projection] of Object.entries(providerStates) as Array<[string, any]>) {
     if (projection.submit_gate !== "disabled_by_default") throw new Error(`provider_submit_gate_open:${owner}`);
   }
+  // Catalog discovery is read-only owner discovery; record counts and coverage only, never entry bodies.
+  const catalog = await request(`/api/control-center/v1/tool-catalog?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+  if (catalog.response.status !== 200 && !(catalog.response.status === 405 && catalog.body?.error === "operation_not_allowed"))
+    throw new Error(`tool_catalog_read_failed:${catalog.response.status}`);
+  const toolCatalog = catalog.response.status === 200 ? {
+    freshness: catalog.body?.freshness,
+    coverage: (catalog.body?.coverage || []).map((item: any) => ({ owner: item.owner, state: item.state, reason: item.reason })),
+    counts: { tools: catalog.body?.tools?.length || 0, actions: catalog.body?.actions?.length || 0, models: catalog.body?.models?.length || 0, channels: catalog.body?.channels?.length || 0 },
+    latest_ready_models: (catalog.body?.models || []).filter((model: any) => model.status === "latest_ready").length,
+  } : { status: "route_unavailable" };
   summary = {
     schema_version: "yeisme.integration_test_evidence.v1",
     status: "passed",
@@ -182,6 +192,7 @@ try {
     mutations: false,
     owners: ownerRows,
     provider_discovery: providerStates,
+    tool_catalog: toolCatalog,
     task_rows: { active: activeRows.length, history: historyRows.length },
     task_checks: taskChecks,
     boundary_checks: boundaryChecks,
@@ -194,6 +205,7 @@ try {
     task_checks: taskChecks,
     boundary_checks: boundaryChecks,
     provider_discovery: providerStates,
+    tool_catalog: toolCatalog,
   }, null, 2) + "\n");
   status = "passed";
   record({ status, owners: ownerRows, provider_discovery: providerStates, task_rows: summary.task_rows, task_checks: taskChecks });

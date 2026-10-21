@@ -7,6 +7,7 @@ import type { ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPrevi
 import type { WorkQueueFilters, WorkQueueResponse } from "../work-queue";
 import type { CreativeFlowProjection } from "../creative-flow";
 import type { CreativeCapabilityContract, CreativeInputSpec } from "../creative-input";
+import type { ToolCatalog } from "../tool-catalog";
 
 export const controlCenterPrefix = "/api/control-center/v1";
 export type { TaskConnectionState, TaskEvent, TaskPage, TaskSnapshot, ServiceDirectoryEntry, AttachmentRead, ContentRead, Coverage, CoverageState, Owner, RequestProjection, RequestQuery, RequestSummary, ProcessObservation, ProcessCheckpoint, PromptCaptureObservation, ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt, WorkQueueFilters, WorkQueueResponse, CreativeFlowProjection, CreativeCapabilityContract, CreativeInputSpec };
@@ -48,6 +49,11 @@ export function errorCode(error: unknown): string {
 
 export function errorClassOf(error: unknown): ControlCenterErrorClass {
   return error instanceof ControlCenterApiError ? error.errorClass : "unavailable";
+}
+
+/** An older control-center server that predates a route answers 404 or a 405 with no allowed methods. */
+export function isRouteUnavailable(error: unknown) {
+  return error instanceof ControlCenterApiError && (error.status === 404 || (error.status === 405 && (error.details.allowedMethods?.length ?? 0) === 0));
 }
 
 export function isAbort(error: unknown) {
@@ -437,6 +443,7 @@ export const api = {
   syncAuctraCollection: (scope: string, body: { cursor?: string; updated_after?: string; limit?: number }, csrf: string, signal?: AbortSignal) => post<AuctraCollectionSyncReceipt>("/auctra/collection/sync", { scope }, body, csrf, signal),
   connections: (scope: string, signal?: AbortSignal) => get<{ connections: TaskConnectionState[] } & Epoch>("/connections", { scope }, signal),
   capabilities: (scope: string, signal?: AbortSignal) => get<{ scope?: string; capabilities: ProviderCapabilityProjection[] } & Epoch>("/capabilities", { scope }, signal),
+  toolCatalog: (scope: string, options: { refresh?: boolean } = {}, signal?: AbortSignal) => get<ToolCatalog & Epoch>("/tool-catalog", { scope, refresh: options.refresh ? 1 : undefined }, signal),
   usage: (scope: string, signal?: AbortSignal) => get<UsageProjection>("/usage", { scope }, signal),
   actions: (scope: string, owner?: string, signal?: AbortSignal) => get<{ scope: string; actions: ActionDescriptor[] } & Epoch>("/actions", { scope, owner }, signal),
   workQueue: (scope: string, filters: WorkQueueFilters = {}, cursor?: string, limit = 50, signal?: AbortSignal) => get<WorkQueueResponse>("/work-queue", { scope, ...filters, cursor, limit }, signal),

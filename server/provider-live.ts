@@ -19,6 +19,24 @@ import type {
   CreativeReferenceRole,
   CreativeTimeline,
 } from "../src/shared/creative-input";
+import type {
+  CatalogAction,
+  CatalogChannel,
+  CatalogCoverageState,
+  CatalogEntryKind,
+  CatalogModel,
+  CatalogTool,
+  DomainReadiness,
+} from "../src/shared/tool-catalog";
+import {
+  deriveCreativeContract,
+  eikonaActions,
+  normalizeChannels,
+  normalizeModels,
+  normalizeTools,
+  scaenaGuide,
+  sonoraDiscovery,
+} from "./tool-catalog-normalize";
 
 export type ProviderRunState =
   | "accepted"
@@ -142,6 +160,7 @@ export interface CapabilityProjection {
 export interface ProviderAdapter {
   owner: ProviderOwner;
   discover(): Promise<Pick<CapabilityProjection, "state" | "readiness" | "observed_at" | "provider_refs" | "model_refs" | "voice_refs" | "bindings" | "diagnostic" | "blocker" | "input_modes" | "reference_roles" | "timeline_support" | "output_constraints" | "input_schema_ref" | "limits">>;
+  observe(): Promise<OwnerObservation>;
   estimate(input: ProviderRunRequest): Promise<{ amount: number | null; currency: string }>;
   submit(input: ProviderRunRequest): Promise<ProviderReceipt>;
   status(run: ProviderRunProjection): Promise<ProviderReceipt>;
@@ -155,6 +174,72 @@ export interface ProviderReceipt {
   currency: string;
   error_code: string | null;
   evidence_refs: string[];
+}
+export type CapabilityObservation = Pick<CapabilityProjection, "state" | "readiness" | "observed_at" | "provider_refs" | "model_refs" | "voice_refs" | "bindings" | "diagnostic" | "blocker" | "input_modes" | "reference_roles" | "timeline_support" | "output_constraints" | "input_schema_ref" | "limits">;
+/** A single owner's read-only discovery result, shared by /capabilities and /tool-catalog. */
+export interface OwnerObservation {
+  owner: ProviderOwner;
+  observed_at: string;
+  coverage: { state: CatalogCoverageState; reason: string | null };
+  server: { protocol_version: string | null; server_name: string | null; server_version: string | null };
+  tools: CatalogTool[];
+  actions: CatalogAction[];
+  models: CatalogModel[];
+  channels: CatalogChannel[];
+  readiness: DomainReadiness[];
+  latest_policy: string | null;
+  native_channels: string[];
+  /** Entry kinds read completely this pass; only these may record removals. */
+  complete_kinds: CatalogEntryKind[];
+  capability: CapabilityObservation;
+}
+
+const discoveryTimeoutMs = 8000;
+const discoveryActions = new Set(["getProjectMediaCapabilities", "credential.status", "doctor.run"]);
+const discoveryTools = new Set(["sonora.search"]);
+const rpcErrorCode = (error: any) => {
+  const code = error?.code;
+  if (typeof code === "string" && code) return code.slice(0, 100);
+  // Owners wrap their typed error in JSON-RPC `data` (e.g. Eikona `{ error: { code, message } }`).
+  const nested = error?.data?.error && typeof error.data.error === "object" ? error.data.error : error?.data;
+  const message = [error?.message, nested?.message].filter((item) => typeof item === "string").join(" ").toLowerCase();
+  if (/unsupported|not supported|unknown resource|resource collection/.test(message)) return "mcp_resource_unsupported";
+  if (/denied|forbidden|unauthori|not allowed|permission|for this credential/.test(message)) return "mcp_access_denied";
+  if (typeof nested?.code === "string" && nested.code && !/^(BACKING_ERROR|INTERNAL)/i.test(nested.code)) return nested.code.slice(0, 100);
+  if (code === -32601) return "mcp_method_not_found";
+  if (code === -32002 || /not found/.test(message)) return "mcp_resource_not_found";
+  if (code === -32602) return "mcp_invalid_params";
+  return typeof code === "number" ? `mcp_error_${code}` : "provider_action_denied";
+};
+/** Owner resources may arrive wrapped in a `*.mcp.resource.v1` envelope; errors inside it are failures. */
+const unwrapResource = (value: any) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (value.status === "error" || (value.error && typeof value.error === "object"))
+    throw new AuthError(rpcErrorCode(value.error || {}), 422);
+  if (typeof value.schema_version === "string" && /\.mcp\.resource\./.test(value.schema_version) && value.data && typeof value.data === "object") return value.data;
+  return value;
+};
+const coverageFromError = (error: unknown): { state: CatalogCoverageState; reason: string } => {
+  if (error instanceof AuthError) {
+    const code = error.code;
+    if (error.status === 403 || /unauthori|forbidden|denied|AUTH_/i.test(code)) return { state: "forbidden", reason: code };
+    if (/credential/i.test(code)) return { state: "not_configured", reason: code };
+    if (/contract|not_found|NOT_FOUND|unsupported/i.test(code)) return { state: "needs_contract", reason: code };
+    return { state: "unavailable", reason: code };
+  }
+  const name = (error as { name?: string } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") return { state: "unavailable", reason: "owner_timeout" };
+  return { state: "unavailable", reason: "provider_unavailable" };
+};
+const errorReason = (error: unknown, fallback: string) => (error instanceof AuthError ? `${fallback}:${error.code}` : fallback);
+const observationTtlMs = 60_000;
+const forceRefreshMinMs = 15_000;
+export interface OwnerObservationResult {
+  observation: OwnerObservation;
+  freshness: "fresh" | "stale" | "unknown";
+  failure: OwnerObservation["coverage"] | null;
+  forced: boolean;
+  throttled: boolean;
 }
 
 const owners: ProviderOwner[] = ["eikona", "scaena", "sonora"];
@@ -339,12 +424,12 @@ class McpProviderAdapter implements ProviderAdapter {
     if (!value) throw new AuthError("provider_credential_missing", 503);
     return value;
   }
-  private async rpc(method: string, params?: unknown, notification = false) {
+  private async rpc(method: string, params?: unknown, notification = false, timeoutMs = 15000) {
     const id = randomUUID();
     const response = await this.fetcher(endpoint(this.connection.endpoint), {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         Authorization: "Bearer " + this.token(),
         "Content-Type": "application/json",
@@ -353,15 +438,19 @@ class McpProviderAdapter implements ProviderAdapter {
       },
       body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id }), method, ...(params === undefined ? {} : { params }) }),
     });
+    if (response.status === 401 || response.status === 403) {
+      await response.body?.cancel();
+      throw new AuthError("provider_unauthorized", 403);
+    }
     if (notification) {
       await response.body?.cancel();
-      if (!response.ok) throw new AuthError(response.status === 401 || response.status === 403 ? "provider_unauthorized" : "provider_unavailable", response.status === 401 || response.status === 403 ? 403 : 503);
+      if (!response.ok) throw new AuthError("provider_unavailable", 503);
       return null;
     }
     const value: any = await boundedJSON(response, 2 * 1024 * 1024);
     if (value.id !== id) throw new AuthError("provider_invalid_response", 503);
     const toolError = value.result?.structuredContent?.error || value.error;
-    if (toolError) throw new AuthError(String(toolError.code || "provider_action_denied").slice(0, 100), 422);
+    if (toolError) throw new AuthError(rpcErrorCode(toolError), 422);
     return value;
   }
   private async initialize() {
@@ -374,8 +463,41 @@ class McpProviderAdapter implements ProviderAdapter {
     const protocol = value?.result?.protocolVersion;
     if (typeof protocol !== "string") throw new AuthError("provider_initialization_failed", 503);
     this.protocol = protocol;
+    this.serverInfo = {
+      protocol_version: protocol,
+      server_name: text(value?.result?.serverInfo?.name, 120),
+      server_version: text(value?.result?.serverInfo?.version, 60),
+    };
     await this.rpc("notifications/initialized", undefined, true);
     this.initialized = true;
+  }
+  private serverInfo: OwnerObservation["server"] = { protocol_version: null, server_name: null, server_version: null };
+  /** Follows tools/list pagination; tool bodies are summarized by the catalog normalizer. */
+  private async listTools(maxPages = 5) {
+    await this.initialize();
+    const tools: unknown[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < maxPages; page += 1) {
+      const value: any = await this.rpc("tools/list", cursor ? { cursor } : {}, false, discoveryTimeoutMs);
+      const list = value?.result?.tools || value?.result?.structuredContent?.tools;
+      if (Array.isArray(list)) tools.push(...list);
+      cursor = typeof value?.result?.nextCursor === "string" && value.result.nextCursor ? value.result.nextCursor : undefined;
+      if (!cursor) break;
+    }
+    return tools;
+  }
+  private async readResourceJSON(uri: string) {
+    await this.initialize();
+    const value: any = await this.rpc("resources/read", { uri }, false, discoveryTimeoutMs);
+    return unwrapResource(jsonText(value.result?.contents || value.result?.structuredContent || value.result || value));
+  }
+  /** Discovery may only issue owner calls that are documented as read-only diagnostics. */
+  private async discoveryCall(name: string, args: Record<string, unknown>) {
+    const action = name === this.owner + ".execute" ? String(args.action || "") : "";
+    if (!(action ? discoveryActions.has(action) : discoveryTools.has(name))) throw new AuthError("discovery_call_not_allowed", 500);
+    await this.initialize();
+    const value: any = await this.rpc("tools/call", { name, arguments: args }, false, discoveryTimeoutMs);
+    return value.result?.structuredContent || value.result || value;
   }
   private async callTool(toolName: string, args: Record<string, unknown>) {
     await this.initialize();
@@ -388,38 +510,62 @@ class McpProviderAdapter implements ProviderAdapter {
   private async call(action: string, args: Record<string, unknown>) {
     return this.callTool(this.owner + ".execute", { action, args });
   }
-  private async readResource(uri: string) {
-    await this.initialize();
-    const value: any = await this.rpc("resources/read", { uri });
-    return jsonText(value.result?.contents || value.result?.structuredContent || value.result || value);
-  }
-  async discover() {
+  /** One read-only discovery pass for this owner; the catalog and the capability projection share it. */
+  async observe(): Promise<OwnerObservation> {
     const observedAt = new Date().toISOString();
-    const base = { state: "needs_configuration" as const, readiness: "needs_configuration" as const, observed_at: observedAt, provider_refs: [] as string[], model_refs: this.connection.model_refs || [], voice_refs: [] as string[], bindings: [] as ProviderBinding[], diagnostic: null as ProviderDiagnostic | null, blocker: null as string | null, ...normalizeCreativeContract(null) };
+    const result: OwnerObservation = {
+      owner: this.owner, observed_at: observedAt, coverage: { state: "readable", reason: null }, server: this.serverInfo,
+      tools: [], actions: [], models: [], channels: [], readiness: [], latest_policy: null, native_channels: [], complete_kinds: [],
+      capability: { state: "needs_configuration", readiness: "needs_configuration", observed_at: observedAt, provider_refs: [], model_refs: this.connection.model_refs || [], voice_refs: [], bindings: [], diagnostic: null, blocker: null, ...normalizeCreativeContract(null) },
+    };
+    // Several resources can be unreadable in one pass; keep each distinct reason (joined by "|").
+    const partial = (reason: string) => {
+      if (result.coverage.state === "readable") result.coverage = { state: "partial", reason };
+      else if (result.coverage.state === "partial" && !result.coverage.reason?.split("|").includes(reason)) result.coverage = { state: "partial", reason: [result.coverage.reason, reason].filter(Boolean).join("|") };
+    };
     try {
-      await this.initialize();
-      const value: any = await this.rpc("tools/list", { cursor: undefined });
-      const tools = value?.result?.tools || value?.result?.structuredContent?.tools;
-      if (!Array.isArray(tools) || !tools.some((v) => v?.name === this.owner + ".execute"))
-        return { ...base, state: "needs_contract" as const, readiness: "needs_contract" as const, blocker: "owner_execute_tool_missing" };
+      const rawTools = await this.listTools();
+      result.server = this.serverInfo;
+      result.tools = normalizeTools(this.owner, rawTools);
+      result.complete_kinds.push("server", "tool");
+      if (!result.tools.some((tool) => tool.name === this.owner + ".execute")) {
+        result.coverage = { state: "needs_contract", reason: "owner_execute_tool_missing" };
+        result.capability = { ...result.capability, state: "needs_contract", readiness: "needs_contract", blocker: "owner_execute_tool_missing" };
+        return result;
+      }
       if (this.owner === "scaena") {
-        const readiness: any = await this.call("getProjectMediaCapabilities", { path: { project_id: this.connection.project || "" } });
-        const guide = await this.readResource("scaena://video-tasks/guide").catch(() => null);
-        const guideValue = jsonText(guide);
-        const rawBindings = find(guideValue, ["bindings", "binding"]) || find(readiness, ["bindings"]);
+        const media: any = await this.discoveryCall("scaena.execute", { action: "getProjectMediaCapabilities", args: { path: { project_id: this.connection.project || "" } } });
+        const guide = await this.readResourceJSON("scaena://video-tasks/guide").catch((error) => { partial(errorReason(error, "guide_unreadable")); return null; });
+        const parsed = scaenaGuide(guide);
+        if (guide) result.complete_kinds.push("action", "model", "channel");
+        Object.assign(result, { actions: parsed.actions, models: parsed.models, channels: parsed.channels, latest_policy: parsed.latest_policy, native_channels: parsed.native_channels });
+        const rawBindings = parsed.bindings.length ? parsed.bindings : find(media, ["bindings"]);
         const bindings = Array.isArray(rawBindings) ? rawBindings.map(normalizeBinding).filter(Boolean) as ProviderBinding[] : [];
-        const creative = normalizeCreativeContract(find(guideValue, ["creative_input", "creative", "input_contract"]) || find(readiness, ["creative_input", "creative", "input_contract"]));
-        const mediaState = String(find(readiness, ["state", "status"]) || "").toLowerCase();
-        const guideBlocker = text(find(guideValue, ["blocked_reason", "blocker", "reason"]), 300);
+        const mediaState = String(find(media, ["state", "status"]) || "").toLowerCase();
+        const guideBlocker = parsed.blocked_reason || text(find(guide, ["blocker", "reason"]), 300);
         const blocked = mediaState === "blocked" || guideBlocker !== null || bindings.some((binding) => binding.enabled === false);
         const bindingBlocker = bindings.find((binding) => binding.enabled === false)?.disabled_reason || null;
-        return { ...base, ...creative, state: blocked ? "needs_configuration" as const : "configured" as const, readiness: blocked ? "needs_configuration" as const : "configured" as const, model_refs: [...new Set([...base.model_refs, ...bindings.map((binding) => binding.model_ref).filter(Boolean)])], bindings, blocker: guideBlocker || (mediaState === "blocked" ? "project_media_capability_blocked" : bindingBlocker) };
+        result.capability = {
+          ...result.capability,
+          ...deriveCreativeContract("scaena", { actions: parsed.actions, bindings: parsed.bindings }),
+          state: blocked ? "needs_configuration" : "configured",
+          readiness: blocked ? "needs_configuration" : "configured",
+          model_refs: [...new Set([...result.capability.model_refs, ...bindings.map((binding) => binding.model_ref).filter(Boolean)])],
+          bindings,
+          blocker: guideBlocker || (mediaState === "blocked" ? "project_media_capability_blocked" : bindingBlocker),
+        };
+        return result;
       }
       if (this.owner === "sonora") {
+        const discovery = await this.readResourceJSON("sonora://capabilities").catch((error) => { partial(errorReason(error, "discovery_unreadable")); return null; });
+        const parsed = sonoraDiscovery(discovery);
+        if (discovery && parsed.actions.length) result.complete_kinds.push("action");
+        result.actions = parsed.actions;
+        result.readiness = parsed.readiness;
         const providerId = providerIdFromModel(this.connection.model_refs?.[0] || "openai-tts");
-        const credentialStatus: any = await this.call("credential.status", { provider_id: providerId }).catch(() => null);
-        const diagnosis: any = await this.call("doctor.run", { provider_id: providerId });
-        const catalog: any = await this.callTool("sonora.search", { query: providerId, types: ["provider", "model", "voice"], limit: 50 }).catch(() => null);
+        const credentialStatus: any = await this.discoveryCall("sonora.execute", { action: "credential.status", args: { provider_id: providerId } }).catch(() => null);
+        const diagnosis: any = await this.discoveryCall("sonora.execute", { action: "doctor.run", args: { provider_id: providerId } });
+        const catalog: any = await this.discoveryCall("sonora.search", { query: providerId, types: ["provider", "model", "voice"], limit: 50 }).catch(() => null);
         const diagnosisConfigured = find(diagnosis, ["configured"]);
         const configured = diagnosisConfigured ?? find(credentialStatus, ["configured"]);
         const diagnosticCode = text(find(diagnosis, ["diagnostic_status", "status", "code", "error_code"]), 160);
@@ -431,17 +577,51 @@ class McpProviderAdapter implements ProviderAdapter {
         const modelRefs = refs.flatMap((item) => { const ref = text(item?.model_ref || item?.model_id, 200); return ref ? [ref] : []; });
         const voiceRefs = refs.flatMap((item) => { const ref = text(item?.voice_ref || item?.voice_id, 200); return ref ? [ref] : []; });
         const diagnostic: ProviderDiagnostic = { status: diagnosticState, code: diagnosticCode, configured: typeof configured === "boolean" ? configured : null, blocker: ["needs_configuration", "unavailable"].includes(diagnosticState) ? diagnosticCode || "sonora_provider_not_ready" : null, observed_at: observedAt };
-        const genericGuide = await this.readResource(`${this.owner}://creative-input/contract`).catch(() => null);
-        const creative = normalizeCreativeContract(find(entries, ["creative_input", "creative", "input_contract"]) || find(jsonText(genericGuide), ["creative_input", "creative", "input_contract"]));
-        return { ...base, ...creative, state: diagnosticState === "configured" || diagnosticState === "observed" ? "configured" as const : "needs_configuration" as const, readiness: diagnosticState, provider_refs: [...new Set(providerRefs)], model_refs: [...new Set([...base.model_refs, ...modelRefs])], voice_refs: [...new Set(voiceRefs)], diagnostic, blocker: diagnostic.blocker };
+        result.models = [...new Set([...result.capability.model_refs, ...modelRefs])].map((modelRef) => ({
+          id: modelRef, owner: "sonora", model_ref: modelRef, original_model_ref: null, provider: providerRefs[0] || providerId, channel: null, operation: "speech", capabilities: [],
+          input_modalities: ["text"], output_modalities: ["audio"], durations: [], resolutions: [], ratios: [], pricing: null, readiness: diagnosticState,
+          status: "unknown", status_source: "undeclared", observed_at: observedAt, expires_at: null, digest: null, warnings: [], source: "sonora.search",
+        }));
+        // sonora.search is a bounded, query-scoped listing, not an authoritative model catalog: never record removals from it.
+        result.capability = {
+          ...result.capability,
+          ...deriveCreativeContract("sonora", { actions: parsed.actions }),
+          state: diagnosticState === "configured" || diagnosticState === "observed" ? "configured" : "needs_configuration",
+          readiness: diagnosticState,
+          provider_refs: [...new Set(providerRefs)],
+          model_refs: [...new Set([...result.capability.model_refs, ...modelRefs])],
+          voice_refs: [...new Set(voiceRefs)],
+          diagnostic,
+          blocker: diagnostic.blocker,
+        };
+        return result;
       }
-      const genericGuide = await this.readResource(`${this.owner}://creative-input/contract`).catch(() => null);
-      return { ...base, ...normalizeCreativeContract(find(jsonText(genericGuide), ["creative_input", "creative", "input_contract"])), state: "configured" as const, readiness: "configured" as const };
+      const runtime = await this.readResourceJSON("eikona://runtime/capabilities").catch((error) => { partial(errorReason(error, "runtime_capabilities_unreadable")); return null; });
+      const parsed = eikonaActions(runtime);
+      if (runtime) result.complete_kinds.push("action");
+      result.actions = parsed.actions;
+      const models = await this.readResourceJSON("eikona://models/readiness").catch((error) => { partial(errorReason(error, "model_snapshot_unreadable")); return null; });
+      if (models) { result.models = normalizeModels("eikona", models, "eikona://models/readiness"); result.complete_kinds.push("model"); }
+      const channels = await this.readResourceJSON("eikona://channels").catch((error) => { partial(errorReason(error, "channel_summary_unreadable")); return null; });
+      if (channels) { result.channels = normalizeChannels("eikona", channels); result.complete_kinds.push("channel"); }
+      result.capability = {
+        ...result.capability,
+        ...deriveCreativeContract("eikona", { actions: parsed.actions }),
+        state: "configured",
+        readiness: "configured",
+        model_refs: [...new Set([...result.capability.model_refs, ...result.models.filter((model) => model.status !== "historical").map((model) => model.model_ref)])].slice(0, 50),
+      };
+      return result;
     } catch (error) {
-      const providerState = error instanceof AuthError && error.code.includes("contract") ? "needs_contract" as const : error instanceof AuthError && error.code.includes("credential") ? "needs_configuration" as const : "unavailable" as const;
-      const projectedState: CapabilityProjection["state"] = providerState === "needs_contract" ? "needs_contract" : "needs_configuration";
-      return { ...base, state: projectedState, readiness: providerState, blocker: error instanceof AuthError ? error.code : "provider_unavailable" };
+      const coverage = coverageFromError(error);
+      result.coverage = coverage;
+      const providerState: ProviderReadinessState = coverage.state === "needs_contract" ? "needs_contract" : coverage.state === "forbidden" ? "forbidden" : coverage.state === "not_configured" ? "needs_configuration" : "unavailable";
+      result.capability = { ...result.capability, state: providerState === "needs_contract" ? "needs_contract" : "needs_configuration", readiness: providerState, blocker: coverage.reason || "provider_unavailable" };
+      return result;
     }
+  }
+  async discover() {
+    return (await this.observe()).capability;
   }
   async estimate(input: ProviderRunRequest) {
     const action = this.manifest.estimate;
@@ -606,18 +786,47 @@ export class ProviderRunManager {
     }
     return next;
   }
-  async capabilities(scope: ScopeBinding): Promise<CapabilityProjection[]> {
-    const result: CapabilityProjection[] = [];
-    for (const owner of owners) {
-      if (!scope.owners[owner]) continue;
-      const connection = this.config.providers?.[owner];
-      const adapter = this.adapters.get(owner);
-      const observation = adapter ? await adapter.discover() : { state: "needs_configuration" as const, readiness: "needs_configuration" as const, observed_at: new Date().toISOString(), provider_refs: [], model_refs: connection?.model_refs || [], voice_refs: [], bindings: [], diagnostic: null, blocker: "provider_not_configured", ...normalizeCreativeContract(null) };
-      const model = connection?.model_refs?.[0] || (owner === "eikona" ? "openai/gpt-image-2.5-sunburst" : owner === "scaena" ? "seedance25-ark-text-1080p" : "sonora/voice");
-      result.push({ id: owner + ":" + modalityFor[owner], owner, modality: modalityFor[owner], name: owner[0].toUpperCase() + owner.slice(1), model_ref: model, state: observation.state, transport: "mcp", supports_live_submit: observation.state === "configured", observed_at: observation.observed_at, readiness: observation.readiness, submit_gate: "disabled_by_default", provider_refs: observation.provider_refs, model_refs: [...new Set([model, ...observation.model_refs])], voice_refs: observation.voice_refs, bindings: observation.bindings, diagnostic: observation.diagnostic, blocker: observation.blocker, input_modes: observation.input_modes, reference_roles: observation.reference_roles, timeline_support: observation.timeline_support, output_constraints: observation.output_constraints, input_schema_ref: observation.input_schema_ref, limits: observation.limits });
+  private observations = new Map<ProviderOwner, { latest: OwnerObservation; at: number; forcedAt: number; lastGood: OwnerObservation | null }>();
+  private inflight = new Map<ProviderOwner, Promise<OwnerObservation>>();
+  /**
+   * Cached, de-duplicated owner discovery shared by /capabilities and /tool-catalog. A transient
+   * failure serves the last good pass marked stale; forced refreshes are rate-limited per owner.
+   */
+  async observeOwner(owner: ProviderOwner, options: { force?: boolean } = {}): Promise<OwnerObservationResult | null> {
+    const adapter = this.adapters.get(owner);
+    if (!adapter) return null;
+    const now = Date.now();
+    let entry = this.observations.get(owner);
+    const throttled = !!options.force && !!entry && now - entry.forcedAt < forceRefreshMinMs;
+    const forced = !!options.force && !throttled;
+    if (!entry || now - entry.at >= observationTtlMs || forced) {
+      let pending = this.inflight.get(owner);
+      if (!pending) {
+        pending = adapter.observe().finally(() => this.inflight.delete(owner));
+        this.inflight.set(owner, pending);
+      }
+      const latest = await pending;
+      const previous = this.observations.get(owner);
+      entry = { latest, at: Date.now(), forcedAt: forced ? Date.now() : previous?.forcedAt ?? 0, lastGood: latest.coverage.state === "unavailable" ? previous?.lastGood ?? null : latest };
+      this.observations.set(owner, entry);
     }
-    if (!scope) return [];
-    return result;
+    const transient = entry.latest.coverage.state === "unavailable";
+    if (transient && entry.lastGood)
+      return { observation: entry.lastGood, freshness: "stale", failure: entry.latest.coverage, forced, throttled };
+    return { observation: entry.latest, freshness: transient ? "unknown" : "fresh", failure: transient ? entry.latest.coverage : null, forced, throttled };
+  }
+  async capabilities(scope: ScopeBinding): Promise<CapabilityProjection[]> {
+    const bound = owners.filter((owner) => scope.owners[owner]);
+    const observed = await Promise.all(bound.map(async (owner) => [owner, await this.observeOwner(owner)] as const));
+    return observed.map(([owner, entry]) => {
+      const connection = this.config.providers?.[owner];
+      const stale = entry?.freshness === "stale";
+      const observation = entry
+        ? { ...entry.observation.capability, ...(stale ? { readiness: "stale" as const, blocker: entry.failure?.reason || "owner_observation_stale" } : {}) }
+        : { state: "needs_configuration" as const, readiness: "needs_configuration" as const, observed_at: new Date().toISOString(), provider_refs: [], model_refs: connection?.model_refs || [], voice_refs: [], bindings: [], diagnostic: null, blocker: "provider_not_configured", ...normalizeCreativeContract(null) };
+      const model = connection?.model_refs?.[0] || observation.model_refs[0] || (owner === "eikona" ? "openai/gpt-image-2.5-sunburst" : owner === "scaena" ? "seedance25-ark-text-1080p" : "sonora/voice");
+      return { id: owner + ":" + modalityFor[owner], owner, modality: modalityFor[owner], name: owner[0].toUpperCase() + owner.slice(1), model_ref: model, state: observation.state, transport: "mcp" as const, supports_live_submit: observation.state === "configured" && !stale, observed_at: observation.observed_at, readiness: observation.readiness, submit_gate: "disabled_by_default" as const, provider_refs: observation.provider_refs, model_refs: [...new Set([model, ...observation.model_refs])], voice_refs: observation.voice_refs, bindings: observation.bindings, diagnostic: observation.diagnostic, blocker: observation.blocker, input_modes: observation.input_modes, reference_roles: observation.reference_roles, timeline_support: observation.timeline_support, output_constraints: observation.output_constraints, input_schema_ref: observation.input_schema_ref, limits: observation.limits };
+    });
   }
   async create(input: ProviderRunRequest, scope: ScopeBinding, _session: Session): Promise<ProviderRunProjection> {
     this.validate(input, scope);

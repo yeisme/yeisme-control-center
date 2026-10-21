@@ -226,3 +226,31 @@ export const projectMetadata = sqliteTable(
 );
 
 export const schemaVersion = sql`-- schema managed by drizzle-kit; see server/db/migrations`;
+
+/** Control-center observations of owner catalog entries: ids and digests only, never schemas or bodies. */
+export const toolCatalogEntries = sqliteTable(
+  "tool_catalog_entries",
+  {
+    id: text("id").primaryKey(),
+    scopeId: text("scope_id").notNull(),
+    owner: text("owner").notNull(),
+    kind: text("kind").notNull(),
+    entryId: text("entry_id").notNull(),
+    digest: text("digest").notNull(),
+    baseline: integer("baseline", { mode: "boolean" }).notNull().default(false),
+    firstSeenAt: text("first_seen_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+    changedAt: text("changed_at"),
+    removedAt: text("removed_at"),
+  },
+  (t) => [index("tool_catalog_scope_idx").on(t.scopeId, t.owner, t.kind)],
+);
+
+/** First complete read of an owner entry kind; entries seen then are a baseline, not "added". */
+export const toolCatalogBaselines = sqliteTable("tool_catalog_baselines", {
+  id: text("id").primaryKey(),
+  scopeId: text("scope_id").notNull(),
+  owner: text("owner").notNull(),
+  kind: text("kind").notNull(),
+  establishedAt: text("established_at").notNull(),
+});

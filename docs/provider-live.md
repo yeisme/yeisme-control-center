@@ -33,7 +33,16 @@ bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --vid
 
 控制中心默认只做以下只读观察：
 
-- Scaena：读取 `scaena://video-tasks/guide`、binding 能力、`getVideoProviderTask` 和 `reconcileVideoProviderTask`。
-- Sonora：读取 provider、model、voice 目录、`credential.status` 和 `doctor.run`。
+- 全部 owner：`initialize` 与分页 `tools/list`（最多 5 页）；发现阶段的 `tools/call` 只允许下列只读诊断，其余一律在本地拒绝。
+- Eikona：读取 `eikona://runtime/capabilities`，observer 凭据也可读。`eikona://models/readiness` 和 `eikona://channels` 需要 provider 连接，被拒时 coverage 记为 `partial`。
+- Scaena：读取 `scaena://video-tasks/guide`（binding、`channel.summary.v1`、latest_policy、原生渠道）、`getProjectMediaCapabilities`、`getVideoProviderTask` 和 `reconcileVideoProviderTask`。
+- Sonora：读取 `sonora://capabilities`（动作注册表与 readiness 矩阵）、provider/model/voice 目录、`credential.status` 和 `doctor.run`。
+
+AI 创作的能力合同只从上述发现结果推导：
+- Scaena：启用 binding 的 `task_mode`，text 推导为文生视频，reference 为图生视频，frames 为首尾帧关键帧；
+- Eikona：未标为 unavailable/blocked 的 `generate/edit/upscale` 动作；
+- Sonora：`voice.audition`。
+
+owner 没有实现的 `<owner>://creative-input/contract` 不再读取。音乐等需要 plan 与 approval 的多步流程只在“模型与工具”中展示，不进入 AI 创作。
 
 页面加载不执行 `voice.audition` 或 `createVideoProviderTask`，也不自动刷新 Sonora 远程 catalog。`credential_missing`、`InvalidApiKey`、binding disabled 和 owner unavailable 会分别保留为配置、Provider、能力或服务阻塞状态。

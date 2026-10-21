@@ -19,6 +19,7 @@ import { createMemoryDB, type ControlDB } from "../server/db/client";
 import {
   delegationToken,
   observerToken,
+  providerToken,
   serviceToken,
   startFakeOwners,
 } from "./fixtures/fake-owners";
@@ -103,7 +104,12 @@ const config: ServerConfig = {
     sonora: { origin: owners.origins.sonora, audience: audience("sonora"), credential_ref: serviceRef },
   },
   connections: [connection("fx-eikona", "eikona", "rain-reunion"), connection("fx-sonora", "sonora", "rain-reunion")],
+  providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
+    owner, endpoint: `${owners.origin}/provider/${owner}`, credential_env: "YEISME_CONTRACT_PROVIDER_TOKEN", enabled: true,
+    ...(owner === "scaena" ? { project: "rain-reunion" } : {}),
+  }])),
 };
+process.env.YEISME_CONTRACT_PROVIDER_TOKEN = providerToken;
 
 const db: ControlDB = createMemoryDB();
 const auth = new SessionAuth(config, undefined, new SessionStore(db));
@@ -326,6 +332,37 @@ try {
     assert.equal(response.status, 200);
     assert.equal(json.state, "complete");
     assert.ok(json.text.includes("雨停了"));
+  });
+
+  await check("tool catalog projects read-only owner discovery without secrets", async () => {
+    const { response, json } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`);
+    assert.equal(response.status, 200);
+    assert.equal(json.schema_version, "yeisme.tool_catalog.v1");
+    assert.deepEqual(json.servers.map((server: { owner: string; coverage: string }) => `${server.owner}:${server.coverage}`), ["eikona:readable", "scaena:readable", "sonora:readable", "aigora:needs_contract", "gateway:needs_contract", "auctra:needs_contract"]);
+    assert.equal(json.tools.filter((tool: { owner: string }) => tool.owner === "eikona").length, 3, "paginated tools/list was followed");
+    assert.ok(json.models.some((model: { status: string }) => model.status === "historical"));
+    assert.ok(json.actions.some((action: { name: string; risk: string }) => action.name === "music.generate" && action.risk === "paid_external"));
+    assert.deepEqual(json.changes, []);
+    const body = JSON.stringify(json);
+    for (const secret of [providerToken, observerToken, serviceToken, delegationToken]) assert.equal(body.includes(secret), false);
+    const { json: capabilities } = await call(`/api/control-center/v1/capabilities?scope=${scopeIds[0]}`);
+    const video = capabilities.capabilities.find((row: { owner: string }) => row.owner === "scaena");
+    assert.deepEqual(video.input_modes, ["text_to_video", "image_to_video", "keyframe_video"]);
+    assert.equal(video.submit_gate, "disabled_by_default");
+  });
+
+  await check("tool catalog records owner drift after the baseline and rejects writes", async () => {
+    await fetch(`${owners.origin}/__fixture/catalog-revision?value=1`);
+    const { json } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}&refresh=1`);
+    assert.equal(json.refresh.forced, true);
+    const changes = json.changes.map((change: { owner: string; kind: string; entry_id: string; change: string }) => `${change.owner}:${change.kind}:${change.entry_id}:${change.change}`);
+    assert.ok(changes.includes("eikona:model:black-forest/flux-2-pro@openrouter:added"), changes.join(","));
+    assert.ok(changes.includes("eikona:channel:legacy-gateway:removed"), changes.join(","));
+    const { json: throttled } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}&refresh=1`);
+    assert.equal(throttled.refresh.throttled, true);
+    const { response } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`, "POST", {});
+    assert.equal(response.status, 405);
+    await fetch(`${owners.origin}/__fixture/catalog-revision?value=0`);
   });
 
   await check("audit trail is admin-readable and redacted", async () => {

@@ -18,6 +18,8 @@ import { ActionService, type PreviewRecord } from "./actions";
 import type { ActionConfirmRequest, ActionPreviewRequest, ActionReceipt } from "../src/shared/action-contract";
 import { createMemoryDB, type ControlDB } from "./db/client";
 import { NotificationStore, attentionStates, type FailureFact } from "./notifications";
+import { ToolCatalogService } from "./tool-catalog";
+import { ToolCatalogStore } from "./db/tool-catalog-store";
 import {
   ProviderRunManager,
   type ProviderRunRequest,
@@ -126,6 +128,7 @@ export function createApp(
     projectMetadata = new ProjectMetadataStore(db),
     audit = new AuditStore(db),
     notifications = new NotificationStore(db),
+    catalog = new ToolCatalogService(providers, new ToolCatalogStore(db)),
     media = new MediaBridge(tasks, undefined, audit),
     actions = new ActionService(),
     cursorKey = randomBytes(32);
@@ -669,6 +672,10 @@ export function createApp(
           session.personal && url.searchParams.get("observe") === "1" ? await tasks.observe(scope) : [])));
       if (r.method === "GET" && path === "/capabilities")
         return json(withEpoch(session, { scope: scope.id, capabilities: await providers.capabilities(scope) }));
+      if (path === "/tool-catalog") {
+        if (r.method !== "GET") return methodNotAllowed(["GET"]);
+        return json(withEpoch(session, await catalog.snapshot(scope, { refresh: url.searchParams.get("refresh") === "1" })));
+      }
       if (r.method === "GET" && path === "/usage")
         return json(withEpoch(session, {
           scope: scope.id,
