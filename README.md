@@ -57,6 +57,22 @@ bun run preview:real
 YEISME_PREVIEW_BIND=0.0.0.0 YEISME_PREVIEW_UI_HOST=0.0.0.0 bun run preview:real
 ```
 
+`preview:real` 的 API 以 `bun --watch` 启动，服务端改动会自动重启，会话保存在临时配置旁的 SQLite 中。
+
+单独运行 `bun run dev` 时，Vite 默认把 `/api/control-center` 代理到 4312 上的已安装发布版，此时服务端改动不会生效；启动时日志会打印代理目标。需要验证服务端改动时，使用 `preview:real` 或 `preview:fixture`。
+
+机器相关的开发预览设置（指向已安装发布版的控制来源 origin、允许访问的 Host）放在被 git 忽略的 `.local/dev-preview.json`，也可用环境变量 `V18_CONTROL_ORIGIN` 和 `V18_ALLOWED_HOSTS`（逗号分隔）。仓库不保存真实地址，文件格式如下：
+
+```json
+{ "control_origin": "https://<host>:<port>", "allowed_hosts": ["<host>"] }
+```
+
+视觉证据矩阵（夹具、亮/暗、390 和 2048 Inspector）：
+
+```bash
+VISUAL_LABEL=after bun run test:visual-matrix
+```
+
 ## 运行边界
 
 - live 默认只读，不存在 demo 回退。

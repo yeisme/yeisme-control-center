@@ -12,6 +12,7 @@ const local: { control_origin?: string; allowed_hosts?: string[] } = (() => {
 })();
 const controlOrigin = process.env.V18_CONTROL_ORIGIN || local.control_origin || "http://127.0.0.1:4312";
 const controlOriginUrl = new URL(controlOrigin);
+const apiOrigin = process.env.V18_API_ORIGIN || "http://127.0.0.1:4312";
 
 export default defineConfig(() => ({
   root: "app",
@@ -20,6 +21,15 @@ export default defineConfig(() => ({
   plugins: [
     react(),
     tailwindcss(),
+    {
+      name: "control-center-api-target",
+      apply: "serve",
+      configureServer() {
+        // 4312 is the installed release server: proxying there means server-side changes are not live.
+        const release = !process.env.V18_API_ORIGIN;
+        console.info(`[control-center] /api/control-center → ${apiOrigin}${release ? " (release server; server changes are not live — use bun run preview:real or preview:fixture)" : ""}`);
+      },
+    },
     {
       name: "control-center-docs",
       apply: "build",
@@ -56,7 +66,7 @@ export default defineConfig(() => ({
     fs: { allow: [".."] },
     proxy: {
       "/api/control-center": {
-        target: process.env.V18_API_ORIGIN || "http://127.0.0.1:4312",
+        target: apiOrigin,
         changeOrigin: true,
         configure(proxy) {
           proxy.on("proxyReq", (request) => {

@@ -79,7 +79,9 @@ process.once("SIGINT", async () => { await stop(); process.exit(130); });
 process.once("SIGTERM", async () => { await stop(); process.exit(143); });
 
 try {
-  const server = start("bun", ["server/index.ts"], {
+  // --watch restarts the API on server changes so the live preview never runs stale routes;
+  // sessions survive restarts because the preview database lives next to the temp config.
+  const server = start("bun", ["--watch", "--no-clear-screen", "server/index.ts"], {
     YEISME_CONTROL_CONFIG: configRef,
     YEISME_CONTROL_BIND: bind,
     YEISME_CONTROL_ORIGIN: origin,

@@ -74,6 +74,12 @@ journalctl --user -u yeisme-control-center.service --since today
 
 停止控制中心不会停止 owner 服务，也不会删除任务、资产或凭据。发布切换必须先通过候选构建和组件验证；失败时恢复 `previous_release`，不得覆盖开发目录。
 
+组件验证默认在 4313 启动候选服务。该端口被开发预览占用时，验证会以 `verification_port_in_use` 失败，而不会误测占用端口的服务；改用空闲端口：
+
+```bash
+YEISME_RELEASE_VERIFY_PORT=4350 bun scripts/verify-release-component.ts <candidate-run>
+```
+
 ## Provider 与 owner 状态
 
 Provider transport、action contract、任务观测、内容读取和真实生成分别验收。`configured`、`transport verified` 或 `tools/list` 成功都不能直接推导业务 ready。真实 canary 只允许在明确预算和 owner 授权下运行：
