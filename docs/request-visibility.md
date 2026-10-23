@@ -1,5 +1,7 @@
 # 请求信息、工作区与多租户
 
+2026-10-21 对账：正文与 Eikona 附件的后续实现见归档 [request-content-visibility-v2](../openspec/changes/archive/2026-10-17-yeisme-request-content-visibility-v2/design.md)；当前接口边界以 [interfaces.md](interfaces.md) 为准。本轮新增任务只补 owner/任务族覆盖、Scaena/Sonora 附件合同和实际授权证据，旧 4/8 不表示需要重建已有代码。
+
 正式客户端只使用真实模式；不存在独立 demo 入口，普通读取失败绝不切换为样例。
 
 ## 布局与交互
@@ -38,7 +40,7 @@
 
 Scaena保留OrganizationID；Sonora/Eikona当前查询合同以owner project作为权限边界，控制中心显式映射到平台租户。不构造二者尚不存在的跨项目租户全局管理。
 
-平台目录仅列授权范围；成员角色保留owner原始角色。邀请、角色变更、配额写入与停用仅在演示模式。真实读取未接通时返回缺口，而非展示演示成员。
+平台目录仅列授权范围；成员角色保留 owner 原始角色。当前没有演示模式。Control Center 自有组织、团队、共享项目 grants 与用户管理使用本地具名 action；owner 成员、邀请和配额写入仍须对应领域合同，不能由中央角色直接授予。真实读取未接通时返回缺口。
 
 ## 错误与恢复
 
@@ -46,4 +48,4 @@ Scaena保留OrganizationID；Sonora/Eikona当前查询合同以owner project作�
 
 ## 当前工程边界
 
-已实现本地客户端、OIDC会话框架、固定只读聚合、三owner元数据列表/汇总、Aigora范围核验与归档适配、Eikona业务输入独立授权读取、Sonora/Scaena历史未采集状态的审计化内容合同、双侧工作区、设计演示及测试。**不宣称四服务已在日常内网接通**。归档正文、附件完整元数据与传输、各任务族覆盖、完整组织目录、owner委托交换仍按能力矩阵验收；这些未完成项保留在各owner OpenSpec。
+本地实现包括客户端、OIDC/个人会话、范围化聚合、三 owner 元数据列表/汇总、Aigora 范围核验与归档适配、按需正文及 Eikona 附件传输。Sonora/Scaena 的业务文本增量与未采集状态仍按各任务族区分，不能把某一族可读扩大为所有输入/输出/附件可读。四服务的当前实际授权读取、Scaena/Sonora 附件和组织成员委托继续逐项验收，证据边界见 [当前状态](current-status.md)。

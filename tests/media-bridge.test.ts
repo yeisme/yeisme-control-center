@@ -46,6 +46,15 @@ function setup(mime = "image/png", status = 200, name = "结果") {
     ),
   };
 }
+it("requests the thumbnail variant and rejects a video body for a small preview", async () => {
+  const { bridge, artifact, detail, fetcher } = setup("image/jpeg");
+  detail.mockResolvedValue({ results: [{ ref: "ref", thumbnail: { state: "ready" } }] } as never);
+  const handle = await bridge.issue(session, scope, "t", "ref", "thumbnail");
+  expect(artifact).toHaveBeenCalledWith("t", scope, "ref", "thumbnail");
+  const key = handle.url.split("/").pop()!.split("?")[0];
+  fetcher.mockResolvedValue(new Response(new Uint8Array([1]), { headers: { "Content-Type": "video/mp4", "Content-Length": "1" } }));
+  await expect(bridge.read(key, new Request("http://localhost"), session, scope)).rejects.toThrow("media_limits_exceeded");
+});
 it("bounds concurrent transfers and releases capacity when a client aborts without draining", async () => {
   const { bridge, fetcher, detail } = setup();
   fetcher.mockImplementation(

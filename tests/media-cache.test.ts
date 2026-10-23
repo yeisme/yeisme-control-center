@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { MediaSessionCache } from "../src/app/media-cache";
 
 describe("media session cache", () => {
+  it("discards a late response after identity change without creating an object URL", async () => {
+    let resolve!: (value: { blob: Blob; expiresAt: number }) => void;
+    const createObjectURL = vi.fn(() => "blob:late");
+    const cache = new MediaSessionCache({ createObjectURL });
+    cache.setIdentity("actorA|orgA|projectA|epoch1");
+    const pending = cache.load("same", () => new Promise((done) => { resolve = done; }));
+    cache.setIdentity("actorB|orgB|projectB|epoch2");
+    resolve({ blob: new Blob(["private"]), expiresAt: Date.now() + 10000 });
+    expect(await pending).toBeNull(); expect(createObjectURL).not.toHaveBeenCalled(); expect(cache.get("same")).toBeNull();
+  });
   it("deduplicates loads and evicts least recently used entries", async () => {
     const revoked: string[] = [];
     let created = 0;

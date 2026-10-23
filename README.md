@@ -4,6 +4,8 @@ Yeisme Control Center 是正式 TypeScript React 前端：默认读取真实授�
 
 领域状态仍由 Eikona、Scaena、Sonora 和其他 owner 持有。owner 未提供项目进度、制作单元、审阅或交付合同的字段保持未知，不使用 fixture 补齐。
 
+后续交付从 [完成方案](docs/completion-roadmap.md)、[前端接口补齐](docs/frontend-api-completion.md) 和 [收尾任务](openspec/changes/yeisme-control-center-completion-v1/tasks.md) 进入。接口文档区分当前实现与拟议增量；方案完成不代表新增接口或真实交付完成。
+
 ## 常用命令
 
 ```bash

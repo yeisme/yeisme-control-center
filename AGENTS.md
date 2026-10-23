@@ -1,6 +1,6 @@
 # Yeisme 控制中心
 
-独立 TypeScript React/Vite/Bun 客户端，server/ 为同源只读聚合层。领域请求、内容档案、身份授权、资产及账本归各 owner。应用只使用真实正式接口，不保留 demo 模式或 fixture 回退。禁止静默回退演示、浏览器服务密钥、日志/证据正文、远程 Shell、生产写操作和 race。
+独立 TypeScript React/Vite/Bun 客户端，server/ 为同源聚合与协作服务。控制中心拥有组织、团队、共享项目授权、文件夹、成果引用与通知阅读状态；领域请求、内容档案、owner 身份授权、原始资产与费用账本归各 owner。应用只使用真实正式接口，不保留 demo 模式或 fixture 回退。禁止静默回退演示、浏览器服务密钥、日志/证据正文、远程 Shell、生产写操作和 race。
 
 现行界面为 Yeisme Control Center，根入口使用 HashRouter 和统一 App Shell，默认真实只读。项目、任务、资产、能力和用量边界继续由 owner 合同决定。不得恢复旧 AdminCN/v17 页面或历史设计入口。保留其他工作区改动。不得创建远程仓、提交推送、部署真实服务、新增 IdP 注册或更改实际授权。
 

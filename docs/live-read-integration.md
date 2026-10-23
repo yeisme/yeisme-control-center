@@ -1,5 +1,7 @@
 # 正式只读接入运行说明
 
+本文聚焦只读接入。当前完整同源路由与本地协作写动作见 [接口说明](interfaces.md)，后续合同/证据缺口见 [完成方案](completion-roadmap.md)。文中原始最小读取列表不代表全部现行路由；真实组织委托、Provider 和部署验收各自独立。
+
 启动默认没有身份或管理权限。先通过 `node scripts/configure-server.mjs` 生成0600本地配置；正式oidc配置由运行owner提供，禁止把测试站点Cookie当作此客户端会话。
 
 配置形状由 server/contracts.ts 的 ServerConfig 定义：origin/port、oidc(issuer/clientId/clientSecretRef)、principals(issuer/subject/name/scopes)、owners(origin/audience)。SecretRef为0600文件引用；授权配置没有演示默认principal。用户访问通过scope.id选择已绑定范围，不能自报actor或owner地址。
@@ -18,7 +20,7 @@ OIDC发现仅接受与issuer同源的端点，非loopback要求HTTPS；不跟随
 - GET `/api/control-center/v1/organization?scope=...`：当前来源成员投影。
 - POST `/api/control-center/v1/auth/logout`：撤销本地会话。
 
-除以上具名操作外不提供任意HTTP转发、生成、取消、重试或管理写入。内容、身份与查询响应都no-store。会话和游标签名密钥为进程内状态，重启需重新登录/查询，不作为多副本生产会话实现。
+不提供任意 HTTP 转发或远程 Shell。具名生成、取消与管理 action 受当前 descriptor、角色、owner 权限和提交门限制，不能因登录或只读可用推断已授权。内容、身份与查询响应均 no-store；重启后的会话与回执恢复以当前 SQLite/服务实现验证，不把历史进程内会话说明当作多副本生产保证。
 
 ## 验收分层
 

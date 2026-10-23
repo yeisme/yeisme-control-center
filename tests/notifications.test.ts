@@ -134,11 +134,11 @@ describe("failure reminders", () => {
     expect(reminders.list(scope, "s1", "user-a")[0]).toMatchObject({ presence: "stale", task_state: "failed" });
   });
 
-  it("does not leak reminders across scope, session, or subject", () => {
+  it("keeps a recipient's reminders across sessions while isolating scope and subject", () => {
     const reminders = store();
     reminders.sync({ scopeId: scope, sessionId: "s1", subject: "user-a", observed: [fact()] });
     expect(reminders.list("scope-b", "s1", "user-a")).toHaveLength(0);
-    expect(reminders.list(scope, "s2", "user-a")).toHaveLength(0);
+    expect(reminders.list(scope, "s2", "user-a")).toHaveLength(1);
     expect(reminders.list(scope, "s1", "user-b")).toHaveLength(0);
     expect(() => reminders.acknowledge(reminders.list(scope, "s1", "user-a")[0]!.id, "scope-b", "s1", "user-a")).toThrowError(AuthError);
   });
@@ -184,7 +184,7 @@ function call(app: (request: Request) => Promise<Response>, path: string, method
 }
 
 describe("notification http boundary", () => {
-  it("rejects task deletion and scopes reminder reads to the signed-in session", async () => {
+  it("rejects unverified browser failure facts and isolates recipient reads", async () => {
     const auth = new SessionAuth(config);
     const first = session();
     const second = session({ id: "session-b", subject: "other", csrf: "csrf-b" });
@@ -212,7 +212,7 @@ describe("notification http boundary", () => {
     const synced = await call(scopedApp, "/notifications/sync?scope=scope-a", "POST", { tasks: [snapshot], present_task_keys: ["task-1"], complete: true }, first);
     expect(synced.status).toBe(200);
     const body = await synced.json() as { unread: number; owner_writes: number };
-    expect(body.unread).toBe(1);
+    expect(body.unread).toBe(0);
     expect(body.owner_writes).toBe(0);
     const other = await call(scopedApp, "/notifications?scope=scope-a", "GET", undefined, second);
     expect(other.status).toBe(200);

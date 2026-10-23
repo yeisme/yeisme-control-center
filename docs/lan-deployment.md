@@ -74,6 +74,8 @@ journalctl --user -u yeisme-control-center.service --since today
 
 停止控制中心不会停止 owner 服务，也不会删除任务、资产或凭据。发布切换必须先通过候选构建和组件验证；失败时恢复 `previous_release`，不得覆盖开发目录。
 
+含数据库迁移的发布，在切换前先做升级演练：用 SQLite 自带的 `VACUUM INTO` 复制运行中的配置库（不要直接拷贝 WAL 文件），用不含任何 owner 连接的最小配置、在副本上启动候选包，确认迁移条数增加、既有表行数不变、`PRAGMA integrity_check` 为 `ok`、没有外键违规；再用当前线上版本启动同一份已升级的副本，确认回滚只需恢复 unit。切换前另存一份同样方式生成的恢复点备份，权限 0600，放在控制中心状态目录下的 `backups/`。演练副本用完即删。
+
 组件验证默认在 4313 启动候选服务。该端口被开发预览占用时，验证会以 `verification_port_in_use` 失败，而不会误测占用端口的服务；改用空闲端口：
 
 ```bash
