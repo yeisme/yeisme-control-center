@@ -26,7 +26,7 @@ import {
 import type { ServerConfig, TaskConnection } from "../server/contracts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const ownerPort = 4330;
+const ownerPort = Number(process.env.CONTRACT_OWNER_PORT || 4330);
 const apiPort = 4331;
 const origin = `http://127.0.0.1:${apiPort}`;
 const username = "contract-admin";
@@ -95,6 +95,7 @@ const config: ServerConfig = {
       id, tenant: "rain-studio", team: "rain-studio", project: "rain-reunion", label: "Contract scope",
       connection_ids: ["fx-eikona", "fx-sonora"],
       owners: Object.fromEntries(["aigora", "eikona", "scaena", "sonora"].map((owner) => [owner, { tenant: "rain-studio", project: "rain-reunion", actor: username, audience: audience(owner) }])),
+      collection: { auctra: { tenant: "rain-studio", project: "rain-reunion", actor: username, audience: audience("auctra") } },
     })),
   }],
   owners: {
@@ -103,6 +104,8 @@ const config: ServerConfig = {
     eikona: { origin: owners.origins.eikona, audience: audience("eikona"), credential_ref: serviceRef },
     sonora: { origin: owners.origins.sonora, audience: audience("sonora"), credential_ref: serviceRef },
   },
+  collection: { auctra: { origin: owners.origin, audience: audience("auctra"), credential_ref: serviceRef, enabled: true } },
+  clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
   connections: [connection("fx-eikona", "eikona", "rain-reunion"), connection("fx-sonora", "sonora", "rain-reunion")],
   providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
     owner, endpoint: `${owners.origin}/provider/${owner}`, credential_env: "YEISME_CONTRACT_PROVIDER_TOKEN", enabled: true,
@@ -157,7 +160,7 @@ try {
     assert.equal(json.epoch, 1);
     assert.equal(json.role, "admin");
     assert.equal(json.scopes[0].id, scopeIds[0]);
-    assert.equal(json.scopes[0].owners.length, 4);
+    assert.equal(json.scopes[0].owners.length, 5);
     csrf = json.csrf;
     assert.ok(csrf);
   });
@@ -363,6 +366,51 @@ try {
     const { response } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`, "POST", {});
     assert.equal(response.status, 405);
     await fetch(`${owners.origin}/__fixture/catalog-revision?value=0`);
+  });
+
+  await check("episode board: explicit Auctra sync, then rails built from live Auctra + Scaena reads", async () => {
+    const sync = await call(`/api/control-center/v1/auctra/collection/sync?scope=${scopeIds[0]}`, "POST", {});
+    assert.equal(sync.response.status, 200);
+    assert.equal(sync.json.coverage, "complete");
+    const { response, json } = await call(`/api/control-center/v1/drama/episodes?scope=${scopeIds[0]}&read=all`);
+    assert.equal(response.status, 200);
+    assert.equal(json.schema_version, "yeisme.drama_episodes.v1");
+    assert.deepEqual(json.rows.map((row: { episode_ref: string }) => row.episode_ref), ["ep-01", "ep-02", "ep-03"], "only screenplay units are episodes");
+    const state = (ref: string, stage: string) => json.rows.find((row: { episode_ref: string }) => row.episode_ref === ref).flow.rail.find((node: { stage: string }) => node.stage === stage).state;
+    assert.equal(state("ep-01", "production_breakdown"), "accepted");
+    assert.equal(state("ep-02", "creative_storyboard"), "waiting_review");
+    assert.equal(state("ep-02", "production_breakdown"), "not_started", "Scaena has nothing for ep-02 yet");
+    assert.equal(state("ep-03", "production_handoff"), "stale");
+    assert.equal(json.universe.bound, true);
+  });
+
+  await check("episode detail: head breakdown outline is structure only, and Scaena's own episode ref can be named", async () => {
+    const { json } = await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}&episode_ref=ep-01`);
+    assert.equal(json.outline.head_breakdown_ref, "bd-ep01-v3");
+    assert.equal(json.outline.older_attempts, 2);
+    assert.equal(json.outline.scene_count, 3);
+    assert.equal(json.outline.shot_count, 11);
+    const body = JSON.stringify(json);
+    for (const forbidden of ["action_summary", "content_ref", "representation_ref", "media_type", "Authorization", "Bearer", serviceToken, delegationToken, observerToken]) assert.equal(body.includes(forbidden), false, forbidden);
+    const plain = await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}&episode_ref=ep-03`);
+    assert.equal(plain.json.outline, undefined);
+    const named = await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}&episode_ref=ep-03&scaena_episode_ref=${encodeURIComponent("episode:03")}`);
+    assert.equal(named.json.scaena_episode_overridden, true);
+    assert.equal(named.json.rail.find((node: { stage: string }) => node.stage === "production_breakdown").state, "in_progress");
+  });
+
+  await check("work queue reads flows only for known episodes and reports real attention", async () => {
+    const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}`);
+    const flow = json.items.filter((item: { workflow_stage?: string }) => item.workflow_stage).map((item: { workflow_stage: string; kind: string }) => `${item.workflow_stage}:${item.kind}`).sort();
+    assert.deepEqual(flow, ["creative_storyboard:review_required", "production_handoff:service_blocked"]);
+    assert.equal(json.items.some((item: { title: string }) => item.title === "剧本到分镜流程暂不可读"), false);
+  });
+
+  await check("episode board rejects malformed references and unknown scopes", async () => {
+    assert.equal((await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}&episode_ref=${encodeURIComponent("a\nb")}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/drama/episodes?scope=forged`)).response.status, 404);
+    assert.equal((await call(`/api/control-center/v1/drama/episodes?scope=${scopeIds[0]}`, "POST", {})).response.status, 405);
   });
 
   await check("audit trail is admin-readable and redacted", async () => {

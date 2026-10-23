@@ -72,7 +72,7 @@ export function wav(seconds: number, frequency: number) {
 
 // --- Task observation rows ---
 
-export interface ResultSpec { ref: string; name: string; mime: string; bytes: number; width?: number; height?: number; duration_ms?: number; state: string; media: string; thumbnail?: { state: "ready" | "unavailable" | "forbidden" | "needs_contract" } }
+export interface ResultSpec { ref: string; name: string; mime: string; bytes: number; width?: number; height?: number; duration_ms?: number; state: string; media: string; thumbnail?: { state: "ready" | "unavailable" | "forbidden" | "needs_contract"; ref?: string } }
 export interface TaskSpec {
   owner: Owner;
   connection: string;
@@ -156,7 +156,7 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
     const [from, to] = colorFor(index);
     const bytes = png(width, height, from, to);
     media.set(key, { mime: "image/png", bytes });
-    return { ref: `eikona://artifact/${key}`, name, mime: "image/png", bytes: bytes.length, width, height, state: "candidate", media: key, thumbnail: { state: "ready" } };
+    return { ref: `eikona://artifact/${key}`, name, mime: "image/png", bytes: bytes.length, width, height, state: "candidate", media: key, thumbnail: { state: "ready", ref: `eikona://artifact/${key}#thumbnail` } };
   };
   const audio = (key: string, name: string, seconds: number, frequency: number): ResultSpec => {
     const bytes = wav(seconds, frequency);

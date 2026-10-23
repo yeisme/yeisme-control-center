@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { buildRequests, buildWorld, png, taskRow, type RequestRow, type Scenario, type TaskSpec } from "./world";
 import { eikonaChannels, eikonaModels, eikonaRuntimeCapabilities, providerTools, scaenaGuide, sonoraDiscovery } from "./provider-catalog";
+import { buildDramaWorld, type DramaReply } from "./drama-world";
 
 export const observerToken = "fixture-observer-token";
 export const providerToken = "fixture-provider-token";
@@ -25,6 +26,8 @@ const json = (body: unknown, status = 200) => Response.json(body, { status });
 /** One fake process plays every owner: task MCP, provider MCP, request/org HTTP APIs and media bytes. */
 export function startFakeOwners(options: FakeOwnerOptions) {
   const world = buildWorld(options.scenario, options.videoBytes);
+  const drama = buildDramaWorld(options.scenario);
+  const relay = (reply: DramaReply) => reply.body === undefined ? new Response(null, { status: reply.status }) : json(reply.body, reply.status);
   const grants = new Map<string, { media: string; expires: number }>();
   const requestsByScope = new Map(options.scopes.map((scope) => [scope.project, buildRequests(options.scenario, scope.tenant, scope.project)]));
   const origin = `http://127.0.0.1:${options.port}`;
@@ -86,8 +89,12 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       const grant = task && grantFor(task, ref);
       if (!grant) return json({ jsonrpc: "2.0", id: body.id, result: { isError: true, structuredContent: { error: { code: "ARTIFACT_NOT_FOUND" } } } });
       const id48 = grant.id + hex(16);
-      grants.set(id48, grants.get(grant.id)!);
-      return json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: { result: { data: { schema_version: "eikona.artifact_access_grant.v1", expires_at: new Date(Date.now() + 110_000).toISOString() } } }, content: [{ type: "resource_link", uri: `${origin}/api/v1/artifact-access/acc_${id48}` }] } });
+      if (args.variant === "thumbnail") {
+        const mediaKey = `thumbnail:${id48}`;
+        world.media.set(mediaKey, { mime: "image/png", bytes: png(96, 72, [30, 40, 50], [100, 120, 140]) });
+        grants.set(id48, { media: mediaKey, expires: Date.now() + 90_000 });
+      } else grants.set(id48, grants.get(grant.id)!);
+      return json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: { result: { data: { schema_version: "eikona.artifact_access_grant.v1", ...(args.variant === "thumbnail" ? { variant: "thumbnail" } : {}), expires_at: new Date(Date.now() + 110_000).toISOString() } } }, content: [{ type: "resource_link", uri: `${origin}/api/v1/artifact-access/acc_${id48}` }] } });
     }
     if (action === "control_center.tasks.artifact_access" && spec) {
       const grant = grantFor(spec, String(args.artifact_ref || ""));
@@ -300,6 +307,16 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       if (scaenaMembers) return options.scenario === "degraded" ? new Response(null, { status: 503 }) : json({ data: [{ actor_id: "lin.zhou", role: "director" }, { actor_id: "chen.xu", role: "editor" }] });
       const scaenaRequests = path.match(/^\/api\/v1\/projects\/[^/]+\/control-center(\/requests.*)$/);
       if (scaenaRequests) return requestApi("scaena", url, scaenaRequests[1], request.method, bodyText);
+      const auctraInvoke = path.match(/^\/v1\/operations\/([^/]+):invoke$/);
+      if (auctraInvoke && request.method === "POST") {
+        let body: { operation_id?: unknown; args?: unknown };
+        try { body = JSON.parse(bodyText || "{}"); } catch { return json({ error: { code: "INVALID_ARGUMENT", message: "request body is invalid" } }, 400); }
+        const operationId = decodeURIComponent(auctraInvoke[1]);
+        if (body.operation_id !== undefined && body.operation_id !== operationId) return json({ error: { code: "INVALID_ARGUMENT", message: "operation_id does not match the path" } }, 400);
+        return relay(drama.invoke(operationId, body.args && typeof body.args === "object" ? body.args as Record<string, unknown> : {}));
+      }
+      const scaenaStoryboard = path.match(/^\/api\/v1\/projects\/([^/]+)\/storyboard$/);
+      if (scaenaStoryboard && request.method === "GET") return relay(drama.storyboard(decodeURIComponent(scaenaStoryboard[1]), url.searchParams));
       return new Response(null, { status: 404 });
     },
   });

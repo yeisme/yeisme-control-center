@@ -16,6 +16,8 @@ import { hashPassword } from "../server/password";
 import type { ServerConfig, TaskConnection } from "../server/contracts";
 import { delegationToken, observerToken, providerToken, startFakeOwners } from "./fixtures/fake-owners";
 import { usageSeed, type Scenario } from "./fixtures/world";
+import { buildDramaWorld } from "./fixtures/drama-world";
+import { AuctraCollectionStore } from "../server/db/auctra-collection-store";
 
 const root = resolve(import.meta.dirname, "..");
 const scenario = (["rich", "degraded", "empty"].includes(process.env.FIXTURE_SCENARIO || "") ? process.env.FIXTURE_SCENARIO : "rich") as Scenario;
@@ -78,6 +80,8 @@ const config: ServerConfig = {
       label: scope.label,
       connection_ids: scope.connections,
       owners: Object.fromEntries(["aigora", "eikona", "scaena", "sonora"].map((owner) => [owner, { tenant: scope.tenant, project: scope.project, actor: "fixture-admin", audience: audience(owner) }])),
+      // Only the first scope is connected to Auctra, so the second exercises the "no Auctra connection" state.
+      ...(scope.id === "fixture-a" ? { collection: { auctra: { tenant: scope.tenant, project: scope.project, actor: "fixture-admin", audience: audience("auctra") } } } : {}),
     })),
   }],
   owners: {
@@ -86,6 +90,8 @@ const config: ServerConfig = {
     eikona: { origin: owners.origins.eikona, audience: audience("eikona") },
     sonora: { origin: owners.origins.sonora, audience: audience("sonora") },
   },
+  collection: { auctra: { origin: owners.origin, audience: audience("auctra"), enabled: true } },
+  clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
   connections: [
     connection("fx-eikona", "eikona", "rain-reunion", "Eikona · 图像生产", { allow_cancel: true }),
     connection("fx-sonora", "sonora", "rain-reunion", "Sonora · 配音与音乐"),
@@ -104,6 +110,14 @@ const config: ServerConfig = {
 const db = createMemoryDB();
 const runs = new RunStore(db);
 for (const scope of scopes) for (const event of usageSeed(scenario, scope.project, scope.id === "fixture-a" ? 36 : 8)) runs.putUsage(event);
+// The episode list reads the local Auctra index, which a real deployment fills with an explicit sync. Seed it here the way usage is
+// seeded; in `degraded` it still comes from the healthy world, because an owner outage happens after an earlier successful sync.
+const collection = new AuctraCollectionStore(db);
+const indexWorld = buildDramaWorld(scenario === "empty" ? "empty" : "rich");
+for (const scope of scopes.filter((candidate) => candidate.id === "fixture-a")) {
+  const data = ((indexWorld.invoke("collection.snapshot", { project_ref: scope.project, limit: 200 }).body as { data?: { project_ref: string; total: number; records: never[] } })?.data);
+  if (data) collection.upsertSnapshot(scope.id, { schema_version: "auctra.collection.snapshot.v1", owner: "auctra", scope: scope.id, project_ref: data.project_ref, observed_at: new Date().toISOString(), coverage: "complete", freshness: "fresh", returned: data.records.length, total: data.total, records: data.records });
+}
 const auth = new SessionAuth(config, undefined, new SessionStore(db));
 const app = createApp(config, { db, auth, providers: new ProviderRunManager(config, undefined, runs) });
 
@@ -113,7 +127,7 @@ async function handle(request: Request) {
   if (request.method === "POST" && new URL(request.url).pathname.endsWith("/auth/personal") && response.status === 200) {
     const id = response.headers.getSetCookie().map((cookie) => cookie.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
     const session = id ? auth.sessions.get(id) : undefined;
-    if (id && session) auth.sessions.set(id, { ...session, accessToken: delegationToken, accessAudience: ["aigora", "eikona", "scaena", "sonora"].map(audience) });
+    if (id && session) auth.sessions.set(id, { ...session, accessToken: delegationToken, accessAudience: ["aigora", "auctra", "eikona", "scaena", "sonora"].map(audience) });
   }
   return response;
 }
@@ -127,7 +141,7 @@ const api = createHttpServer(async (req, res) => {
     let bytes = 0;
     for await (const chunk of req) {
       bytes += chunk.length;
-      const limit = url.pathname.includes("/notifications/") ? 262144 : 16384;
+      const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 262144 : 16384;
       if (bytes > limit) { res.writeHead(413).end(); return; }
       chunks.push(chunk);
     }
@@ -153,7 +167,7 @@ process.env.V18_API_ORIGIN = origin;
 process.env.V18_CONTROL_ORIGIN = origin;
 const vite = withVite ? await createViteServer({
   configFile: resolve(root, "vite.config.ts"),
-  cacheDir: resolve(root, "node_modules/.vite-fixture"),
+  cacheDir: resolve(root, `node_modules/.vite-fixture-${uiPort}`),
   server: { host: uiHost, port: uiPort, strictPort: true },
   logLevel: "warn",
 }) : null;

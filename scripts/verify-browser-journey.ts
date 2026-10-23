@@ -68,7 +68,11 @@ async function login(page: Page) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       await page.goto(`http://127.0.0.1:${ports.ui}/`, { waitUntil: "domcontentloaded" });
-      await page.getByLabel("用户名").waitFor({ state: "visible", timeout: 10_000 });
+      await Promise.any([
+        page.getByLabel("用户名").waitFor({ state: "visible", timeout: 20_000 }),
+        page.locator('[data-page="home"]').waitFor({ state: "visible", timeout: 20_000 }),
+      ]);
+      if (await page.locator('[data-page="home"]').count()) return;
       await page.getByLabel("用户名").fill("fixture-admin");
       await page.getByLabel("个人访问凭据").fill(password);
       await page.getByRole("button", { name: /登录 Workspace/ }).click();
@@ -79,7 +83,8 @@ async function login(page: Page) {
       if (attempt < 2) await page.waitForTimeout(750);
     }
   }
-  throw lastError;
+  const body = (await page.locator("body").innerText()).slice(0, 240);
+  throw new Error(`fixture_login_failed: ${lastError instanceof Error ? lastError.message.slice(0, 120) : "unknown"}; body=${body}`);
 }
 
 const executablePath = process.env.CHROME_PATH || (await fs.stat("/usr/bin/google-chrome").then(() => "/usr/bin/google-chrome").catch(() => undefined));
@@ -113,7 +118,7 @@ try {
     if (!body.includes("需要处理") || !body.includes("服务状态")) throw new Error("home surface incomplete");
   });
   await check("page headers stay compact while retaining accessible names", async () => {
-    for (const route of ["projects", "tasks", "assets", "requests", "review", "services", "capabilities", "usage", "team", "reminders", "creation"]) {
+    for (const route of ["projects", "drama", "tasks", "assets", "requests", "review", "services", "capabilities", "usage", "team", "reminders", "creation"]) {
       await page.goto(`${ui}/#/${route}`, { waitUntil: "domcontentloaded" });
       await page.locator(`[data-page]`).first().waitFor();
       if (await page.locator("h1:not(.sr-only)").count()) throw new Error(`visible_page_title:${route}`);
@@ -479,10 +484,10 @@ try {
     await page.getByText("读取请求正文").first().waitFor();
     await page.getByText("申请结果句柄").first().waitFor();
   });
-  await check("organization shows per-source members and needs_contract", async () => {
+  await check("personal organization directory rejects service credential fallback", async () => {
     await page.getByRole("tab", { name: "成员" }).click();
-    await page.getByText("林舟").first().waitFor();
-    await page.getByText(/待补齐接口/).first().waitFor();
+    await page.getByText(/所有成员来源都不可读/).waitFor();
+    await expect(page.getByText("林舟", { exact: true })).toHaveCount(0);
   });
   await check("usage keeps unknown cost unknown and currencies separate", async () => {
     await page.goto(`${ui}/#/usage`, { waitUntil: "domcontentloaded" });
@@ -491,12 +496,130 @@ try {
     if (!body.includes("未知")) throw new Error("unknown cost not shown");
     await shot(page, "usage");
   });
+  const rail = (row: ReturnType<Page["locator"]>) => row.locator('ol[aria-label="阶段链"] li[data-stage]');
+  const stateOf = async (row: ReturnType<Page["locator"]>, stage: string) => row.locator(`ol[aria-label="阶段链"] li[data-stage="${stage}"]`).getAttribute("data-state");
+  await check("drama board lists every episode with a five-stage rail and one next step", async () => {
+    await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
+    const refs = await page.locator("li[data-episode]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-episode")));
+    if (refs.join(",") !== "ep-01,ep-02,ep-03") throw new Error("episodes:" + refs.join(","));
+    for (const ref of refs) if (await rail(page.locator(`li[data-episode="${ref}"]`)).count() !== 5) throw new Error("rail_size:" + ref);
+    const expected: Record<string, Record<string, string>> = {
+      "ep-01": { production_breakdown: "accepted", production_handoff: "accepted" },
+      "ep-02": { creative_storyboard: "waiting_review", production_handoff: "missing", production_breakdown: "not_started" },
+      "ep-03": { production_handoff: "stale", production_breakdown: "not_started" },
+    };
+    for (const [ref, stages] of Object.entries(expected)) for (const [stage, state] of Object.entries(stages)) {
+      const actual = await stateOf(page.locator(`li[data-episode="${ref}"]`), stage);
+      if (actual !== state) throw new Error(`${ref}.${stage}=${actual} expected ${state}`);
+    }
+    const text = await page.locator("main").innerText();
+    if (!text.includes("待审阅：创意分镜（Auctra）") || !text.includes("需处理：制作交接（Auctra）")) throw new Error("next_step_missing");
+    if (/waiting review|waiting_review|source_not_accepted/.test(text)) throw new Error("state_code_leaked_into_ui");
+    if (!await page.locator("li[data-episode=\"ep-02\"] ol li[aria-current=\"step\"]").count()) throw new Error("current_stage_unmarked");
+    await shot(page, "drama-list");
+  });
+  await check("drama inspector shows structure only and never body text, prompts or media", async () => {
+    await page.goto(`${ui}/#/drama?episode=ep-01`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-inspector-section='outline']").waitFor({ timeout: 20_000 });
+    const outline = await page.locator("[data-inspector-section='outline']").innerText();
+    if (!outline.includes("3 场 · 11 镜") || !outline.includes("更早尝试") || !outline.includes("2 次")) throw new Error("outline_summary:" + outline.slice(0, 160));
+    if (/close_up|eye_level|over_the_shoulder|push_in/.test(outline)) throw new Error("camera_tokens_not_localized");
+    const raw = await page.evaluate(async () => (await fetch("/api/control-center/v1/drama/episode?scope=fixture-a&episode_ref=ep-01")).text());
+    for (const forbidden of ["action_summary", "content_ref", "representation_ref", "media_type", "Authorization", "Bearer"]) if (raw.includes(forbidden)) throw new Error("leaked:" + forbidden);
+    await page.locator("[data-drama-inspector]").screenshot({ path: path.join(run, "artifacts", "drama-inspector-ep-01.png") });
+  });
+  await check("a different Scaena episode ref can be named and is only a read parameter", async () => {
+    await page.goto(`${ui}/#/drama?episode=ep-03`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-inspector-section='chain']").waitFor({ timeout: 20_000 });
+    await page.getByText("Scaena 中没有引用为「ep-03」的拆解").waitFor({ timeout: 10_000 });
+    const before = await page.locator('[data-inspector-section="chain"] li[data-stage="production_breakdown"]').first().getAttribute("data-state");
+    if (before !== "not_started") throw new Error("before:" + before);
+    await page.getByRole("textbox", { name: "指定 Scaena 使用的剧集引用" }).fill("episode:03");
+    await page.getByRole("button", { name: "应用" }).click();
+    await page.waitForFunction(() => document.querySelector('[data-inspector-section="chain"] li[data-stage="production_breakdown"]')?.getAttribute("data-state") === "in_progress", null, { timeout: 15_000 });
+    if (hashParams(page).get("scaena_episode") !== "episode:03") throw new Error("override_not_in_url");
+    await page.getByRole("button", { name: "清除" }).click();
+    await page.waitForFunction(() => document.querySelector('[data-inspector-section="chain"] li[data-stage="production_breakdown"]')?.getAttribute("data-state") === "not_started", null, { timeout: 15_000 });
+    if (hashParams(page).has("scaena_episode")) throw new Error("override_not_cleared");
+  });
+  await check("owner hand-off offers command templates and a configured MuWeave link without opening anything", async () => {
+    await page.goto(`${ui}/#/drama?episode=ep-01`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-inspector-section='handoff']").waitFor({ timeout: 20_000 });
+    const handoff = await page.locator("[data-inspector-section='handoff']").innerText();
+    if (!handoff.includes("auctra plan storyboard show") || !handoff.includes("scaena storyboard breakdown show")) throw new Error("command_templates_missing");
+    const open = page.locator("[data-inspector-section='handoff']").getByRole("button", { name: "打开", exact: true }).first();
+    if (!await open.isEnabled()) throw new Error("muweave_open_disabled");
+    // window.open with noopener always returns null, so a "fallback" on null navigates the control center away as well.
+    const before = page.url();
+    // Nothing listens on the fixture's MuWeave origin; a stub body lets the popup keep the real launch URL instead of an error page.
+    await context.route("http://127.0.0.1:4399/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>muweave fixture</title>" }));
+    const [popup] = await Promise.all([context.waitForEvent("page", { timeout: 10_000 }), open.click()]);
+    await popup.waitForLoadState("domcontentloaded").catch(() => {});
+    const target = popup.url();
+    await popup.close().catch(() => {});
+    if (page.url() !== before) throw new Error(`control_center_navigated_away:${page.url()}`);
+    if (!target.startsWith("http://127.0.0.1:4399/") || !/episode=ep-01/.test(target)) throw new Error("unexpected_launch_target:" + target);
+  });
+  await check("episode rows are valid markup and expose every stage state to assistive tech", async () => {
+    await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
+    if (await page.locator("li[data-episode] button ol, li[data-episode] button li").count()) throw new Error("list_inside_button");
+    const row = page.locator('li[data-episode="ep-02"]');
+    const names = await row.locator('ol[aria-label="阶段链"] li .sr-only').allInnerTexts();
+    if (names.length !== 5 || !names.includes("创意分镜：待审阅（Auctra）") || !names.includes("制作拆解：未开始（Scaena）")) throw new Error("stage_states_not_exposed:" + names.join("|"));
+    if (!await row.getByRole("button", { name: "第 2 集 · 末班车" }).count()) throw new Error("title_button_name");
+  });
+  await check("closing the inspector returns focus to the episode row and Escape closes it", async () => {
+    await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
+    const row = page.locator('li[data-episode="ep-02"] button');
+    await row.click();
+    await page.locator("[data-drama-inspector]").waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator("[data-drama-inspector]").waitFor({ state: "detached" });
+    await page.waitForFunction(() => document.activeElement?.closest("li")?.getAttribute("data-episode") === "ep-02", null, { timeout: 5_000 });
+    if (hashParams(page).has("episode")) throw new Error("episode_param_not_cleared");
+  });
+  await check("drama board stays within the viewport on a phone and opens the inspector as a dialog", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+      await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
+      const widths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+      if (widths.scroll > widths.inner) throw new Error(`overflow:${widths.scroll}>${widths.inner}`);
+      await page.locator('li[data-episode="ep-02"] button').click();
+      await page.getByRole("dialog", { name: "剧集详情" }).waitFor();
+      await shot(page, "drama-phone-inspector");
+    } finally {
+      await page.setViewportSize({ width: 1440, height: 960 });
+    }
+  });
+  await check("review page points stage reviews to their owner and keeps adoption disabled", async () => {
+    await page.goto(`${ui}/#/review`, { waitUntil: "domcontentloaded" });
+    const panel = page.locator("section", { hasText: "剧集阶段审阅" }).first();
+    await panel.getByText("第 2 集 · 末班车").waitFor({ timeout: 20_000 });
+    const text = await panel.innerText();
+    if (!text.includes("创意分镜") || !text.includes("控制中心不代为决定")) throw new Error("stage_review_copy:" + text.slice(0, 200));
+    if (!await page.getByRole("button", { name: /采用/ }).first().isDisabled()) throw new Error("adopt_enabled");
+  });
+  await check("the attention queue reports real episode problems and no phantom contract gap", async () => {
+    const body = await page.evaluate(async () => (await fetch("/api/control-center/v1/work-queue?scope=fixture-a")).json());
+    const flow = body.items.filter((item: { workflow_stage?: string }) => item.workflow_stage).map((item: { workflow_stage: string; kind: string }) => `${item.workflow_stage}:${item.kind}`).sort();
+    if (flow.join(",") !== "creative_storyboard:review_required,production_handoff:service_blocked") throw new Error("flow_items:" + flow.join(","));
+    if (body.items.some((item: { title: string }) => item.title === "剧本到分镜流程暂不可读")) throw new Error("phantom_contract_gap");
+  });
   await check("scope switch never renders the previous scope", async () => {
     await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: /当前授权范围/ }).click();
     await page.getByRole("menuitem", { name: /海岸来信/ }).click();
     await page.locator('[data-task^="run-c-"]').first().waitFor({ timeout: 20_000 });
     if (await page.locator('[data-task="run-2410-active"]').count()) throw new Error("previous scope rows rendered");
+  });
+  await check("a scope without an Auctra connection says so instead of showing another scope's episodes", async () => {
+    await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    await page.getByText("当前范围没有连接 Auctra 收集库").waitFor({ timeout: 20_000 });
+    if (await page.locator('li[data-episode="ep-01"]').count() && (await page.locator('li[data-episode="ep-01"]').innerText()).includes("雨停站台")) throw new Error("previous_scope_episode_rendered");
   });
   await check("logout clears the workspace", async () => {
     await page.getByRole("button", { name: /当前身份/ }).click();
@@ -541,6 +664,16 @@ try {
     await degradedPage.goto(`${ui}/#/requests`, { waitUntil: "domcontentloaded" });
     await degradedPage.getByText(/Scaena.*来源不可用|来源不可用/).first().waitFor({ timeout: 30_000 });
     await shot(degradedPage, "degraded-requests");
+    if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
+  });
+  await check("degraded: owner outage shows read failures on the board instead of invented stage states", async () => {
+    await degradedPage.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    await degradedPage.locator("li[data-episode]").first().waitFor({ timeout: 30_000 });
+    const text = await degradedPage.locator("main").innerText();
+    if (!text.includes("读取失败")) throw new Error("read_failure_not_shown");
+    if (text.includes("已推进到制作拆解")) throw new Error("outage_reported_as_progress");
+    if (await degradedPage.locator("li[data-episode] ol li[data-state='accepted']").count()) throw new Error("accepted_state_invented_during_outage");
+    await shot(degradedPage, "degraded-drama");
     if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
   });
   await degraded.close();

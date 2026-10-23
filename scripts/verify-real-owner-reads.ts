@@ -39,7 +39,7 @@ await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n")
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
   port,
-  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events"],
+  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "drama.episodes", "work-queue"],
   real_owner_reads: true,
   provider_calls: false,
   mutations: false,
@@ -183,6 +183,26 @@ try {
     counts: { tools: catalog.body?.tools?.length || 0, actions: catalog.body?.actions?.length || 0, models: catalog.body?.models?.length || 0, channels: catalog.body?.channels?.length || 0 },
     latest_ready_models: (catalog.body?.models || []).filter((model: any) => model.status === "latest_ready").length,
   } : { status: "route_unavailable" };
+  // Episode board and attention queue are read-only. Record counts, states and coverage only: never refs, titles or bodies.
+  const taskEpisodeRefs = [...new Set([...activeRows, ...historyRows].map((row: any) => row?.episode_ref).filter((ref: unknown): ref is string => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref === ref.trim() && !/[\x00-\x1f\x7f]/.test(ref)))].slice(0, 12);
+  const dramaParams = new URLSearchParams({ scope });
+  for (const ref of taskEpisodeRefs) dramaParams.append("episode_ref", ref);
+  const dramaList = await request(`/api/control-center/v1/drama/episodes?${dramaParams}`, { headers: authHeaders });
+  const queueRead = await request(`/api/control-center/v1/work-queue?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
+  if (queueRead.response.status !== 200) throw new Error(`work_queue_read_failed:${queueRead.response.status}`);
+  const tally = (values: string[]) => values.reduce<Record<string, number>>((acc, value) => ({ ...acc, [value]: (acc[value] || 0) + 1 }), {});
+  const dramaRows: any[] = Array.isArray(dramaList.body?.rows) ? dramaList.body.rows : [];
+  const dramaBoard = dramaList.response.status === 200 ? {
+    status: 200,
+    universe: { bound: dramaList.body?.universe?.bound, coverage: dramaList.body?.universe?.coverage, reason: dramaList.body?.universe?.reason || null, total: dramaList.body?.universe?.total },
+    task_episode_refs_offered: taskEpisodeRefs.length,
+    rows: dramaRows.length,
+    read_states: tally(dramaRows.map((row) => row.read)),
+    rail_states: tally(dramaRows.flatMap((row) => (row.flow?.rail || []).map((node: any) => `${node.owner}:${node.state}`))),
+    source_coverage: tally(dramaRows.flatMap((row) => (row.flow?.source_coverage || []).map((source: any) => `${source.owner}:${source.state}`))),
+    queue_flow_items: (queueRead.body?.items || []).filter((item: any) => item.workflow_stage).length,
+    queue_contract_gap_items: (queueRead.body?.items || []).filter((item: any) => item.object_kind === "creative_flow").length,
+  } : { status: dramaList.response.status, route_unavailable: [404, 405].includes(dramaList.response.status), error: dramaList.body?.error || null };
   summary = {
     schema_version: "yeisme.integration_test_evidence.v1",
     status: "passed",
@@ -193,6 +213,7 @@ try {
     owners: ownerRows,
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
+    drama_board: dramaBoard,
     task_rows: { active: activeRows.length, history: historyRows.length },
     task_checks: taskChecks,
     boundary_checks: boundaryChecks,
@@ -206,6 +227,7 @@ try {
     boundary_checks: boundaryChecks,
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
+    drama_board: dramaBoard,
   }, null, 2) + "\n");
   status = "passed";
   record({ status, owners: ownerRows, provider_discovery: providerStates, task_rows: summary.task_rows, task_checks: taskChecks });
