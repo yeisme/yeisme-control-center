@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { AuthError } from "./auth";
 import type { ControlDB } from "./db/client";
@@ -62,6 +63,9 @@ export interface TaskNotification {
   snoozed_until: string | null;
   last_error_code: string;
   reopened: boolean;
+  category?: string;
+  read_at?: string | null;
+  target_path?: string | null;
 }
 
 export interface NotificationSyncResult {
@@ -89,7 +93,7 @@ export function failureFingerprint(fact: Pick<FailureFact, "scope_id" | "task_ke
 }
 
 export function notificationId(sessionId: string, fingerprint: string) {
-  return `${sessionId}:${fingerprint}`.slice(0, 400);
+  return "notification_" + createHash("sha256").update(JSON.stringify([sessionId, fingerprint])).digest("hex");
 }
 
 export function priorityFor(firstSeenAt: string, now: number, current: NotificationPriority = "normal"): NotificationPriority {
@@ -134,6 +138,7 @@ function toView(row: Row, now = Date.now()): TaskNotification {
     snoozed_until: row.snoozedUntil,
     last_error_code: row.lastErrorCode,
     reopened: row.reopened,
+    category: row.category, read_at: row.readAt, target_path: row.targetPath,
   };
 }
 
@@ -150,12 +155,18 @@ export class NotificationStore {
       .from(taskNotifications)
       .where(and(
         eq(taskNotifications.scopeId, scopeId),
-        eq(taskNotifications.sessionId, sessionId),
         eq(taskNotifications.subject, subject),
       ))
       .orderBy(desc(taskNotifications.lastSeenAt))
       .all();
-    return rows.map((row) => toView(row, now));
+    const unique = new Map<string, TaskNotification>();
+    for (const row of rows) {
+      const key = `${row.category}|${row.failureFingerprint}`;
+      const previous = unique.get(key);
+      const value = toView(row, now);
+      if (!previous || (previous.state === "unread" && value.state !== "unread") || (!previous.read_at && value.read_at)) unique.set(key, value);
+    }
+    return [...unique.values()];
   }
 
   /** Unread reminders still shown on the home attention surface (not yet demoted). */
@@ -164,6 +175,7 @@ export class NotificationStore {
   }
 
   actionable(item: TaskNotification, now = Date.now()) {
+    if (item.category && item.category !== "failure") return false;
     if (item.state !== "unread") return false;
     if (item.presence !== "live") return false;
     if (item.priority !== "normal") return false;
@@ -204,7 +216,6 @@ export class NotificationStore {
       .from(taskNotifications)
       .where(and(
         eq(taskNotifications.scopeId, input.scopeId),
-        eq(taskNotifications.sessionId, input.sessionId),
         eq(taskNotifications.subject, input.subject),
       ))
       .all();
@@ -235,7 +246,7 @@ export class NotificationStore {
         continue;
       }
       if (!opensReminder(true)) continue;
-      const id = notificationId(input.sessionId, fingerprint);
+      const id = notificationId(input.scopeId + "|" + input.subject, fingerprint);
       this.db.insert(taskNotifications).values({
         id,
         scopeId: input.scopeId,
@@ -263,7 +274,7 @@ export class NotificationStore {
     const staled: string[] = [];
     const canMarkAbsent = input.complete !== false && input.presentTaskKeys !== undefined;
     if (canMarkAbsent) for (const row of existing) {
-      if (seenTasks.has(row.taskKey) || row.presence === "stale") continue;
+      if (row.category !== "failure" || seenTasks.has(row.taskKey) || row.presence === "stale") continue;
       if (present.has(row.taskKey)) {
         // Still projected, but no longer a failure fact. Keep the reminder and
         // stop counting it as live. Do not infer that the owner succeeded.
@@ -295,7 +306,7 @@ export class NotificationStore {
 
   private owned(id: string, scopeId: string, sessionId: string, subject: string) {
     const row = this.db.select().from(taskNotifications).where(eq(taskNotifications.id, id)).get();
-    if (!row || row.scopeId !== scopeId || row.sessionId !== sessionId || row.subject !== subject) {
+    if (!row || row.scopeId !== scopeId || row.subject !== subject) {
       throw new AuthError("notification_not_found", 404);
     }
     return row;
@@ -320,7 +331,6 @@ export class NotificationStore {
     const targets = scope === "error_code"
       ? this.db.select().from(taskNotifications).where(and(
         eq(taskNotifications.scopeId, scopeId),
-        eq(taskNotifications.sessionId, sessionId),
         eq(taskNotifications.subject, subject),
         eq(taskNotifications.lastErrorCode, row.lastErrorCode),
       )).all()
@@ -373,7 +383,6 @@ export class NotificationStore {
     const now = input.now || new Date().toISOString();
     const owned = this.db.select().from(taskNotifications).where(and(
       eq(taskNotifications.scopeId, input.scopeId),
-      eq(taskNotifications.sessionId, input.sessionId),
       eq(taskNotifications.subject, input.subject),
     )).all();
     const allowed = new Set(owned.map((row) => row.id));
@@ -393,6 +402,23 @@ export class NotificationStore {
     const row = this.db.select().from(taskNotifications).where(eq(taskNotifications.id, id)).get();
     if (!row) throw new AuthError("notification_not_found", 404);
     return toView(row);
+  }
+
+  read(id: string, scopeId: string, sessionId: string, subject: string) {
+    const current = this.owned(id, scopeId, sessionId, subject);
+    if (!current.readAt) this.db.update(taskNotifications).set({ readAt: new Date().toISOString() }).where(eq(taskNotifications.id, id)).run();
+    return this.requireView(id);
+  }
+
+  /** Server-authored collaboration events share the existing reminder ledger. */
+  event(input: { scope: string; recipient: string; event: string; category: string; title: string; path: string }) {
+    if (!/^\/(projects|creation|reminders)(\?|$)/.test(input.path)) throw new AuthError("invalid_notification_target", 400);
+    const now = new Date().toISOString();
+    const key = notificationId(input.recipient, input.scope + "|" + input.event);
+    this.db.insert(taskNotifications).values({ id: key, scopeId: input.scope, sessionId: "", subject: input.recipient,
+      taskKey: "", failureFingerprint: input.event, category: input.category, title: clip(input.title, 240), targetPath: input.path,
+      firstSeenAt: now, lastSeenAt: now, project: input.scope, owner: "control-center", taskState: "succeeded" }).onConflictDoNothing().run();
+    return key;
   }
 }
 

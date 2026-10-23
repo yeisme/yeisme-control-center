@@ -36,6 +36,34 @@
       "when": 1792506234362,
       "tag": "0004_big_stature",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792568241189,
+      "tag": "0005_misty_black_widow",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792568533606,
+      "tag": "0006_purple_hulk",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792570478671,
+      "tag": "0007_stiff_doctor_faustus",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792571206830,
+      "tag": "0008_careless_jazinda",
+      "breakpoints": true
     }
   ]
 }

@@ -108,6 +108,10 @@ function redact(value: unknown, key = "", depth = 0): unknown {
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 300).map(([childKey, childValue]) => [childKey, redact(childValue, childKey, depth + 1)]));
   return value;
 }
+/** Blockers are short machine tokens. A non-array or an oversized value must not reach code that iterates them. */
+function tokens(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && /^[A-Za-z0-9_.:-]{1,96}$/.test(item)).slice(0, 16) : [];
+}
 function originOf(value: string) { try { return new URL(value).origin; } catch { return null; } }
 function normalizeRecord(value: unknown): AuctraCollectionRecord | null {
   if (!value || typeof value !== "object") return null;
@@ -174,6 +178,9 @@ export class AuctraCollectionReader {
 
   async creativeFlow(scopeID: string, scope: ScopeBinding, session: Session, query: { episode_ref?: string } = {}): Promise<AuctraCreativeFlowSnapshot> {
     const projectRef = scope.collection?.auctra?.project || scope.project;
+    if (!query.episode_ref) {
+      return { schema_version: "auctra.creative_flow_source.v1", owner: "auctra", project_ref: projectRef, episode_ref: "", observed_at: new Date().toISOString(), coverage: "unknown", stages: [], blocker: "episode_ref_required" };
+    }
     try {
       const data = envelopeData(await this.invoke("creative.flow.read", {
         project_ref: projectRef,
@@ -183,6 +190,8 @@ export class AuctraCollectionReader {
       if (data.schema_version !== "auctra.creative_flow_source.v1" || typeof data.project_ref !== "string" || typeof data.episode_ref !== "string" || !Array.isArray(data.stages)) {
         throw new AuthError("needs_contract", 422);
       }
+      // Both owners trim refs; an echo that differs from what was asked means the stages describe some other episode.
+      if (query.episode_ref && data.episode_ref !== query.episode_ref) throw new AuthError("needs_contract", 422);
       const stages = data.stages.filter((value): value is AuctraCreativeFlowStage => {
         if (!value || typeof value !== "object") return false;
         const stage = value as Record<string, unknown>;
@@ -190,7 +199,8 @@ export class AuctraCollectionReader {
       }).map((stage) => ({
         ...stage,
         source_current: stage.source_current === true,
-        safe_refs: Array.isArray(stage.safe_refs) ? stage.safe_refs.filter((value): value is string => typeof value === "string").slice(0, 32) : [],
+        blockers: tokens((stage as { blockers?: unknown }).blockers),
+        safe_refs: Array.isArray(stage.safe_refs) ? stage.safe_refs.filter((value): value is string => typeof value === "string" && !!opaque(value)).slice(0, 32) : [],
       }));
       if (stages.length !== data.stages.length) throw new AuthError("needs_contract", 422);
       return {
@@ -199,11 +209,15 @@ export class AuctraCollectionReader {
         project_ref: text(data.project_ref) || projectRef,
         episode_ref: text(data.episode_ref),
         observed_at: text(data.observed_at, 80) || new Date().toISOString(),
-        coverage: text(data.coverage, 32) === "stale" ? "expired" : ((text(data.coverage, 32) as CoverageState) || "unknown"),
+        // Auctra reports `partial` until every stage is accepted and current. That is pipeline progress, which each stage's
+        // own state already carries; treating it as a data gap would flag the first accepted stage as needing attention.
+        coverage: text(data.coverage, 32) === "stale" ? "expired" : text(data.coverage, 32) === "partial" ? "complete" : ((text(data.coverage, 32) as CoverageState) || "unknown"),
         stages,
       };
     } catch (error) {
-      const failedCoverage = stateFor(error);
+      // A scope with no Auctra connection at all is a missing contract, not a denied or broken owner.
+      const unbound = !this.config.collection?.auctra || this.config.collection.auctra.enabled === false || !scope.collection?.auctra;
+      const failedCoverage = unbound ? "needs_contract" : stateFor(error);
       return {
         schema_version: "auctra.creative_flow_source.v1",
         owner: "auctra",
@@ -212,7 +226,7 @@ export class AuctraCollectionReader {
         observed_at: new Date().toISOString(),
         coverage: failedCoverage === "stale" ? "expired" : failedCoverage,
         stages: [],
-        blocker: error instanceof AuthError ? error.code : "owner_unavailable",
+        blocker: unbound ? "source_not_configured" : error instanceof AuthError ? error.code : "owner_unavailable",
       };
     }
   }

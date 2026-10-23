@@ -73,7 +73,7 @@ createServer(async (req, res) => {
       let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        const limit = url.pathname.includes("/notifications/") ? 262144 : 16384;
+        const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 262144 : 16384;
         if (bytes > limit) {
           res.writeHead(413);
           res.end();

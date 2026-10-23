@@ -104,6 +104,21 @@ export class AuctraCollectionStore {
     return { rows: filtered.slice(offset, offset + limit), total: filtered.length, nextCursor: offset + limit < filtered.length ? offset + limit : undefined };
   }
 
+  /** Episodes as Auctra itself counts them: screenplay text units. Archived rows are hidden; no owner call is made. */
+  episodeUnits(scopeId: string) {
+    const rows = this.db.select().from(auctraCollectionRecords).where(and(eq(auctraCollectionRecords.scopeId, scopeId), eq(auctraCollectionRecords.recordKind, "text_unit"))).all();
+    const units = new Map<string, { unit_ref: string; record_ref: string; project_ref: string; title: string; status: string; updated_at: string; source_state: AuctraCollectionRecordView["source_state"] }>();
+    for (const row of rows) {
+      if (!row.unitRef || row.collectionState === "archived" || !["screenplay", "screenplay_scene"].includes(row.kind || "")) continue;
+      const item = view(row);
+      const updated = item.updated_at || item.last_seen_at;
+      const existing = units.get(row.unitRef);
+      if (existing && existing.updated_at >= updated) continue;
+      units.set(row.unitRef, { unit_ref: row.unitRef, record_ref: row.recordRef, project_ref: row.projectRef, title: item.title || "", status: item.status || "", updated_at: updated, source_state: item.source_state });
+    }
+    return [...units.values()].sort((a, b) => a.unit_ref.localeCompare(b.unit_ref, "en", { numeric: true }));
+  }
+
   coverage(scopeId: string): { state: "complete" | "stale" | "unknown"; observed_at?: string } {
     const rows = this.db.select({ lastSeenAt: auctraCollectionRecords.lastSeenAt, sourceState: auctraCollectionRecords.sourceState }).from(auctraCollectionRecords).where(eq(auctraCollectionRecords.scopeId, scopeId)).all();
     if (!rows.length) return { state: "unknown" };

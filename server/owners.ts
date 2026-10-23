@@ -235,6 +235,18 @@ export function businessText(v: any, direction: "input" | "output") {
   return texts.join("\n\n").slice(0, 65536);
 }
 export class OwnerReaders {
+  /** Fixed owner batch routes only; callers cannot supply an outbound URL. */
+  async imageBatch(operation: "input" | "plan" | "submit" | "reconcile" | "members" | "snapshot", s: Session, scope: ScopeBinding, body: Record<string, unknown>, key?: string) {
+    const project = scope.owners.eikona?.project;
+    if (!project) throw new AuthError("project_binding_required", 409);
+    const value = { ...body, project_ref: project };
+    const paths = { input: "/api/v1/owner/batch-inputs", plan: "/api/v1/owner/batch-input/plan", submit: "/api/v1/owner/batches:submit", reconcile: "/api/v1/owner/batches:reconcile", members: "/api/v1/owner/batch-members", snapshot: "/api/v1/owner/batch-input" };
+    const read = operation === "plan" || operation === "members" || operation === "snapshot";
+    const raw = await this.request("eikona", s, scope, paths[operation] + (read ? "?" + new URLSearchParams(Object.entries(value).map(([k, v]) => [k, String(v)])) : ""), read ? {} : { method: "POST", headers: { ...(key ? { "Idempotency-Key": key } : {}) }, body: JSON.stringify(value) });
+    const result = raw.data || raw;
+    if (result.project_ref !== project) throw new AuthError("generation_scope_mismatch", 403);
+    return result;
+  }
   constructor(
     private config: ServerConfig,
     private fetcher: typeof fetch = fetch,
@@ -658,6 +670,11 @@ export class OwnerReaders {
     return result;
   }
   async organization(owner: Owner, s: Session, scope: ScopeBinding) {
+    // Member directories require the caller's organization delegation. Observer
+    // and service credentials must never turn a personal login into a member reader.
+    const target = this.config.owners[owner];
+    if (s.personal || s.expires <= Date.now() || !target || !s.accessToken || !s.accessAudience.includes(target.audience))
+      throw new AuthError("delegation_unavailable", 403);
     const { b } = this.binding(owner, s, scope);
     if (owner === "aigora") {
       const v = await this.request(

@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AuthError } from "./auth";
+import { and, eq } from "drizzle-orm";
+import { createMemoryDB, type ControlDB } from "./db/client";
+import { actionRecords } from "./db/schema";
+import { collaborationActions } from "../src/shared/collaboration";
 import type {
   ActionConfirmRequest,
   ActionDescriptor,
@@ -14,6 +18,7 @@ import { actionNames } from "../src/shared/action-contract";
  
 
 const actionDescriptors: ActionDescriptor[] = [
+  ...collaborationActions.map((action): ActionDescriptor => ({ action, owner: "control-center", target_kinds: ["organization", "project"], risk_tier: action === "generation.batch.submit" ? "paid" : "write", availability: "available" })),
   { action: "task.cancel", owner: "control-center", target_kinds: ["task"], risk_tier: "write", availability: "available" },
   { action: "provider_runs.create", owner: "control-center", target_kinds: ["provider_run"], risk_tier: "paid", availability: "available" },
   { action: "provider_runs.reconcile", owner: "control-center", target_kinds: ["provider_run"], risk_tier: "write", availability: "available" },
@@ -37,6 +42,7 @@ const actionDescriptors: ActionDescriptor[] = [
 ];
 
 interface PreviewRecord {
+  context?: string;
   request: ActionPreviewRequest;
   preview: ActionPreview;
   createdAt: number;
@@ -62,6 +68,16 @@ function digest(value: unknown) {
 function sanitizeInput(action: ControlAction, input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new AuthError("invalid_action_input", 400);
   const allowed: Record<ControlAction, string[]> = {
+    "organization.create": ["name", "source_scope"],
+    "organization.member.set": ["identity", "role", "status"],
+    "team.create": ["name"], "team.members.set": ["team_id", "member_ids"],
+    "project.create": ["name", "team_id", "admin_member_id", "bindings"], "project.update": ["name", "hidden", "generation_enabled", "budget_cap", "currency"],
+    "project.members.set": ["grants"], "project.bindings.set": ["bindings"],
+    "folder.create": ["name", "parent_id"], "folder.rename": ["name", "folder_id", "folder_revision"],
+    "item.move": ["folder_id", "item_ids"],
+    "generation.input.prepare": ["owner", "rows"],
+    "generation.batch.create": ["name", "items", "idempotency_key"],
+    "generation.batch.submit": ["batch_id"], "generation.batch.reconcile": ["batch_id"],
     "task.cancel": ["confirm", "expected_revision", "idempotency_key"],
     "provider_runs.create": ["mode", "owner", "modality", "model_ref", "scope_id", "project_ref", "prompt", "budget_cap", "idempotency_key", "trace_ref", "generation_mode", "references", "timeline", "output", "variant_count"],
     "provider_runs.reconcile": ["run_ref"],
@@ -82,6 +98,13 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
     "project.metadata.unhide": ["expected_revision"],
   };
   const record = input as Record<string, unknown>;
+  const strictRows = (key: string, fields: string[], maximum: number) => {
+    if (record[key] === undefined) return;
+    if (!Array.isArray(record[key]) || record[key].length > maximum || record[key].some((v) => !v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).some((k) => !fields.includes(k)))) throw new AuthError("invalid_action_input", 400);
+  };
+  if (action === "project.members.set") strictRows("grants", ["subject_type", "subject_id", "role"], 200);
+  if (action === "project.bindings.set" || action === "project.create") strictRows("bindings", ["owner", "project_ref", "source_scope", "connection_ids"], 10);
+  if (action === "generation.input.prepare") strictRows("rows", ["id", "prompt", "prompt_ref", "model_ref", "size", "aspect", "candidate_count", "references", "folder_id"], 50);
   if (Object.keys(record).some((key) => !allowed[action].includes(key))) throw new AuthError("invalid_action_input", 400);
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 10000) : value]));
 }
@@ -90,13 +113,15 @@ export class ActionService {
   private previews = new Map<string, PreviewRecord>();
   private receipts = new Map<string, ActionReceipt>();
   private receiptScopes = new Map<string, string>();
+  private receiptActors = new Map<string, string>();
+  constructor(private db: ControlDB = createMemoryDB()) {}
 
   list(owner?: string): ActionDescriptor[] {
     if (!owner || owner === "all") return actionDescriptors.map((item) => ({ ...item, target_kinds: [...item.target_kinds] }));
     return actionDescriptors.filter((item) => item.owner === owner).map((item) => ({ ...item, target_kinds: [...item.target_kinds] }));
   }
 
-  preview(input: ActionPreviewRequest): ActionPreview {
+  preview(input: ActionPreviewRequest, actor = "legacy"): ActionPreview {
     if (!actionNames.includes(input.action)) throw new AuthError("action_not_allowlisted", 403);
     const action = descriptor(input.action, input.owner);
     const scopeId = safeString(input.scope_id, "scope_id", 128);
@@ -105,6 +130,13 @@ export class ActionService {
     const idempotencyKey = safeString(input.idempotency_key, "idempotency_key", 128);
     if (!/^[-a-zA-Z0-9_]{16,100}$/.test(idempotencyKey)) throw new AuthError("invalid_action_idempotency_key", 400);
     const normalizedInput = sanitizeInput(input.action, input.input);
+    const context = `${actor}|${scopeId}`;
+    const requestDigest = digest({ ...input, input: normalizedInput });
+    const existing = this.db.select().from(actionRecords).where(and(eq(actionRecords.context, context), eq(actionRecords.key, idempotencyKey))).get();
+    if (existing) {
+      if (existing.requestDigest !== requestDigest) throw new AuthError("action_idempotency_conflict", 409);
+      return JSON.parse(existing.preview);
+    }
     if (!action.target_kinds.includes(input.target_kind)) throw new AuthError("action_target_kind_not_supported", 409);
     const previewRef = "preview_" + randomUUID().replaceAll("-", "");
     const preview: ActionPreview = {
@@ -113,24 +145,51 @@ export class ActionService {
       expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
       normalized_input: normalizedInput,
       blockers: action.availability === "available" ? [] : [action.reason || "action_unavailable"],
-      required_approvals: action.risk_tier === "admin" || action.risk_tier === "paid" ? ["control_center_admin"] : [],
+      required_approvals: input.action === "generation.batch.submit" ? ["project_creator_with_budget"] : action.risk_tier === "admin" || action.risk_tier === "paid" ? ["control_center_admin"] : [],
       availability: action.availability,
     };
-    this.previews.set(previewRef, { request: { ...input, scope_id: scopeId, target_ref: targetRef, expected_revision: expectedRevision, idempotency_key: idempotencyKey, input: normalizedInput }, preview, createdAt: Date.now() });
+    this.previews.set(previewRef, { context, request: { ...input, scope_id: scopeId, target_ref: targetRef, expected_revision: expectedRevision, idempotency_key: idempotencyKey, input: normalizedInput }, preview, createdAt: Date.now() });
+    // Bodies belong to owners; persist only the ref-based collaboration commands.
+    const safe = !["provider_runs.create", "admin.user.create"].includes(input.action);
+    if (safe) {
+      const persistedInput = input.action === "generation.input.prepare" ? { owner: normalizedInput.owner, input_digest: digest(normalizedInput) } : normalizedInput;
+      this.db.insert(actionRecords).values({ id: previewRef, context, key: idempotencyKey, requestDigest, request: JSON.stringify({ ...input, input: persistedInput }), preview: JSON.stringify({ ...preview, normalized_input: persistedInput }), createdAt: Date.now() }).run();
+    }
     return preview;
   }
 
-  confirm(input: ActionConfirmRequest, execute: (record: PreviewRecord) => Promise<ActionReceipt>): Promise<ActionReceipt> {
-    const preview = this.previews.get(input.preview_ref);
-    if (!preview || preview.createdAt + 10 * 60_000 < Date.now()) throw new AuthError("action_preview_expired", 410);
+  record(previewRef: string, actor = "legacy", scope?: string): PreviewRecord {
+    const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, previewRef)).get();
+    if (stored) {
+      const request: ActionPreviewRequest = JSON.parse(stored.request);
+      if (stored.context !== `${actor}|${scope || request.scope_id}`) throw new AuthError("scope_denied", 403);
+      const cached = this.previews.get(previewRef);
+      return cached || { context: stored.context, request, preview: JSON.parse(stored.preview), createdAt: stored.createdAt, ...(stored.receipt ? { receiptRef: (JSON.parse(stored.receipt) as ActionReceipt).receipt_ref } : {}) };
+    }
+    const record = this.previews.get(previewRef);
+    if (!record) throw new AuthError("action_preview_expired", 410);
+    if (record.context !== `${actor}|${scope || record.request.scope_id}`) throw new AuthError("scope_denied", 403);
+    return record;
+  }
+
+  confirm(input: ActionConfirmRequest, execute: (record: PreviewRecord) => Promise<ActionReceipt>, actor = "legacy"): Promise<ActionReceipt> {
+    const preview = this.record(input.preview_ref, actor, input.scope_id);
+    const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, input.preview_ref)).get();
     if (preview.request.scope_id !== input.scope_id || preview.preview.preview_digest !== input.preview_digest) throw new AuthError("action_preview_conflict", 409);
     if (preview.request.idempotency_key !== input.idempotency_key) throw new AuthError("action_idempotency_conflict", 409);
-    if (preview.receiptRef) return Promise.resolve(this.receipts.get(preview.receiptRef)!);
+    if (stored?.receipt) return Promise.resolve(JSON.parse(stored.receipt));
+    if (preview.createdAt + 10 * 60_000 < Date.now()) throw new AuthError("action_preview_expired", 410);
+    if (preview.receiptRef) return Promise.resolve(this.receipt(preview.receiptRef, input.scope_id, actor));
     if (preview.receiptPromise) return preview.receiptPromise;
+    if (preview.request.action === "generation.input.prepare" && !Array.isArray(preview.request.input.rows)) throw new AuthError("generation_input_session_expired", 410);
+    if (stored?.started) return Promise.resolve({ ...ActionService.unavailable(preview, "action_reconcile_required"), state: "unknown" });
+    if (stored) this.db.update(actionRecords).set({ started: true }).where(eq(actionRecords.id, stored.id)).run();
     preview.receiptPromise = execute(preview).then((receipt) => {
       preview.receiptRef = receipt.receipt_ref;
       this.receipts.set(receipt.receipt_ref, receipt);
       this.receiptScopes.set(receipt.receipt_ref, preview.request.scope_id);
+      this.receiptActors.set(receipt.receipt_ref, actor);
+      if (stored) this.db.update(actionRecords).set({ receipt: JSON.stringify(receipt) }).where(eq(actionRecords.id, stored.id)).run();
       return receipt;
     }).catch((error) => {
       preview.receiptPromise = undefined;
@@ -139,11 +198,31 @@ export class ActionService {
     return preview.receiptPromise;
   }
 
-  receipt(receiptRef: string, scopeId?: string): ActionReceipt {
+  receipt(receiptRef: string, scopeId?: string, actor = "legacy"): ActionReceipt {
+    if (scopeId) {
+      const records = this.db.select().from(actionRecords).where(eq(actionRecords.context, `${actor}|${scopeId}`)).all();
+      const stored = records.find((r) => r.receipt && (JSON.parse(r.receipt) as ActionReceipt).receipt_ref === receiptRef);
+      if (stored?.receipt) return JSON.parse(stored.receipt);
+    }
     const receipt = this.receipts.get(receiptRef);
-    if (!receipt) throw new AuthError("action_receipt_not_found", 404);
+    if (!receipt || this.receiptActors.get(receiptRef) !== actor) throw new AuthError("action_receipt_not_found", 404);
     if (scopeId && this.receiptScopes.get(receiptRef) !== scopeId) throw new AuthError("scope_denied", 403);
     return receipt;
+  }
+
+  /** Local state and its receipt commit together; a crash cannot duplicate a mutation. */
+  confirmLocal(input: ActionConfirmRequest, execute: (record: PreviewRecord) => ActionReceipt, actor = "legacy"): ActionReceipt {
+    const record = this.record(input.preview_ref, actor, input.scope_id);
+    if (record.request.scope_id !== input.scope_id || record.preview.preview_digest !== input.preview_digest || record.request.idempotency_key !== input.idempotency_key) throw new AuthError("action_preview_conflict", 409);
+    return this.db.transaction(() => {
+      const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, input.preview_ref)).get();
+      if (stored?.receipt) return JSON.parse(stored.receipt) as ActionReceipt;
+      if (!stored || stored.started) throw new AuthError("action_reconcile_required", 409);
+      if (record.createdAt + 600_000 < Date.now()) throw new AuthError("action_preview_expired", 410);
+      const receipt = execute(record);
+      this.db.update(actionRecords).set({ started: true, receipt: JSON.stringify(receipt) }).where(eq(actionRecords.id, stored.id)).run();
+      return receipt;
+    });
   }
 
   static unavailable(record: PreviewRecord, reason: string): ActionReceipt {

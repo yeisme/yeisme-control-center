@@ -13,6 +13,7 @@ import type {
   WorkQueueResponse,
 } from "../src/shared/work-queue";
 import { priorityForWorkItem, sortWorkQueueItems, summarizeWorkQueue } from "../src/shared/work-queue";
+import { dramaStageLabels } from "../src/shared/read-model/drama";
 import type { CoverageState } from "../src/request-visibility";
 import type { CreativeFlowProjection, CreativeFlowStageProjection } from "../src/shared/creative-flow";
 
@@ -230,16 +231,32 @@ export interface WorkQueueInput {
   connections: TaskConnectionState[];
   notifications: TaskNotification[];
   creativeFlow?: CreativeFlowProjection | null;
+  /** One flow per episode; merged with `creativeFlow` when both are given. */
+  creativeFlows?: CreativeFlowProjection[];
+  /** The queue reads only the most recently updated episodes; the response must say so instead of claiming full coverage. */
+  flowSample?: { checked: number; total: number };
   clientOrigins?: { muweave?: string };
 }
 
-function workflowKind(stage: CreativeFlowStageProjection): WorkQueueKind | null {
+/** Auctra reports this for any screenplay that has simply not been accepted yet: progress, not a fault. */
+const neutralBlockers = new Set(["source_not_accepted"]);
+
+/** Once Scaena holds a breakdown for the episode the handoff has been taken up, so "ready to hand off" would be stale. */
+function handoffConsumed(flow: CreativeFlowProjection) {
+  // A breakdown built from an older screenplay has not taken up this handoff.
+  return flow.stages.some((candidate) => candidate.stage === "production_breakdown" && ["accepted", "ready", "in_progress", "waiting_review"].includes(candidate.state) && !candidate.blockers.includes("screenplay_revision_mismatch"));
+}
+
+function workflowKind(stage: CreativeFlowStageProjection, flow: CreativeFlowProjection): WorkQueueKind | null {
+  // A stage nobody has started, or that is running, belongs on the episode board, not in the attention queue.
+  if (stage.state === "missing" || stage.state === "in_progress") return null;
+  if (stage.state === "blocked" && stage.blockers.length > 0 && stage.blockers.every((blocker) => neutralBlockers.has(blocker))) return null;
   if (stage.coverage === "needs_contract") return "contract_gap";
   if (["forbidden", "unavailable", "integrity_failed", "expired"].includes(stage.coverage)) return "service_blocked";
   if (["blocked", "unknown", "stale", "missing", "unavailable", "forbidden"].includes(stage.state)) return "service_blocked";
   if (stage.state === "needs_contract") return "contract_gap";
   if (stage.state === "waiting_review") return "review_required";
-  if (stage.stage === "production_handoff" && ["accepted", "ready", "handoff_ready"].includes(stage.state)) return "handoff_ready";
+  if (stage.stage === "production_handoff" && ["accepted", "ready", "handoff_ready"].includes(stage.state)) return handoffConsumed(flow) ? null : "handoff_ready";
   return null;
 }
 
@@ -251,25 +268,25 @@ function workflowReason(stage: CreativeFlowStageProjection) {
   return stage.state;
 }
 
-function workflowItem(stage: CreativeFlowStageProjection, flow: CreativeFlowProjection, scopeId: string, clientOrigins?: { muweave?: string }, now = Date.now()): WorkQueueItem | null {
-  const kind = workflowKind(stage);
-  if (!kind) return null;
-  const sourceRef = stage.source_ref || `${flow.project_ref}:${stage.stage}`;
+/** Safe owner hand-off for one flow stage: Auctra/Scaena by command template, MuWeave by configured URL. Shared by the queue and the episode board. */
+export function stageOwnerLinks(stage: CreativeFlowStageProjection, flow: CreativeFlowProjection, scopeId: string, clientOrigins?: { muweave?: string }, returnPath = "/"): WorkQueueLink[] {
+  const project = stage.project_ref || flow.project_ref;
+  const sourceRef = stage.source_ref || `${project}:${stage.stage}`;
   const route = stage.stage === "screenplay" || stage.stage === "creative_storyboard" ? "script" as const : stage.stage === "director_plan" ? "director" as const : stage.stage === "production_breakdown" ? "breakdown" as const : "storyboard" as const;
   const auctraCommand = stage.stage === "screenplay"
-    ? `auctra screenplay workspace --project ${shellArg(flow.project_ref)} --json`
+    ? `auctra screenplay workspace --project ${shellArg(project)} --json`
     : stage.stage === "director_plan"
-      ? `auctra plan director show ${shellArg(sourceRef)} --project ${shellArg(flow.project_ref)} --json`
+      ? `auctra plan director show ${shellArg(sourceRef)} --project ${shellArg(project)} --json`
       : stage.stage === "creative_storyboard"
-        ? `auctra plan storyboard show ${shellArg(sourceRef)} --project ${shellArg(flow.project_ref)} --json`
+        ? `auctra plan storyboard show ${shellArg(sourceRef)} --project ${shellArg(project)} --json`
         : stage.stage === "production_handoff"
-          ? `auctra production handoff inspect --project ${shellArg(flow.project_ref)} --target scaena --json`
+          ? `auctra production handoff inspect --project ${shellArg(project)} --target scaena --json`
           : undefined;
-  const scaenaCommand = stage.stage === "production_breakdown" ? `scaena storyboard breakdown show ${shellArg(sourceRef)} --project ${shellArg(flow.project_ref)} --json` : undefined;
+  const scaenaCommand = stage.stage === "production_breakdown" ? `scaena storyboard breakdown show ${shellArg(sourceRef)} --project ${shellArg(project)} --json` : undefined;
   const launch = launchContext({
     owner: stage.owner,
     scopeId,
-    project: flow.project_ref,
+    project: stage.project_ref || flow.project_ref,
     workRef: flow.project_ref,
     operationRef: sourceRef,
     episodeRef: stage.episode_ref || flow.episode_ref,
@@ -278,20 +295,28 @@ function workflowItem(stage: CreativeFlowStageProjection, flow: CreativeFlowProj
     breakdownRef: stage.breakdown_ref,
     sourceRevision: stage.revision,
     targetRoute: route,
-    returnPath: "/",
+    returnPath,
     safeRefs: [sourceRef, ...stage.safe_refs],
   });
-  const muweaveURL = configuredClientURL(clientOrigins?.muweave, route === "breakdown" ? "storyboard" : route === "director" ? "storyboard" : route, { project: flow.project_ref, episode: stage.episode_ref || flow.episode_ref, scene: stage.scene_ref, shot: stage.shot_ref, breakdown: stage.breakdown_ref, revision: stage.revision });
-  const muweaveLaunch = launchContext({ owner: "muweave", scopeId, project: flow.project_ref, workRef: flow.project_ref, operationRef: sourceRef, episodeRef: stage.episode_ref || flow.episode_ref, sceneRef: stage.scene_ref, shotRef: stage.shot_ref, breakdownRef: stage.breakdown_ref, sourceRevision: stage.revision, targetRoute: route === "breakdown" ? "storyboard" : route === "director" ? "storyboard" : route, returnPath: "/", safeRefs: [sourceRef, ...stage.safe_refs], url: muweaveURL });
+  const muweaveURL = configuredClientURL(clientOrigins?.muweave, route === "breakdown" ? "storyboard" : route === "director" ? "storyboard" : route, { project: stage.project_ref || flow.project_ref, episode: stage.episode_ref || flow.episode_ref, scene: stage.scene_ref, shot: stage.shot_ref, breakdown: stage.breakdown_ref, revision: stage.revision });
+  const muweaveLaunch = launchContext({ owner: "muweave", scopeId, project: stage.project_ref || flow.project_ref, workRef: flow.project_ref, operationRef: sourceRef, episodeRef: stage.episode_ref || flow.episode_ref, sceneRef: stage.scene_ref, shotRef: stage.shot_ref, breakdownRef: stage.breakdown_ref, sourceRevision: stage.revision, targetRoute: route === "breakdown" ? "storyboard" : route === "director" ? "storyboard" : route, returnPath, safeRefs: [sourceRef, ...stage.safe_refs], url: muweaveURL });
   const ownerLinks: WorkQueueLink[] = [ownerLink(stage.owner === "auctra" ? "打开 Auctra" : "打开 Scaena", stage.owner === "auctra" ? "auctra" : "scaena", launch, auctraCommand || scaenaCommand)];
   if (muweaveURL || stage.stage === "creative_storyboard" || stage.stage === "production_breakdown") ownerLinks.push(ownerLink("打开 MuWeave", "muweave", muweaveLaunch));
+  return ownerLinks;
+}
+
+function workflowItem(stage: CreativeFlowStageProjection, flow: CreativeFlowProjection, scopeId: string, clientOrigins?: { muweave?: string }, now = Date.now()): WorkQueueItem | null {
+  const kind = workflowKind(stage, flow);
+  if (!kind) return null;
+  const sourceRef = stage.source_ref || `${flow.project_ref}:${stage.stage}`;
+  const ownerLinks = stageOwnerLinks(stage, flow, scopeId, clientOrigins);
   return {
     work_ref: opaqueRef({ kind, owner: stage.owner, ref: `${flow.project_ref}:${stage.stage}:${sourceRef}:${stage.revision}` }),
     kind,
     owner: stage.owner,
     project: flow.project_ref,
     scope_id: scopeId,
-    title: `${stage.stage} · ${sourceRef}`,
+    title: `${dramaStageLabels[stage.stage]} · ${stage.episode_ref || flow.episode_ref || sourceRef}`,
     state: stage.state,
     native_state: stage.native_state,
     priority: priorityForWorkItem(kind, stage.state, stage.coverage),
@@ -330,9 +355,11 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     const item = itemFromConnection(connection, input.scope.id);
     if (item) items.push(item);
   }
-  if (input.creativeFlow) {
-    const flowKeys = new Set<string>();
-    const flowItems = input.creativeFlow.stages.map((stage) => workflowItem(stage, input.creativeFlow!, input.scope.id, input.clientOrigins)).filter((item): item is WorkQueueItem => {
+  const flows = [...(input.creativeFlows || []), ...(input.creativeFlow ? [input.creativeFlow] : [])];
+  const flowKeys = new Set<string>();
+  let gapEmitted = false;
+  for (const flow of flows) {
+    const flowItems = flow.stages.map((stage) => workflowItem(stage, flow, input.scope.id, input.clientOrigins)).filter((item): item is WorkQueueItem => {
       if (!item) return false;
       const key = [item.scope_id, item.owner, item.object_kind || "", item.source_ref, item.revision].join("|");
       if (flowKeys.has(key)) return false;
@@ -340,25 +367,27 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
       return true;
     });
     items.push(...flowItems);
-    if (input.creativeFlow.stages.length === 0 && input.creativeFlow.coverage !== "complete") {
+    const unreadable = flow.source_coverage.some((source) => ["unavailable", "forbidden"].includes(source.state));
+    if (flow.stages.length === 0 && flow.coverage !== "complete" && !unreadable && !gapEmitted) {
+      gapEmitted = true;
       items.push({
         work_ref: opaqueRef({ kind: "contract_gap", owner: "control-center", ref: `${input.scope.id}:creative-flow` }),
         kind: "contract_gap",
         owner: "control-center",
-        project: input.creativeFlow.project_ref,
+        project: flow.project_ref,
         scope_id: input.scope.id,
         title: "剧本到分镜流程暂不可读",
         state: "needs_contract",
-        native_state: input.creativeFlow.coverage,
+        native_state: flow.coverage,
         priority: "high",
         attention_reason: "Auctra 或 Scaena 尚未提供当前流程阶段投影",
-        observed_at: input.creativeFlow.observed_at,
+        observed_at: flow.observed_at,
         freshness: "unknown",
         coverage: "needs_contract",
         revision: "",
-        source_ref: input.creativeFlow.project_ref,
+        source_ref: flow.project_ref,
         object_kind: "creative_flow",
-        flow_ref: opaqueRef({ scope: input.creativeFlow.scope, project: input.creativeFlow.project_ref }),
+        flow_ref: opaqueRef({ scope: flow.scope, project: flow.project_ref }),
         lineage_refs: [],
         safe_links: [controlLink("查看工作台", "home")],
         allowed_actions: [],
@@ -367,20 +396,54 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     }
   }
 
+  // An owner that could not be read yields no stages, so without this the outage would be invisible in the queue.
+  const outages = new Map<WorkQueueOwner, { flow: CreativeFlowProjection; source: CreativeFlowProjection["source_coverage"][number] }>();
+  for (const flow of flows) for (const source of flow.source_coverage) {
+    if (!["unavailable", "forbidden"].includes(source.state) || flow.stages.some((stage) => stage.owner === source.owner) || outages.has(source.owner)) continue;
+    outages.set(source.owner, { flow, source });
+  }
+  for (const [owner, { flow, source }] of outages) {
+    items.push({
+      work_ref: opaqueRef({ kind: "service_blocked", owner, ref: `${input.scope.id}:creative-flow` }),
+      kind: "service_blocked",
+      owner,
+      project: flow.project_ref,
+      scope_id: input.scope.id,
+      title: `${owner === "auctra" ? "Auctra" : "Scaena"} 暂时读不到剧集流程`,
+      state: source.state,
+      native_state: source.state,
+      priority: priorityForWorkItem("service_blocked", source.state, source.state),
+      attention_reason: source.reason || source.state,
+      observed_at: source.observed_at,
+      freshness: freshness(source.observed_at),
+      coverage: source.state,
+      revision: "",
+      source_ref: `${flow.project_ref}:${owner}`,
+      object_kind: "creative_flow",
+      flow_ref: opaqueRef({ scope: flow.scope, project: flow.project_ref, owner }),
+      lineage_refs: [],
+      safe_links: [controlLink("查看服务与连接", "services")],
+      allowed_actions: [],
+      preview_state: "not_applicable",
+    });
+  }
+
   const sources = new Map<WorkQueueOwner, { state: CoverageState; observed_at: string; reason?: string }>();
+  const coverageRank: CoverageState[] = ["integrity_failed", "forbidden", "unavailable", "needs_contract", "expired", "partial", "pending", "unknown", "not_recorded", "complete"];
+  const mergeSource = (owner: WorkQueueOwner, value: { state: CoverageState; observed_at: string; reason?: string }) => {
+    const current = sources.get(owner);
+    if (!current || coverageRank.indexOf(value.state) < coverageRank.indexOf(current.state)) sources.set(owner, value);
+  };
   for (const connection of input.connections) {
     const state = connectionCoverage(connection);
-    sources.set(connection.owner, { state, observed_at: validTime(connection.observed_at), ...(connection.runtime?.reason ? { reason: connection.runtime.reason } : {}) });
+    mergeSource(connection.owner, { state, observed_at: validTime(connection.observed_at), ...(connection.runtime?.reason ? { reason: connection.runtime.reason } : {}) });
   }
-  if (input.creativeFlow) {
-    const ownerStates = new Map<WorkQueueOwner, { state: CoverageState; observed_at: string; reason?: string }>();
-    for (const stage of input.creativeFlow.stages) {
-      const state = stage.coverage === "needs_contract" ? "needs_contract" as const : stage.coverage === "forbidden" ? "forbidden" as const : stage.coverage === "unavailable" ? "unavailable" as const : stage.coverage;
-      const current = ownerStates.get(stage.owner);
-      if (!current || Date.parse(stage.observed_at) >= Date.parse(current.observed_at)) ownerStates.set(stage.owner, { state, observed_at: stage.observed_at, ...(stage.blockers[0] ? { reason: stage.blockers[0] } : {}) });
-    }
-    for (const [owner, value] of ownerStates) sources.set(owner, value);
+  // Worst state wins per owner: a failed read on one episode must not be hidden by a healthy one on another.
+  for (const flow of flows) {
+    for (const source of flow.source_coverage) mergeSource(source.owner, { state: source.state, observed_at: source.observed_at, ...(source.reason ? { reason: source.reason } : {}) });
+    for (const stage of flow.stages) mergeSource(stage.owner, { state: stage.coverage, observed_at: stage.observed_at, ...(stage.blockers[0] ? { reason: stage.blockers[0] } : {}) });
   }
+  if (input.flowSample && input.flowSample.total > input.flowSample.checked) mergeSource("auctra", { state: "partial", observed_at: new Date(now).toISOString(), reason: "episodes_sampled" });
   const sorted = sortWorkQueueItems(items);
   const observedAt = new Date(now).toISOString();
   const sourceValues = [...sources.entries()].map(([owner, value]) => sourceCoverage(owner, value.state, value.observed_at, value.reason));

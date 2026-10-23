@@ -1,0 +1,1 @@
+ALTER TABLE `collaboration_items` ADD `task_source` text DEFAULT '{}' NOT NULL;

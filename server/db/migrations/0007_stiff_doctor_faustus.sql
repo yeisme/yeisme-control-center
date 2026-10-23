@@ -1,0 +1,1 @@
+ALTER TABLE `collaboration_projects` ADD `budget_currency` text DEFAULT 'CNY' NOT NULL;

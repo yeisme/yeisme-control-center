@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   index,
+  uniqueIndex,
   integer,
   real,
   sqliteTable,
@@ -128,6 +129,9 @@ export const taskNotifications = sqliteTable(
     snoozedUntil: text("snoozed_until"),
     lastErrorCode: text("last_error_code").notNull().default(""),
     reopened: integer("reopened", { mode: "boolean" }).notNull().default(false),
+    category: text("category").notNull().default("failure"),
+    readAt: text("read_at"),
+    targetPath: text("target_path"),
   },
   (t) => [
     index("notifications_scope_session_idx").on(t.scopeId, t.sessionId, t.subject),
@@ -254,3 +258,42 @@ export const toolCatalogBaselines = sqliteTable("tool_catalog_baselines", {
   kind: text("kind").notNull(),
   establishedAt: text("established_at").notNull(),
 });
+
+export const collaborationOrganizations = sqliteTable("collaboration_organizations", {
+  id: text("id").primaryKey(), name: text("name").notNull(), sourceTenant: text("source_tenant").notNull(),
+  revision: integer("revision").notNull().default(1), createdAt: text("created_at").notNull(),
+});
+export const collaborationMembers = sqliteTable("collaboration_members", {
+  id: text("id").primaryKey(), organizationId: text("organization_id").notNull(), identity: text("identity").notNull(),
+  name: text("name").notNull(), role: text("role").notNull(), status: text("status").notNull().default("active"), revision: integer("revision").notNull().default(1),
+}, (t) => [uniqueIndex("collaboration_member_identity_idx").on(t.organizationId, t.identity)]);
+export const collaborationTeams = sqliteTable("collaboration_teams", {
+  id: text("id").primaryKey(), organizationId: text("organization_id").notNull(), name: text("name").notNull(),
+  revision: integer("revision").notNull().default(1), memberIds: text("member_ids").notNull().default("[]"),
+});
+export const collaborationProjects = sqliteTable("collaboration_projects", {
+  id: text("id").primaryKey(), organizationId: text("organization_id").notNull(), teamId: text("team_id"),
+  name: text("name").notNull(), revision: integer("revision").notNull().default(1), hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
+  generationEnabled: integer("generation_enabled", { mode: "boolean" }).notNull().default(false), budgetCap: real("budget_cap").notNull().default(0),
+  budgetCurrency: text("budget_currency").notNull().default("CNY"),
+  bindings: text("bindings").notNull().default("[]"), grants: text("grants").notNull().default("[]"),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (t) => [index("collaboration_projects_org_idx").on(t.organizationId)]);
+export const collaborationFolders = sqliteTable("collaboration_folders", {
+  id: text("id").primaryKey(), projectId: text("project_id").notNull(), parentId: text("parent_id"), name: text("name").notNull(), revision: integer("revision").notNull().default(1),
+}, (t) => [index("collaboration_folder_project_idx").on(t.projectId)]);
+export const collaborationItems = sqliteTable("collaboration_items", {
+  id: text("id").primaryKey(), projectId: text("project_id").notNull(), folderId: text("folder_id"), owner: text("owner").notNull(),
+  taskSource: text("task_source").notNull().default("{}"), taskKey: text("task_key").notNull(), artifactRef: text("artifact_ref").notNull(), name: text("name").notNull(), mime: text("mime").notNull(),
+  revision: text("revision").notNull(), batchRef: text("batch_ref"), createdAt: text("created_at").notNull(), sourceState: text("source_state").notNull(),
+}, (t) => [index("collaboration_items_project_idx").on(t.projectId, t.id)]);
+export const collaborationBatches = sqliteTable("collaboration_batches", {
+  id: text("id").primaryKey(), projectId: text("project_id").notNull(), name: text("name").notNull(), state: text("state").notNull(),
+  revision: integer("revision").notNull().default(1), idempotencyKey: text("idempotency_key").notNull(), items: text("items").notNull(),
+  totalCost: real("total_cost"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (t) => [uniqueIndex("collaboration_batch_key_idx").on(t.projectId, t.idempotencyKey)]);
+export const actionRecords = sqliteTable("action_records", {
+  id: text("id").primaryKey(), context: text("context").notNull(), key: text("key").notNull(), requestDigest: text("request_digest").notNull(),
+  request: text("request").notNull(), preview: text("preview").notNull(), createdAt: integer("created_at").notNull(),
+  started: integer("started", { mode: "boolean" }).notNull().default(false), receipt: text("receipt"),
+}, (t) => [uniqueIndex("action_context_key_idx").on(t.context, t.key)]);

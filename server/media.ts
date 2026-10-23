@@ -32,6 +32,7 @@ interface Handle {
   ref: string;
   expires: number;
   download: boolean;
+  thumbnail?: boolean;
   url: URL;
   grantExpires: number;
   filename: string;
@@ -104,7 +105,7 @@ export class MediaBridge {
     scope: ScopeBinding,
     task: string,
     ref: string,
-    action: "preview" | "download",
+    action: "preview" | "download" | "thumbnail",
   ) {
     for (const [key, value] of this.handles)
       if (value.expires <= Date.now()) this.handles.delete(key);
@@ -138,7 +139,8 @@ export class MediaBridge {
         task,
         ref,
         download: action === "download",
-        expires: Date.now() + 120000,
+        thumbnail: action === "thumbnail",
+        expires: Math.min(Date.now() + 120000, grant.expires),
         url: grant.url,
         grantExpires: grant.expires,
         filename,
@@ -200,7 +202,8 @@ export class MediaBridge {
         this.inFlight--;
       }
     }
-    const range = request.headers.get("range");
+    const range = handle.thumbnail ? null : request.headers.get("range");
+    const transferLimit = handle.thumbnail ? 1024 * 1024 : maxBytes;
     if (range && !/^bytes=(?:\d+-\d*|-\d+)$/.test(range))
       throw new AuthError("invalid_range", 416);
     this.inFlight++;
@@ -232,13 +235,12 @@ export class MediaBridge {
     };
     try {
       // Reauthorize on every transfer; URLs and upstream credentials never reach the browser.
-      if (!session.personal)
-        throw new AuthError("personal_connection_required", 403);
       const { c } = this.tasks.locate(handle.task, scope);
       if (!c.allow_content) throw new AuthError("content_not_authorized", 403);
       const task = await this.tasks.detail(handle.task, scope);
       if (!task.results.some((a) => a.ref === handle.ref))
         throw new AuthError("artifact_not_found", 404);
+      if (handle.thumbnail && !task.results.some((a) => a.ref === handle.ref && a.thumbnail?.state === "ready")) throw new AuthError("thumbnail_unavailable", 410);
       if (handle.grantExpires <= Date.now())
         throw new AuthError("media_grant_expired", 410);
       const transferSignal = AbortSignal.any([
@@ -282,8 +284,8 @@ export class MediaBridge {
       const contentLength = upstream.headers.get("content-length");
       const length = contentLength === null ? null : Number(contentLength);
       if (
-        !allowedMimes.has(mime) ||
-        (length !== null && (!Number.isSafeInteger(length) || length < 0 || length > maxBytes))
+        !allowedMimes.has(mime) || (handle.thumbnail && !mime.startsWith("image/")) ||
+        (length !== null && (!Number.isSafeInteger(length) || length < 0 || length > transferLimit))
       )
         return await reject("media_limits_exceeded", 422);
       const contentRange = upstream.headers.get("content-range");
@@ -300,7 +302,7 @@ export class MediaBridge {
           start > end ||
           end >= total ||
           end - start + 1 !== length ||
-          total > maxBytes
+          total > transferLimit
         )
           return await reject("media_range_invalid", 503);
       }
@@ -353,7 +355,7 @@ export class MediaBridge {
               return;
             }
             bytes += next.value.length;
-            if ((length !== null && bytes > length) || bytes > maxBytes)
+            if ((length !== null && bytes > length) || bytes > transferLimit)
               throw new Error("media_limits_exceeded");
             controller.enqueue(next.value);
           } catch {

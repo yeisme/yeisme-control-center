@@ -137,6 +137,7 @@ export function safeTask(v: any, c: TaskConnection): TaskSnapshot {
       return typeof value.ref === "string" && value.ref.length <= 512
         ? [{
             ref: `artifact-${index}`,
+            ...(typeof value.version === "string" && /^(sha256:)?[a-f0-9]{64}$/.test(value.version) ? { version: value.version } : {}),
             name: safeText(value.name),
             mime: safeText(value.mime, 100),
             bytes: count(value.bytes),
@@ -766,7 +767,7 @@ export class TaskConnections {
       observed_at: safeTime(r.observed_at) || new Date().toISOString(),
     };
   }
-  async artifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download" = "preview") {
+  async artifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download" | "thumbnail" = "preview") {
     const { c } = this.locate(raw, scope);
     try {
       const result = await this.readArtifact(raw, scope, artifactRef, action);
@@ -778,7 +779,7 @@ export class TaskConnections {
     }
   }
 
-  private async readArtifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download") {
+  private async readArtifact(raw: string, scope: ScopeBinding, artifactRef: string, action: "preview" | "download" | "thumbnail") {
     const { c, ref, family } = this.locate(raw, scope);
     if (c.allow_content !== true) {
       const error = new AuthError("content_not_authorized", 403);
@@ -793,10 +794,15 @@ export class TaskConnections {
     const artifactIndex = opaqueIndex === undefined
       ? rawResults.findIndex((item: unknown) => item && typeof item === "object" && "ref" in item && item.ref === artifactRef)
       : Number(opaqueIndex);
-    const sourceRef = rawResultRef(rawTask, artifactIndex);
+    let sourceRef = rawResultRef(rawTask, artifactIndex);
     const artifact = task.results.find((item) => item.ref === `artifact-${artifactIndex}`);
     if (!sourceRef || !artifact) throw new AuthError("artifact_not_found", 404);
-    const allowed = task.allowed_actions.find((item) => item.action === action);
+    if (action === "thumbnail") {
+      const rawThumbnail = (rawResults[artifactIndex] as { thumbnail?: { state?: string; ref?: string } })?.thumbnail;
+      if (rawThumbnail?.state !== "ready" || !rawThumbnail.ref || rawThumbnail.ref === sourceRef || rawThumbnail.ref.length > 512) throw new AuthError("thumbnail_needs_contract", 422);
+      sourceRef = rawThumbnail.ref;
+    }
+    const allowed = task.allowed_actions.find((item) => item.action === (action === "thumbnail" ? "preview" : action));
     if (allowed && !allowed.enabled && allowed.reason !== "owner_result_access_requested") throw new AuthError(allowed.reason || "content_not_authorized", 403);
     if (c.owner === "sonora" || c.owner === "scaena") {
       const grant = await this.call(c, "control_center.tasks.artifact_access", {
@@ -866,12 +872,14 @@ export class TaskConnections {
         },
       };
     }
+    if (action === "thumbnail" && sourceRef !== rawResultRef(rawTask, artifactIndex) + "#thumbnail") throw new AuthError("thumbnail_needs_contract", 422);
     const r = await this.call(c, "artifact.access", {
-      artifact_uri: sourceRef,
+      artifact_uri: action === "thumbnail" ? rawResultRef(rawTask, artifactIndex) : sourceRef,
+      ...(action === "thumbnail" ? { variant: "thumbnail" } : {}),
       confirm: true,
     });
     if (
-      r?.projection?.schema_version !== "eikona.artifact_access_grant.v1" ||
+      r?.projection?.schema_version !== "eikona.artifact_access_grant.v1" || (action === "thumbnail" && r.projection.variant !== "thumbnail") ||
       r.links?.length !== 1
     )
       throw new AuthError("media_needs_contract", 422);
@@ -888,7 +896,7 @@ export class TaskConnections {
     const expires = Date.parse(r.projection.expires_at);
     if (!Number.isFinite(expires) || expires <= Date.now())
       throw new AuthError("media_grant_expired", 410);
-    return { url, expires, artifact };
+    return { url, expires, artifact: action === "thumbnail" ? { ...artifact, mime: "image/jpeg", bytes: null } : artifact };
   }
   mediaHeaders(raw: string, scope: ScopeBinding): Record<string, string> {
     const { c } = this.locate(raw, scope);

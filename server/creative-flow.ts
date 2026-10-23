@@ -4,6 +4,7 @@ import type { ScaenaStoryboardSnapshot } from "./scaena-storyboard";
 import type { CoverageState } from "../src/request-visibility";
 import {
   creativeFlowStages,
+  flowStateFrom,
   type CreativeFlowAction,
   type CreativeFlowProjection,
   type CreativeFlowStage,
@@ -11,7 +12,6 @@ import {
   type CreativeFlowState,
 } from "../src/shared/creative-flow";
 
-const text = (value: unknown, max = 512) => typeof value === "string" ? value.slice(0, max) : "";
 const now = () => new Date().toISOString();
 
 function freshness(value: string, at = Date.now()): "fresh" | "stale" | "unknown" {
@@ -20,19 +20,7 @@ function freshness(value: string, at = Date.now()): "fresh" | "stale" | "unknown
   return at - parsed > 5 * 60 * 1000 ? "stale" : "fresh";
 }
 
-function state(value: unknown): CreativeFlowState {
-  const raw = text(value, 96).toLowerCase();
-  if (["accepted", "approved", "adopted"].includes(raw)) return "accepted";
-  if (["ready", "export_ready", "handoff_ready"].includes(raw)) return "ready";
-  if (["review", "reviewing", "waiting_review", "review_required", "needs_review", "pending_review"].includes(raw)) return "waiting_review";
-  if (["blocked", "failed", "rejected"].includes(raw)) return "blocked";
-  if (["stale", "superseded"].includes(raw)) return "stale";
-  if (["missing"].includes(raw)) return "missing";
-  if (["needs_contract"].includes(raw)) return "needs_contract";
-  if (["forbidden"].includes(raw)) return "forbidden";
-  if (["unavailable"].includes(raw)) return "unavailable";
-  return raw ? "unknown" : "unknown";
-}
+const state = flowStateFrom;
 
 function coverage(value: CoverageState, stageState: CreativeFlowState): CoverageState {
   if (stageState === "needs_contract") return "needs_contract";
@@ -96,14 +84,28 @@ function auctraStages(snapshot: AuctraCreativeFlowSnapshot, projectRef: string):
       source_current: item.source_current,
       blockers: item.blockers || [],
       safe_refs: item.safe_refs || [],
-      project_ref: projectRef,
+      project_ref: snapshot.project_ref || projectRef,
       episode_ref: item.episode_ref,
     };
   });
 }
 
-function scaenaStages(snapshot: ScaenaStoryboardSnapshot): CreativeFlowStageProjection[] {
-  return snapshot.items.map((item) => {
+/**
+ * Scaena verifies `source.digest` equals Auctra's SourceDigest when it imports an Auctra handoff, and carries Auctra's handoff ref and
+ * version in `source.safe_refs`. So a shared ref means the breakdown was built from this screenplay, and a different digest then means
+ * the screenplay has been revised since. Sources that never came from Auctra share no ref and are never compared.
+ */
+function behindScreenplay(snapshot: ScaenaStoryboardSnapshot, screenplay?: CreativeFlowStageProjection) {
+  const source = snapshot.source;
+  if (!source || !screenplay?.digest) return false;
+  const linked = source.safe_refs.some((ref) => !!ref && screenplay.safe_refs.includes(ref));
+  return linked && source.digest !== screenplay.digest;
+}
+
+function scaenaStages(snapshot: ScaenaStoryboardSnapshot, screenplay?: CreativeFlowStageProjection): CreativeFlowStageProjection[] {
+  // Scaena lists every breakdown attempt newest first; only the head is the episode's current production state.
+  const behind = behindScreenplay(snapshot, screenplay);
+  return snapshot.items.slice(0, 1).map((item) => {
     const itemState = state(item.state);
     const sourceDigestMismatch = Boolean(snapshot.source && item.source_digest && item.source_digest !== snapshot.source.digest);
     return {
@@ -118,8 +120,8 @@ function scaenaStages(snapshot: ScaenaStoryboardSnapshot): CreativeFlowStageProj
       observed_at: item.observed_at,
       freshness: itemState === "stale" ? "stale" : freshness(item.observed_at),
       coverage: coverage(snapshot.coverage, itemState),
-      source_current: (itemState === "accepted" || itemState === "ready") && !sourceDigestMismatch,
-      blockers: [...item.blockers, ...(snapshot.source && (!snapshot.source.current || snapshot.source.state !== "accepted") ? ["source_not_current"] : []), ...(sourceDigestMismatch ? ["source_digest_mismatch"] : [])],
+      source_current: (itemState === "accepted" || itemState === "ready") && !sourceDigestMismatch && !behind,
+      blockers: [...item.blockers, ...(snapshot.source && (!snapshot.source.current || snapshot.source.state !== "accepted") ? ["source_not_current"] : []), ...(sourceDigestMismatch ? ["source_digest_mismatch"] : []), ...(behind ? ["screenplay_revision_mismatch"] : [])],
       safe_refs: [item.breakdown_ref, item.source_ref, snapshot.source?.source_ref, item.scene_ref, item.shot_ref].filter((value): value is string => !!value).slice(0, 12),
       project_ref: snapshot.project_ref,
       ...(item.episode_ref ? { episode_ref: item.episode_ref } : {}),
@@ -142,6 +144,8 @@ export function buildCreativeFlow(input: {
   scope: string;
   project_ref: string;
   episode_ref?: string;
+  /** Scaena keeps its own episode refs; when they differ from the Auctra unit ref the operator names the Scaena one here. */
+  scaena_episode_ref?: string;
   auctra_records?: AuctraCollectionRecordView[];
   auctra_coverage?: CoverageState;
   auctra_flow?: AuctraCreativeFlowSnapshot;
@@ -150,10 +154,16 @@ export function buildCreativeFlow(input: {
 }): CreativeFlowProjection {
   const observed_at = input.observed_at || now();
   const auctraCoverage = input.auctra_flow?.coverage || input.auctra_coverage || "needs_contract";
+  const wantedFor = (owner: string) => owner === "scaena" ? input.scaena_episode_ref || input.episode_ref : input.episode_ref;
+  const auctraList = input.auctra_flow ? auctraStages(input.auctra_flow, input.auctra_flow.project_ref || input.project_ref) : legacyAuctraStages(input.auctra_records || [], input.project_ref, observed_at);
+  const screenplay = auctraList.find((stage) => stage.stage === "screenplay" && (!input.episode_ref || !stage.episode_ref || stage.episode_ref === input.episode_ref));
   const stages = [
-    ...(input.auctra_flow ? auctraStages(input.auctra_flow, input.project_ref) : legacyAuctraStages(input.auctra_records || [], input.project_ref, observed_at)),
-    ...scaenaStages(input.scaena),
-  ].filter((stage) => !input.episode_ref || !stage.episode_ref || stage.episode_ref === input.episode_ref);
+    ...auctraList,
+    ...scaenaStages(input.scaena, screenplay),
+  ].filter((stage) => {
+    const wanted = wantedFor(stage.owner);
+    return !wanted || !stage.episode_ref || stage.episode_ref === wanted;
+  });
 
   const episodeRefs = new Set(stages.map((stage) => stage.episode_ref).filter((value): value is string => !!value));
   const ambiguousEpisode = !input.episode_ref && episodeRefs.size > 1;

@@ -27,9 +27,12 @@ import {
 import { AuctraCollectionReader } from "./auctra";
 import { AuctraCollectionStore } from "./db/auctra-collection-store";
 import { ProjectMetadataStore } from "./db/project-metadata-store";
+import { GenerationBatches } from "./generation-batches";
+import { CollaborationService, identityOf } from "./collaboration";
+import { isCollaborationAction, type DirectoryQuery } from "../src/shared/collaboration";
 import { buildWorkQueue, filterAndPageWorkQueue } from "./work-queue";
 import { workQueueKinds } from "../src/shared/work-queue";
-import { buildCreativeFlow } from "./creative-flow";
+import { DramaService, dramaLimits, validDramaRef } from "./drama";
 import { ScaenaStoryboardReader } from "./scaena-storyboard";
 import {
   defaultRequestQuery,
@@ -125,14 +128,18 @@ export function createApp(
     auctra = deps.auctra || new AuctraCollectionReader(config),
     scaenaStoryboard = deps.scaenaStoryboard || new ScaenaStoryboardReader(config),
     collectionStore = new AuctraCollectionStore(db),
+    drama = new DramaService({ config, auctra, scaena: scaenaStoryboard, store: collectionStore }),
     projectMetadata = new ProjectMetadataStore(db),
     audit = new AuditStore(db),
     notifications = new NotificationStore(db),
     catalog = new ToolCatalogService(providers, new ToolCatalogStore(db)),
     media = new MediaBridge(tasks, undefined, audit),
-    actions = new ActionService(),
+    actions = new ActionService(db),
+    collaboration = new CollaborationService(db, config, auth),
+    generationBatches = new GenerationBatches(collaboration, readers, config),
     cursorKey = randomBytes(32);
   const scoped = (s: Session, id: string | null): ScopeBinding => {
+    if (id?.startsWith("project_")) return collaboration.scope(s, id);
     const p = auth.principal(s);
     const scope = p?.scopes.find((v) => v.id === id);
     if (!scope) throw new AuthError("scope_not_found", 404);
@@ -154,12 +161,7 @@ export function createApp(
         : "unavailable";
   const auditError = (e: unknown) =>
     e instanceof AuthError ? e.code : "source_unavailable";
-  const readCreativeFlow = async (scope: ScopeBinding, session: Session, query: { episode_ref?: string; breakdown_ref?: string } = {}) => {
-    const projectRef = scope.project;
-    const auctraFlow = await auctra.creativeFlow(scope.id, scope, session, { episode_ref: query.episode_ref });
-    const scaena = await scaenaStoryboard.snapshot(scope, session, query);
-    return buildCreativeFlow({ scope: scope.id, project_ref: projectRef, ...(query.episode_ref ? { episode_ref: query.episode_ref } : {}), auctra_flow: auctraFlow, scaena });
-  };
+  const readCreativeFlow = (scope: ScopeBinding, session: Session, query: { episode_ref?: string; breakdown_ref?: string } = {}) => drama.flow(scope, session, query);
   const sign = (payload: any) => {
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
     return (
@@ -313,12 +315,14 @@ export function createApp(
           identity: session.issuer + "|" + session.subject,
           csrf: session.csrf,
           epoch: session.epoch,
-          scopes: p.scopes.map(({ owners: bindings, collection, ...scope }) => ({
+          scopes: [...p.scopes, ...collaboration.list(session).map((project) => collaboration.scope(session, project.id))].map(({ owners: bindings, collection, ...scope }) => ({
             ...scope,
             owners: [...Object.keys(bindings), ...Object.keys(collection || {})],
           })),
           mode: "live",
           task_connections: session.personal === true,
+          collaboration_organizations: collaboration.organizations(session),
+          shared_projects: collaboration.list(session),
         });
       }
       if (path === "/admin/personal-users" || path.startsWith("/admin/personal-users/")) {
@@ -401,12 +405,86 @@ export function createApp(
         auth.sessions.delete(session.id);
         return json({ ok: true }, 200, { "Set-Cookie": auth.cookie("", 0) });
       }
+      if (r.method === "GET" && path === "/organizations") return json(withEpoch(session, { rows: collaboration.organizations(session), can_create: auth.role(session) === "admin" }));
+      const orgRoute = path.match(/^\/organizations\/([^/]+)\/(members|teams|candidates|binding-options)$/);
+      if (r.method === "GET" && orgRoute) {
+        const org = decodeURIComponent(orgRoute[1]);
+        if (orgRoute[2] === "candidates") return json(withEpoch(session, { rows: collaboration.candidates(session, org) }));
+        if (orgRoute[2] === "binding-options") return json(withEpoch(session, { rows: collaboration.bindingOptions(session, org) }));
+        const directory = collaboration.directory(session, org);
+        return json(withEpoch(session, { rows: orgRoute[2] === "teams" ? directory.teams : directory.members }));
+      }
+      if (r.method === "GET" && path === "/projects") {
+        const query = url.searchParams.get("q")?.trim().toLocaleLowerCase() || "";
+        if (query.length > 200) throw new AuthError("invalid_query", 400);
+        const rows = collaboration.list(session, url.searchParams.get("organization") || undefined).filter((p) => (!query || `${p.name} ${p.id}`.toLocaleLowerCase().includes(query)) && (url.searchParams.get("hidden") === "1" ? p.hidden : !p.hidden));
+        return json(withEpoch(session, { rows, coverage: "complete", total: rows.length, next_cursor: null }));
+      }
+      const itemTask = path.match(/^\/projects\/([^/]+)\/items\/([^/]+)\/task$/);
+      if (r.method === "GET" && itemTask) {
+        const projectID = decodeURIComponent(itemTask[1]);
+        const item = collaboration.item(session, projectID, decodeURIComponent(itemTask[2]));
+        if (!item.source?.connection || !item.source.project || !item.source.family || !item.source.ref) throw new AuthError("item_source_unavailable", 409);
+        return json(withEpoch(session, await tasks.resolve(collaboration.scope(session, projectID), item.source)));
+      }
+      const sharedRoute = path.match(/^\/projects\/([^/]+)(?:\/(members|bindings|folders|items|generation-batches))?$/);
+      if (r.method === "GET" && sharedRoute) {
+        const projectID = decodeURIComponent(sharedRoute[1]);
+        const project = collaboration.project(session, projectID);
+        const kind = sharedRoute[2];
+        if (!kind) return json(withEpoch(session, project));
+        if (kind === "members") { collaboration.project(session, projectID, "project_admin"); return json(withEpoch(session, { rows: project.grants })); }
+        if (kind === "bindings") return json(withEpoch(session, { rows: project.bindings }));
+        if (kind === "folders") return json(withEpoch(session, { rows: collaboration.folders(session, projectID) }));
+        if (kind === "generation-batches") {
+          const rows = await generationBatches.observe(session, projectID);
+          for (const batch of rows.filter((b) => ["succeeded", "partial", "failed"].includes(b.state))) for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」：${batch.state}`, path: `/creation?sharedProject=${projectID}&batch=${batch.id}` });
+          return json(withEpoch(session, { rows }));
+        }
+        const projectScope = collaboration.scope(session, projectID);
+        const sourceFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, "item_sources"])).digest("hex");
+        const sourceCursors = cursor(url.searchParams.get("source_cursor"), sourceFP) as Record<string, string>;
+        const observed = await tasks.list(projectScope, "history", sourceCursors);
+        collaboration.syncItems(session, projectID, observed.rows);
+        const query = Object.fromEntries(url.searchParams.entries()) as DirectoryQuery;
+        query.limit = Number(url.searchParams.get("limit") || 50);
+        const filterFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, { ...query, cursor: undefined, source_cursor: undefined }])).digest("hex");
+        query.cursor = cursor(url.searchParams.get("cursor"), filterFP).after || undefined;
+        const page = collaboration.items(session, projectID, query);
+        return json(withEpoch(session, { ...page, next_cursor: page.next_cursor ? sign({ fp: filterFP, expires: Date.now() + 900000, cursors: { after: page.next_cursor } }) : null, next_source_cursor: Object.keys(observed.next_cursors || {}).length ? sign({ fp: sourceFP, expires: Date.now() + 900000, cursors: observed.next_cursors }) : null, coverage: project.bindings.length > 0 && !Object.keys(projectScope.owners).length ? "unknown" : observed.connections.every((c) => c.state === "ready") && !Object.keys(observed.next_cursors || {}).length && !url.searchParams.has("source_cursor") ? "complete" : "partial", sources: observed.connections }));
+      }
       const scope = scoped(session, url.searchParams.get("scope"));
       if (r.method === "GET" && path === "/creative-flow") {
         const episode_ref = url.searchParams.get("episode_ref") || undefined;
         const breakdown_ref = url.searchParams.get("breakdown_ref") || undefined;
         for (const value of [episode_ref, breakdown_ref]) if (value && (value.length > 512 || /[\x00-\x1f]/.test(value))) throw new AuthError("invalid_reference", 400);
         return json(withEpoch(session, await readCreativeFlow(scope, session, { episode_ref, breakdown_ref })));
+      }
+      if (r.method === "GET" && path === "/drama/episodes") {
+        const limit = Number(url.searchParams.get("limit") || dramaLimits.defaultPage);
+        const q = (url.searchParams.get("q") || "").trim();
+        const readMode = url.searchParams.get("read");
+        const order = url.searchParams.get("order");
+        const requested = url.searchParams.getAll("episode_ref");
+        if (!Number.isInteger(limit) || limit < 1 || limit > dramaLimits.maxPage || q.length > 200 || (readMode && readMode !== "all") || (order && order !== "recent" && order !== "natural") || requested.length > dramaLimits.maxExtra) throw new AuthError("invalid_query", 400);
+        // Task episode refs are owner-supplied text. One malformed ref must cost that episode, not the whole list.
+        const extra = [...new Set(requested.filter(validDramaRef))];
+        const fp = createHash("sha256").update(JSON.stringify([session.id, session.epoch, scope.id, q, limit, order || "natural", extra, "drama_episodes.v1"])).digest("hex");
+        const offset = Number(cursor(url.searchParams.get("cursor"), fp).offset || 0);
+        if (!Number.isInteger(offset) || offset < 0) throw new AuthError("cursor_invalid", 400);
+        const page = await drama.episodes(scope, session, { q, limit, offset, read: readMode === "all" ? "all" : undefined, order: order === "recent" ? "recent" : undefined, extra });
+        const next = page.next_offset === undefined ? undefined : sign({ fp, cursors: { offset: String(page.next_offset) }, expires: Date.now() + 300_000 });
+        return json(withEpoch(session, { ...page.body, ...(next ? { next_cursor: next } : {}) }));
+      }
+      if (r.method === "GET" && path === "/drama/episode") {
+        const episodeRef = url.searchParams.get("episode_ref") || "";
+        const scaenaRef = url.searchParams.get("scaena_episode_ref");
+        if (!validDramaRef(episodeRef) || (scaenaRef !== null && !validDramaRef(scaenaRef))) throw new AuthError("invalid_reference", 400);
+        return json(withEpoch(session, await drama.episode(scope, session, episodeRef, {
+          ...(scaenaRef ? { scaena_episode_ref: scaenaRef } : {}),
+          refresh: url.searchParams.get("refresh") === "1",
+          clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin },
+        })));
       }
       if (r.method === "GET" && path === "/project-metadata") {
         return json(withEpoch(session, {
@@ -476,13 +554,28 @@ export function createApp(
       if (path === "/notifications" || path.startsWith("/notifications/")) {
         // Reminder state is control-center data and follows the signed-in scope.
         const identity = { scopeId: scope.id, sessionId: session.id, subject };
+        const notificationPage = () => {
+          const project = scope.id.startsWith("project_") ? collaboration.project(session, scope.id) : null;
+          const scopes = project ? collaboration.list(session, project.organization_id).map((p) => p.id) : [scope.id];
+          const rows = scopes.flatMap((id) => notifications.list(id, session.id, subject)).sort((a, b) => b.first_seen_at.localeCompare(a.first_seen_at) || a.id.localeCompare(b.id));
+          const limit = Number(url.searchParams.get("limit") || 50);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new AuthError("invalid_query", 400);
+          const query = { q: url.searchParams.get("q") || "", category: url.searchParams.get("category") || "", read: url.searchParams.get("read") || "" };
+          if (query.q.length > 200) throw new AuthError("invalid_query", 400);
+          const filtered = rows.filter((row) => row.title.toLocaleLowerCase().includes(query.q.toLocaleLowerCase()) && (!query.category || query.category.split(",").includes(row.category || "failure")) && (!query.read || query.read.split(",").includes(row.read_at ? "read" : "unread")));
+          const fp = createHash("sha256").update(JSON.stringify([subject, session.epoch, scope.id, query, limit])).digest("hex");
+          const offset = Number(cursor(url.searchParams.get("cursor"), fp).offset || 0);
+          if (!Number.isInteger(offset) || offset < 0) throw new AuthError("invalid_query", 400);
+          return { rows: filtered.slice(offset, offset + limit), unread: rows.filter((row) => !row.read_at).length, total: filtered.length, next_cursor: offset + limit < filtered.length ? sign({ fp, expires: Date.now() + 900000, cursors: { offset: String(offset + limit) } }) : null };
+        };
+        const readMatch = path.match(/^\/notifications\/([^/]+)\/read$/);
+        if (r.method === "POST" && readMatch) {
+          auth.csrf(r, session);
+          return json(withEpoch(session, { notification: notifications.read(decodeURIComponent(readMatch[1]), scope.id, session.id, subject) }));
+        }
         if (r.method === "GET" && path === "/notifications") {
           notifications.cleanup(scope.id, session.id, subject);
-          const rows = notifications.list(scope.id, session.id, subject);
-          return json(withEpoch(session, {
-            rows,
-            unread: rows.filter((row) => notifications.actionable(row)).length,
-          }));
+          return json(withEpoch(session, notificationPage()));
         }
         if (r.method === "POST" && path === "/notifications/sync") {
           auth.csrf(r, session);
@@ -491,24 +584,22 @@ export function createApp(
           let body: { tasks?: TaskSnapshot[]; present_task_keys?: string[]; complete?: boolean };
           try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
           if (!body || !Array.isArray(body.tasks) || body.tasks.length > 2000) throw new AuthError("invalid_request", 400);
-          const observed = body.tasks.flatMap((task) => {
-            if (!task || typeof task !== "object" || !task.locator || typeof task.locator !== "object") return [];
-            if (!attentionStates.has(String(task.state || "")) || typeof task.task_key !== "string") return [];
-            return [failureOf(task)];
-          });
+          // The browser proposes keys only; display facts always come from a fresh owner read.
+          if (body.tasks.length > 40) throw new AuthError("notification_sync_limit", 400);
+          const verified: TaskSnapshot[] = [];
+          let verificationComplete = true;
+          for (const candidate of body.tasks) {
+            if (!candidate || typeof candidate.task_key !== "string") continue;
+            try { verified.push(await tasks.detail(candidate.task_key, scope)); } catch { verificationComplete = false; }
+          }
+          const observed = verified.filter((task) => attentionStates.has(task.state)).map(failureOf);
           const result = notifications.sync({
             ...identity,
             observed,
             presentTaskKeys: Array.isArray(body.present_task_keys) ? body.present_task_keys.filter((key) => typeof key === "string").slice(0, 4000) : undefined,
-            complete: body.complete !== false,
+            complete: false, // A browser page cannot establish complete owner coverage.
           });
-          const rows = notifications.list(scope.id, session.id, subject);
-          return json(withEpoch(session, {
-            ...result,
-            rows,
-            unread: rows.filter((row) => notifications.actionable(row)).length,
-            owner_writes: 0,
-          }));
+          return json(withEpoch(session, { ...result, ...notificationPage(), owner_writes: 0 }));
         }
         if (r.method === "POST" && path === "/notifications/bulk") {
           auth.csrf(r, session);
@@ -563,13 +654,16 @@ export function createApp(
       if (path === "/actions/preview" && r.method === "POST") {
         auth.csrf(r, session);
         const raw = await r.text();
-        if (raw.length > 16_384) throw new AuthError("invalid_action_request", 413);
+        if (raw.length > 524288) throw new AuthError("invalid_action_request", 413);
         let body: ActionPreviewRequest;
         try { body = JSON.parse(raw) as ActionPreviewRequest; } catch { throw new AuthError("invalid_action_request", 400); }
         if (!body || body.scope_id !== scope.id || typeof body.owner !== "string" || typeof body.target_kind !== "string" || typeof body.target_ref !== "string" || typeof body.action !== "string" || typeof body.expected_revision !== "string" || typeof body.idempotency_key !== "string" || !body.input || typeof body.input !== "object") throw new AuthError("invalid_action_request", 400);
         const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.preview", owner: body.owner, targetRef: body.target_ref, meta: { action: body.action, target_kind: body.target_kind } });
         try {
-          const preview = actions.preview(body);
+          if (isCollaborationAction(body.action)) collaboration.authorize(session, body.action, body.target_ref, body.input);
+          if (body.action === "generation.batch.create") body.input.items = await generationBatches.verify(session, body.target_ref, body.input.items);
+          if (body.action === "provider_runs.create" && scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
+          const preview = actions.preview(body, identityOf(session));
           audit.complete(eventId, "succeeded");
           return json(withEpoch(session, preview));
         } catch (e) {
@@ -586,15 +680,48 @@ export function createApp(
         if (!body || body.scope_id !== scope.id || typeof body.preview_ref !== "string" || typeof body.preview_digest !== "string" || typeof body.idempotency_key !== "string") throw new AuthError("invalid_action_request", 400);
         const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.confirm", targetRef: body.preview_ref });
         try {
-          const receipt = await actions.confirm(body, async (record: PreviewRecord): Promise<ActionReceipt> => {
+          const original = actions.record(body.preview_ref, identityOf(session), scope.id);
+          if (isCollaborationAction(original.request.action)) collaboration.authorize(session, original.request.action, original.request.target_ref, original.request.input);
+          const local = isCollaborationAction(original.request.action) && !["generation.input.prepare", "generation.batch.submit", "generation.batch.reconcile"].includes(original.request.action);
+          if (original.request.action === "generation.batch.create") original.request.input.items = await generationBatches.verify(session, original.request.target_ref, original.request.input.items);
+          const receipt = local ? actions.confirmLocal(body, (record) => {
+            const result = collaboration.execute(session, record.request.action as import("../src/shared/collaboration").CollaborationAction, record.request.target_ref, record.request.expected_revision, record.request.input);
+            const projectID = record.request.action === "project.create" ? result[0] : record.request.target_ref;
+            if (["project.create", "project.members.set", "project.update"].includes(record.request.action)) {
+              const p = collaboration.project(session, projectID);
+              for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: record.preview.preview_ref, category: "project_assignment", title: `项目「${p.name}」的共享设置已更新`, path: `/projects?sharedProject=${encodeURIComponent(projectID)}` });
+            }
+            return { ...ActionService.unavailable(record, ""), state: "succeeded", owner_state: "updated", error_code: null, result_refs: result };
+          }, identityOf(session)) : await actions.confirm(body, async (record: PreviewRecord): Promise<ActionReceipt> => {
             if (record.preview.availability !== "available") return ActionService.unavailable(record, record.preview.blockers[0] || "action_unavailable");
             const input = record.request.input;
+            if (record.request.action === "generation.input.prepare") {
+              const items = await generationBatches.prepare(session, record.request.target_ref, input, record.request.idempotency_key);
+              return { ...ActionService.unavailable(record, ""), state: "succeeded", error_code: null, generation_items: items, result_refs: items.map((v) => v.input_ref) };
+            }
+            if (record.request.action === "generation.batch.submit" || record.request.action === "generation.batch.reconcile") {
+              const batch = await generationBatches.operate(session, record.request.target_ref, String(input.batch_id), record.request.action === "generation.batch.submit");
+              for (const recipient of collaboration.recipients(batch.project_id)) notifications.event({ scope: batch.project_id, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」：${batch.state}`, path: `/creation?batch=${encodeURIComponent(batch.id)}` });
+              return { ...ActionService.unavailable(record, ""), state: batch.state === "unknown" ? "unknown" : "succeeded", error_code: batch.state === "unknown" ? "generation_reconcile_required" : null, owner_state: batch.state, operation_ref: batch.id, result_refs: [batch.id] };
+            }
+            if (isCollaborationAction(record.request.action)) {
+              if (record.request.action === "generation.batch.create") input.items = await generationBatches.verify(session, record.request.target_ref, input.items);
+              const result = collaboration.execute(session, record.request.action, record.request.target_ref, record.request.expected_revision, input);
+              const projectID = record.request.action === "project.create" ? result[0] : record.request.target_ref;
+              if (record.request.action === "project.create" || record.request.action === "project.members.set" || record.request.action === "project.update") {
+                const project = collaboration.project(session, projectID);
+                for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: record.preview.preview_ref, category: "project_assignment", title: `项目「${project.name}」的共享设置已更新`, path: `/projects?sharedProject=${encodeURIComponent(projectID)}` });
+              }
+              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref,
+                state: "succeeded", owner_state: "updated", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: result };
+            }
             if (record.request.action === "task.cancel") {
               if (input.confirm !== true || typeof input.expected_revision !== "string") throw new AuthError("invalid_action_input", 400);
               const result = await tasks.cancel(record.request.target_ref, scope, input.expected_revision, record.request.idempotency_key, false);
               return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: result.receipt.outcome === "unknown" ? "unknown" : result.receipt.outcome === "cancelled" || result.receipt.outcome === "already_terminal" ? "succeeded" : "failed", owner_state: result.receipt.outcome, error_code: null, observed_at: result.receipt.occurred_at || new Date().toISOString(), operation_ref: result.receipt.ref, result_refs: [] };
             }
             if (record.request.action === "provider_runs.create") {
+              if (scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
               const run = await providers.create(input as any, scope, session);
               return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "submitted", owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs };
             }
@@ -642,7 +769,7 @@ export function createApp(
               return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: "succeeded", owner_state: "revoked", error_code: null, observed_at: new Date().toISOString(), operation_ref: input.username, result_refs: [] };
             }
             return ActionService.unavailable(record, "owner_action_adapter_not_configured");
-          });
+          }, identityOf(session));
           audit.complete(eventId, receipt.state === "succeeded" || receipt.state === "submitted" ? "succeeded" : receipt.state === "needs_contract" ? "unavailable" : "failed", receipt.error_code || undefined);
           if (receipt.action.startsWith("project.metadata.")) {
             audit.record({
@@ -663,7 +790,7 @@ export function createApp(
       }
       const receiptMatch = path.match(/^\/actions\/receipts\/([^/]+)$/);
       if (receiptMatch && r.method === "GET") {
-        const receipt = actions.receipt(decodeURIComponent(receiptMatch[1]), scope.id);
+        const receipt = actions.receipt(decodeURIComponent(receiptMatch[1]), scope.id, identityOf(session));
         audit.record({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.receipt_read", targetRef: receipt.receipt_ref, meta: { action: receipt.action } }, "succeeded");
         return json(withEpoch(session, receipt));
       }
@@ -684,6 +811,7 @@ export function createApp(
           coverage: { state: "partial", observed_at: new Date().toISOString(), reason: "仅包含已接入 Provider 回执；历史 owner 账本仍按来源读取" },
         }));
       if (path === "/provider-runs" && r.method === "POST") {
+        if (scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
         auth.csrf(r, session);
         const raw = await r.text();
         if (raw.length > 12000) throw new AuthError("invalid_provider_request", 400);
@@ -828,7 +956,7 @@ export function createApp(
           session.personal ? tasks.list(scope, "active") : Promise.resolve({ rows: [], connections: [], next_cursors: {} }),
           session.personal ? tasks.list(scope, "history") : Promise.resolve({ rows: [], connections: [], next_cursors: {} }),
           session.personal ? tasks.observe(scope) : Promise.resolve([]),
-          readCreativeFlow(scope, session),
+          drama.attentionFlows(scope, session),
         ]);
         const taskRows = [...active.rows, ...history.rows].filter((task, index, rows) => rows.findIndex((candidate) => candidate.task_key === task.task_key) === index);
         const connections = observed.length ? observed : [...active.connections, ...history.connections].filter((connection, index, rows) => rows.findIndex((candidate) => candidate.id === connection.id) === index);
@@ -838,7 +966,8 @@ export function createApp(
           tasks: taskRows,
           connections,
           notifications: notifications.list(scope.id, session.id, subject),
-          creativeFlow,
+          creativeFlows: creativeFlow.flows,
+          flowSample: { checked: creativeFlow.checked, total: creativeFlow.total },
           clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin },
         });
         const page = filterAndPageWorkQueue(full, filters, offset, limitRaw) as typeof full & { next_offset?: number };
@@ -909,7 +1038,7 @@ export function createApp(
           }
           if (
             !b ||
-            !["preview", "download"].includes(b.purpose) ||
+            !["preview", "download", "thumbnail"].includes(b.purpose) ||
             Object.keys(b).some((k) => k !== "purpose")
           )
             throw new AuthError("invalid_request", 400);
@@ -927,7 +1056,7 @@ export function createApp(
               scope,
               decodeURIComponent(artifact[1]),
               decodeURIComponent(artifact[2]),
-              b.purpose as "preview" | "download",
+              b.purpose as "preview" | "download" | "thumbnail",
             );
             audit.complete(eventId, "succeeded");
             return json(granted);
