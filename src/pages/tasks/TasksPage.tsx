@@ -13,6 +13,7 @@ import { taskTarget } from "../../task-links";
 import { TaskDetail, taskFamilyLabel } from "./TaskDetail";
 import { kindOf } from "../../components/ui/Kind";
 import { PromptCaptureSummary, promptFromTask, promptStateLabel } from "../../components/PromptCaptureSummary";
+import { FilterBar } from "../../components/FilterBar";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
 import { pageSizes, useListPreferences, type ListDensity, type PageSize } from "../../app/list-preferences";
 import { readErrorMessage } from "../../shared/read-model/read-state";
@@ -67,8 +68,8 @@ export default function TasksPage() {
     modality: "",
     results: params.get("results") || "",
     prompt: params.get("prompt") || "",
-    from: "",
-    through: "",
+    from: params.get("from") || "",
+    through: params.get("to") || "",
   };
 
   const update = useCallback((patch: Record<string, string | null>, history: "push" | "replace" = "replace", resetPagination = false) => {
@@ -99,7 +100,7 @@ export default function TasksPage() {
     return () => controller.abort();
   }, [legacy, scopeId, setParams, notify]);
 
-  const filtered = useMemo(() => filterTasks(tasks.rows, filters).filter((task) => inView(task, view)), [tasks.rows, view, filters.text, filters.connection, filters.owner, filters.project, filters.state, filters.family, filters.results, filters.prompt]);
+  const filtered = useMemo(() => filterTasks(tasks.rows, filters).filter((task) => inView(task, view)), [tasks.rows, view, filters.text, filters.connection, filters.owner, filters.project, filters.state, filters.family, filters.results, filters.prompt, filters.from, filters.through]);
   const counts = useMemo(() => ({
     all: tasks.rows.length,
     active: tasks.rows.filter(taskInProgress).length,
@@ -181,36 +182,13 @@ export default function TasksPage() {
     <NoticeStack notices={notices} />
 
     <Panel bodyClassName="p-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
-        <SearchField value={filters.text} onChange={(value) => update({ q: value || null }, "replace", true)} placeholder="标题、引用、项目" label="搜索任务" className="min-w-0 flex-1 sm:max-w-sm" />
-        <Button size="sm" variant={showFilters || activeFilters ? "secondary" : "ghost"} aria-expanded={showFilters} onClick={() => setShowFilters((value) => !value)} icon={<SlidersHorizontal className="size-3.5" />}>
-          筛选{activeFilters > 0 && <span className="tabular rounded-chip bg-primary px-1 text-2xs text-primary-ink">{activeFilters}</span>}
-        </Button>
-      </div>
-      {showFilters && <div className="fade-in grid grid-cols-2 gap-2 border-b border-line bg-panel-soft px-4 py-3 sm:grid-cols-4">
-        <Select aria-label="按 owner 筛选" value={filters.owner} onChange={(event) => update({ owner: event.target.value || null }, "replace", true)}>
-          <option value="">全部 owner</option>
-          {owners.map((owner) => <option key={owner} value={owner}>{ownerLabel(owner)}</option>)}
-        </Select>
-        <Select aria-label="按连接筛选" value={filters.connection} onChange={(event) => update({ connection: event.target.value || null }, "replace", true)}>
-          <option value="">全部连接</option>
-          {tasks.connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.label}</option>)}
-        </Select>
-        <Select aria-label="按状态筛选" value={filters.state} onChange={(event) => update({ state: event.target.value || null }, "replace", true)}>
-          <option value="">全部状态</option>
-          {states.map((state) => <option key={state} value={state}>{readableState(state)}</option>)}
-        </Select>
-        <Select aria-label="按结果筛选" value={filters.results} onChange={(event) => update({ results: event.target.value || null }, "replace", true)}>
-          <option value="">有无结果均可</option>
-          <option value="yes">有结果</option>
-          <option value="no">无结果</option>
-        </Select>
-        <Select aria-label="按提示词状态筛选" value={filters.prompt} onChange={(event) => update({ prompt: event.target.value || null }, "replace", true)}>
-          <option value="">全部提示词状态</option>
-          {["captured", "redacted", "queued", "capturing", "not_recorded", "blocked", "failed", "expired"].map((state) => <option key={state} value={state}>{promptStateLabel(state as Parameters<typeof promptStateLabel>[0])}</option>)}
-        </Select>
-        {activeFilters > 0 && <button type="button" className="col-span-full justify-self-start text-body-sm font-medium text-info hover:underline" onClick={() => update({ owner: null, connection: null, state: null, results: null, prompt: null, family: null, project: null }, "replace", true)}>清除筛选</button>}
-      </div>}
+      <div className="border-b border-line px-4 py-3"><FilterBar placeholder="搜索任务" dates onChange={() => resetPage(listKey)} facets={[
+        { key: "owner", label: "来源", options: [...new Set(tasks.connections.map((c) => c.owner))].map((v) => ({ value: v, label: ownerLabel(v) })) },
+        { key: "state", label: "状态", options: states.map((v) => ({ value: v, label: readableState(v) })) },
+        { key: "connection", label: "连接", options: tasks.connections.map((c) => ({ value: c.id, label: c.label })) },
+        { key: "results", label: "成果", options: [{ value: "yes", label: "有成果" }, { value: "no", label: "无成果" }] },
+        { key: "prompt", label: "提示词", options: ["captured", "redacted", "queued", "capturing", "not_recorded", "blocked", "failed", "expired"].map((v) => ({ value: v, label: promptStateLabel(v as Parameters<typeof promptStateLabel>[0]) })) },
+      ]} /></div>
 
       {resolving && <p className="flex items-center gap-2 border-b border-line px-4 py-2.5 text-body-sm text-muted"><LoaderCircle className="size-4 motion-safe:animate-spin" />正在按深链定位原任务…</p>}
 
@@ -237,7 +215,7 @@ export default function TasksPage() {
             onRowClick={(task) => update({ task: task.task_key || null })}
           />
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3 text-2xs text-muted">
-            <span className="tabular">显示 {filtered.length ? pageStart + 1 : 0}–{Math.min(pageStart + pageSize, filtered.length)} / {filtered.length} 条 · 第 {currentPage} / {pageCount} 页</span>
+            <span className="tabular">显示 {filtered.length ? pageStart + 1 : 0}–{Math.min(pageStart + pageSize, filtered.length)} / {filtered.length} 条已加载任务 · 第 {currentPage} / {pageCount} 页</span>
             <div className="flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-1.5">每页 <Select aria-label="每页数量" className="w-24" value={String(pageSize)} onChange={(event) => { setPageSize(Number(event.target.value) as PageSize); resetPage(listKey); }}>
                 {pageSizes.map((value) => <option key={value} value={value}>{value}</option>)}

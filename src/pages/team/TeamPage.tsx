@@ -21,8 +21,10 @@ import {
   type Column,
 } from "../../components/ui";
 import { formatFullTime, formatRelative, initials } from "../../shared/read-model/format";
+import { useSearchParams } from "react-router-dom";
+import { CollaborationDirectory } from "./CollaborationDirectory";
 
-type Tab = "identity" | "members" | "audit";
+type Tab = "identity" | "members" | "audit" | "collaboration";
 
 const humanize = (value: string) => value.replace(/[_.-]+/g, " ");
 
@@ -86,7 +88,8 @@ const auditColumns: Column<AuditRow>[] = [
 
 export default function TeamPage() {
   const { isAdmin } = useWorkspace();
-  const [tab, setTab] = useState<Tab>("identity");
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState<Tab>(params.get("tab") === "collaboration" ? "collaboration" : "identity");
   return <div className="page-enter space-y-5" data-page="team">
     <h1 className="sr-only">团队与设置</h1>
     <PageToolbar summary="当前登录身份、授权范围，以及各 owner 返回的成员与审计记录。角色和范围由服务端会话决定，浏览器不能自报。" />
@@ -98,11 +101,13 @@ export default function TeamPage() {
       options={[
         { id: "identity", label: "身份与范围" },
         { id: "members", label: "成员" },
+        { id: "collaboration", label: "协作组织" },
         ...(isAdmin ? [{ id: "audit" as const, label: "审计" }] : []),
       ]}
     >
       <TabPanel value="identity"><IdentityTab /></TabPanel>
       <TabPanel value="members"><MembersTab /></TabPanel>
+      <TabPanel value="collaboration"><CollaborationDirectory /></TabPanel>
       {isAdmin && <TabPanel value="audit"><AuditTab /></TabPanel>}
     </Tabs>
   </div>;
@@ -169,7 +174,7 @@ function MembersTab() {
   const read = useScopedRead((scope, signal) => api.organization(scope, signal));
   const sources = read.data?.sources || [];
   const members = sources.flatMap((source) => source.members);
-  const allBlocked = sources.length > 0 && sources.every((source) => source.state !== "complete");
+  const allBlocked = sources.length > 0 && sources.every((source) => !["complete", "partial"].includes(source.state));
   return <div className="space-y-4">
     {sources.length > 0 && <div className="flex flex-wrap items-center gap-1.5"><span className="mr-1 text-2xs text-muted">来源覆盖</span>{sources.map((source) => <CoverageChip key={source.owner} owner={source.owner} state={source.state} reason={source.reason} />)}</div>}
     {allBlocked && <InlineNotice tone="info" icon={<LockKeyhole />}>所有成员来源都不可读。成员投影需要 owner 委托（组织身份登录）；个人会话不会改用其他凭据补齐。</InlineNotice>}

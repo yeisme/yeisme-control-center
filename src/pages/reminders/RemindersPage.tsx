@@ -32,6 +32,7 @@ import {
 import { formatFullTime, formatRelative, formatTime } from "../../shared/read-model/format";
 import { recoveryLabels } from "../../shared/read-model/tasks";
 import { reminderGroup, reminderGroupLabels, reminderStateLabels, type ReminderGroup } from "../../notifications";
+import { FilterBar, matchesFacet } from "../../components/FilterBar";
 import { taskStateLabels } from "../../task-observation";
 
 const groups: ReminderGroup[] = ["new", "open", "quiet", "archived"];
@@ -72,7 +73,7 @@ export default function RemindersPage() {
   const focusedRow = useRef<HTMLLIElement | null>(null);
   const scrolledFor = useRef<string | null>(null);
 
-  const rows = useMemo(() => reminders.rows.filter((item) => reminderGroup(item) === group), [reminders.rows, group]);
+  const rows = useMemo(() => reminders.rows.filter((item) => reminderGroup(item) === group && matchesFacet(item.owner, params.get("owner") || "") && matchesFacet(item.read_at ? "read" : "unread", params.get("read") || "") && item.title.toLocaleLowerCase().includes((params.get("q") || "").toLocaleLowerCase()) && (!params.get("from") || item.first_seen_at >= params.get("from")!) && (!params.get("to") || item.first_seen_at.slice(0, 10) <= params.get("to")!)), [reminders.rows, group, params]);
   const counts = useMemo(() => Object.fromEntries(groups.map((id) => [id, reminders.rows.filter((item) => reminderGroup(item) === id).length])) as Record<ReminderGroup, number>, [reminders.rows]);
 
   useEffect(() => {
@@ -138,14 +139,14 @@ export default function RemindersPage() {
     syncFailed && reminders.rows.length > 0 && <InlineNotice key="sync" tone="warning">提醒同步失败，下面显示的是上一次同步的结果，可能不完整。</InlineNotice>,
   ];
 
-  return <div className="page-enter space-y-5" data-page="reminders" data-unread={reminders.unread}>
+  return <div className="page-enter space-y-5" data-page="reminders" data-unread={reminders.attention}>
     <h1 className="sr-only">提醒中心</h1>
     <PageToolbar
       summary="同一次失败只提醒一次；revision、错误码或 owner 状态变化后，才会作为新失败重新出现。确认、免提醒和归档只写入控制中心数据库，不会改动 owner 任务。"
       actions={<Button size="sm" variant="ghost" disabled={busy} onClick={() => reminders.refresh()} icon={<RefreshCw className="size-3.5" />}>重新观察</Button>}
-      metrics={<div data-reminder-unread={reminders.unread}>
+      metrics={<div data-reminder-unread={reminders.attention}>
         <MetricStrip label="提醒概况" items={[
-          { label: "未确认", value: reminders.unread, tone: reminders.unread > 0 ? "warning" : "neutral" },
+          { label: "未确认", value: reminders.attention, tone: reminders.attention > 0 ? "warning" : "neutral" },
           { label: "提醒总数", value: reminders.rows.length },
           { label: "已观察任务", value: tasks.rows.length },
         ]} />
@@ -153,6 +154,7 @@ export default function RemindersPage() {
       meta={tasks.observedAt && <span className="inline-flex items-center gap-1.5 text-2xs text-muted"><Clock3 className="size-3.5" />任务观察于 {formatRelative(tasks.observedAt)}</span>}
     />
     <NoticeStack notices={toolbarNotices} />
+    <FilterBar placeholder="搜索通知与提醒" dates facets={[{ key: "owner", label: "来源", options: [...new Set(reminders.rows.map((v) => v.owner))].map((v) => ({ value: v, label: ownerLabel(v) })) }, { key: "read", label: "阅读状态", options: [{ value: "read", label: "已读" }, { value: "unread", label: "未读" }] }]} />
     <Tabs<ReminderGroup>
       value={group}
       onChange={(value) => { setParams({ group: value }, { replace: true }); setSelected([]); }}
@@ -195,7 +197,7 @@ export default function RemindersPage() {
               <Checkbox className="mt-1" checked={checked} label={`选择 ${title}`} onChange={() => setSelected((current) => checked ? current.filter((id) => id !== item.id) : [...current, item.id])} />
               <div className="min-w-0 space-y-1.5">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <button type="button" className="max-w-full truncate text-left text-sm font-semibold hover:underline" onClick={() => navigate(`/tasks?task=${encodeURIComponent(item.task_key)}`)}>{title}</button>
+                  <button type="button" className="max-w-full truncate text-left text-sm font-semibold hover:underline" onClick={() => navigate(item.target_path || `/tasks?task=${encodeURIComponent(item.task_key)}`)}>{title}</button>
                   <TaskStatePill state={item.task_state} />
                   <Pill size="sm" tone={item.state === "unread" ? "warning" : "neutral"}>{reminderStateLabels[item.state] || item.state}</Pill>
                   {item.presence === "stale" && <Pill size="sm" tone="neutral">观察中缺失</Pill>}

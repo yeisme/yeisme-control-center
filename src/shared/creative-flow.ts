@@ -14,6 +14,7 @@ export type CreativeFlowState =
   | "accepted"
   | "ready"
   | "waiting_review"
+  | "in_progress"
   | "blocked"
   | "stale"
   | "missing"
@@ -89,4 +90,20 @@ export interface CreativeFlowProjection {
     evidence_refs: string[];
   };
   launch_contexts: CreativeFlowLaunchContext[];
+}
+
+/** One owner-state vocabulary for every reader, so a Scaena breakdown and an Auctra stage compare like for like. */
+export function flowStateFrom(value: unknown): CreativeFlowState {
+  const raw = typeof value === "string" ? value.slice(0, 96).toLowerCase() : "";
+  if (["accepted", "approved", "adopted"].includes(raw)) return "accepted";
+  if (["ready", "export_ready", "handoff_ready"].includes(raw)) return "ready";
+  if (["review", "reviewing", "waiting_review", "review_required", "needs_review", "pending_review"].includes(raw)) return "waiting_review";
+  if (["queued", "running", "in_progress", "processing"].includes(raw)) return "in_progress";
+  if (["blocked", "failed", "rejected", "cancelled", "canceled"].includes(raw)) return "blocked";
+  if (["stale", "superseded"].includes(raw)) return "stale";
+  if (raw === "missing") return "missing";
+  if (raw === "needs_contract") return "needs_contract";
+  if (raw === "forbidden") return "forbidden";
+  if (raw === "unavailable") return "unavailable";
+  return "unknown";
 }

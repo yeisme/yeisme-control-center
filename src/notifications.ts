@@ -53,7 +53,8 @@ export function failureVersionLabel(item: { task_revision?: string; last_error_c
 }
 
 /** Home attention counts only fresh unread reminders, not every historical failure. */
-export function countsAsHomeAttention(item: { state: string; priority: string; presence?: string; snoozed_until?: string | null }, now = Date.now()) {
+export function countsAsHomeAttention(item: { category?: string; state: string; priority: string; presence?: string; snoozed_until?: string | null }, now = Date.now()) {
+  if (item.category && item.category !== "failure") return false;
   if (item.state !== "unread" || item.priority !== "normal" || item.presence === "stale") return false;
   if (item.snoozed_until && Date.parse(item.snoozed_until) > now) return false;
   return true;

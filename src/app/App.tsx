@@ -16,6 +16,7 @@ import "../styles/app.css";
 const loaders: Record<WorkspacePage, () => Promise<{ default: ComponentType }>> = {
   home: () => import("../pages/home/HomePage"),
   projects: () => import("../pages/projects/ProjectsPage"),
+  drama: () => import("../pages/drama/DramaPage"),
   creation: () => import("../pages/creation/CreationPage"),
   assets: () => import("../pages/assets/AssetsPage"),
   tasks: () => import("../pages/tasks/TasksPage"),

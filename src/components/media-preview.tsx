@@ -97,7 +97,7 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
 
   const target = previewKey ? resolve(previewKey) : null;
   const identity = `${scopeId}|${generation}|${previewKey || ""}|${target?.task.task_key || ""}|${target?.result.ref || ""}`;
-  const cacheIdentity = `${scopeId}|${generation}|${session?.epoch || 0}`;
+  const cacheIdentity = `${session?.identity}|${scopeId}|${generation}|${session?.epoch || 0}`;
 
   const fetchBlob = useCallback(async (url: string, expiresAt: number) => {
     const response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
@@ -116,7 +116,7 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
   }, []);
 
   const fallbackToBlob = useCallback(async (next: PreviewTarget, grant: ArtifactGrant) => {
-    const key = mediaCacheKey(scopeId, session?.epoch, next.task.task_key || next.task.locator.task_ref, next.result.ref, grant.mime || next.result.mime);
+    const key = mediaCacheKey(scopeId, session?.epoch, next.task.task_key || next.task.locator.task_ref, next.result.ref + "|" + (next.result.version || next.task.revision), grant.mime || next.result.mime);
     const expiresAt = Date.parse(grant.expires_at);
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("media_grant_expired");
     const value = await mediaSessionCache.load(key, () => fetchBlob(grant.url, expiresAt),);
@@ -157,7 +157,7 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
       .then(async (grant) => {
         if (cancelled || identityRef.current !== identity || requestId !== loadNonce.current) return;
         const expiresAt = Date.parse(grant.expires_at);
-        const key = mediaCacheKey(scopeId, session.epoch, target.task.task_key || target.task.locator.task_ref, target.result.ref, grant.mime || target.result.mime);
+        const key = mediaCacheKey(scopeId, session.epoch, target.task.task_key || target.task.locator.task_ref, target.result.ref + "|" + (target.result.version || target.task.revision), grant.mime || target.result.mime);
         const cached = mediaSessionCache.get(key);
         const shouldPreload = target.kind === "image" || (target.result.bytes !== null && target.result.bytes <= 8 * 1024 * 1024);
         let sourceUrl = grant.url;
@@ -210,7 +210,7 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
 
   const fallback = useCallback(async () => {
     if (!state.target || !state.grant) throw new Error("media_grant_expired");
-    const key = mediaCacheKey(scopeId, session?.epoch, state.target.task.task_key || state.target.task.locator.task_ref, state.target.result.ref, state.grant.mime || state.target.result.mime);
+    const key = mediaCacheKey(scopeId, session?.epoch, state.target.task.task_key || state.target.task.locator.task_ref, state.target.result.ref + "|" + (state.target.result.version || state.target.task.revision), state.grant.mime || state.target.result.mime);
     try {
       const value = await fallbackToBlob(state.target, state.grant);
       setState((current) => ({ ...current, status: "ready", sourceUrl: value.url, transport: "blob", error: null }));
@@ -226,7 +226,7 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
     setState((current) => ({ ...current, pendingDownload: true, error: null }));
     try {
       const grant = await api.artifactAccess(scopeId, next.task.task_key, next.result.ref, "download", session.csrf);
-      const key = mediaCacheKey(scopeId, session.epoch, next.task.task_key || next.task.locator.task_ref, next.result.ref, grant.mime || next.result.mime);
+      const key = mediaCacheKey(scopeId, session.epoch, next.task.task_key || next.task.locator.task_ref, next.result.ref + "|" + (next.result.version || next.task.revision), grant.mime || next.result.mime);
       const cached = mediaSessionCache.get(key);
       const anchor = document.createElement("a");
       anchor.href = cached?.url || grant.url;
@@ -259,7 +259,8 @@ export function InlineMediaPreview({ controller, className = "" }: { controller:
   const { status, target, grant, sourceUrl, autoplay } = controller;
   const { fallback, reportError } = controller;
   const [imageExpanded, setImageExpanded] = useState(false);
-  useEffect(() => setImageExpanded(false), [target?.key]);
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => { setImageExpanded(false); setZoom(1); }, [target?.key]);
   if (!target || status === "closed") return null;
 
   const mime = grant?.mime || target.result.mime || "";
@@ -275,12 +276,15 @@ export function InlineMediaPreview({ controller, className = "" }: { controller:
   if (status === "blocked" || status === "error") return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken p-5 text-center`} data-inline-media-preview={status}>{close}<div><KindBadge kind={target.kind} size="lg" className="mx-auto opacity-70" /><p className="mt-3 text-[13px] font-medium text-ink">内容暂不可预览</p><p className="mt-1 text-2xs text-muted">{grantErrorLabel(controller.error || "media_unavailable")}</p>{retry}</div></div>;
   if (status !== "ready" || !sourceUrl) return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken`} data-inline-media-preview="empty">{close}<KindBadge kind={target.kind} size="lg" /></div>;
 
-  if (isImage) return <div className={`${stageClass} relative grid place-items-center overflow-hidden rounded-[12px] border border-line bg-sidebar ${imageExpanded ? "min-h-[280px] max-h-[min(68dvh,560px)]" : "aspect-[16/10] max-h-[260px]"}`} data-inline-media-preview="image" data-inline-media-expanded={imageExpanded ? "true" : undefined}>
+  if (isImage) return <div className={`${stageClass} relative grid place-items-center overflow-auto rounded-[12px] border border-line bg-sidebar ${imageExpanded ? "min-h-[280px] max-h-[min(68dvh,560px)]" : "aspect-[16/10] max-h-[260px]"}`} data-inline-media-preview="image" data-inline-media-expanded={imageExpanded ? "true" : undefined}>
     <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
+      <Button size="sm" variant="secondary" aria-label="缩小图片" disabled={zoom <= .5} onClick={() => setZoom((z) => Math.max(.5, z / 1.25))}>−</Button>
+      <Button size="sm" variant="secondary" aria-label="适应窗口" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</Button>
+      <Button size="sm" variant="secondary" aria-label="放大图片" disabled={zoom >= 4} onClick={() => setZoom((z) => Math.min(4, z * 1.25))}>＋</Button>
       <button type="button" aria-label={imageExpanded ? "收起全图" : "查看全图"} title={imageExpanded ? "收起全图" : "查看全图"} onClick={() => setImageExpanded((value) => !value)} className="grid size-7 place-items-center rounded-[7px] bg-panel/90 text-muted shadow-panel hover:text-ink">{imageExpanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}</button>
       {imageClose}
     </div>
-    <img src={sourceUrl} alt={target.result.name || "结果预览"} className={imageExpanded ? "max-h-[min(64dvh,520px)] max-w-full object-contain" : "h-full w-full object-contain"} onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} />
+    <img style={{ transform: `scale(${zoom})`, transformOrigin: "center" }} src={sourceUrl} alt={target.result.name || "结果预览"} className={imageExpanded ? "max-h-[min(64dvh,520px)] max-w-full object-contain" : "h-full w-full object-contain"} onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} />
   </div>;
   if (isVideo) return <div className={`${stageClass} relative flex max-h-[260px] items-center justify-center overflow-hidden rounded-[12px] border border-line bg-black`} data-inline-media-preview="video">{close}<video src={sourceUrl} controls playsInline preload="metadata" autoPlay={autoplay} className="max-h-[260px] w-full object-contain" onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} /></div>;
   if (isAudio) return <div className={`${stageClass} relative rounded-[12px] border border-line bg-kind-audio-soft p-3`} data-inline-media-preview="audio">{close}<div className="mb-2 flex items-center gap-2"><KindBadge kind="audio" size="sm" /><div className="min-w-0"><p className="truncate text-[13px] font-medium text-ink">{target.result.name || "未命名音频"}</p><p className="truncate text-2xs text-muted">{resultMeta(target.result).join(" · ") || "音频预览"}{controller.transport === "cached" ? " · 会话缓存" : controller.transport === "blob" ? " · 已下载" : " · 动态流"}</p></div></div><audio src={sourceUrl} controls preload="metadata" className="w-full" onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} /></div>;

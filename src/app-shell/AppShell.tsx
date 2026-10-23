@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Bell, BellRing, Building2, Check, ChevronsUpDown, ClipboardCheck, Cpu, FolderKanban, Images, LayoutDashboard, ListTodo, LogOut, Menu, Monitor, Moon,
+  Bell, BellRing, Building2, Check, ChevronsUpDown, Clapperboard, ClipboardCheck, Cpu, FolderKanban, Images, LayoutDashboard, ListTodo, LogOut, Menu, Monitor, Moon,
   PanelLeftClose, PanelLeftOpen, RefreshCw, ScrollText, Search, ServerCog, ShieldCheck, Sparkles, Sun, UsersRound, Wallet, X, ArrowRight,
 } from "../icons";
 import { navItems, navItem, pageFromPath, type WorkspacePage } from "./navigation";
 import { useWorkspace } from "../app/workspace";
 import { useTasks } from "../app/tasks-context";
 import { useNotifications } from "../app/notifications-context";
-import { Button, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSeparator, MenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger, TaskStatePill, cx, ownerLabel, type Tone } from "../components/ui";
+import { api, errorCode } from "../shared/api/control-center-client";
+import { Button, DetailSheet, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSeparator, MenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger, TaskStatePill, cx, ownerLabel, type Tone } from "../components/ui";
 import { formatRelative, initials } from "../shared/read-model/format";
 import { reminderStateLabels } from "../notifications";
 import { useTheme, type ThemePreference } from "./theme";
@@ -18,6 +19,7 @@ import { toolCatalogCacheKey, type ToolCatalog } from "../shared/tool-catalog";
 const icons: Record<WorkspacePage, typeof LayoutDashboard> = {
   home: LayoutDashboard,
   projects: FolderKanban,
+  drama: Clapperboard,
   creation: Sparkles,
   assets: Images,
   tasks: ListTodo,
@@ -149,7 +151,7 @@ function ScopeSwitcher({ collapsed }: { collapsed: boolean }) {
           <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-white/10 text-[13px] font-semibold text-white dark:text-sidebar-ink">{initials(label.replace(/^Fixture\s*·\s*/, ""))}</span>
           <span className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}>
             <span className="block truncate text-[13px] font-semibold text-white dark:text-sidebar-ink">{label}</span>
-            <span className="block truncate text-2xs text-sidebar-muted">{scope?.project ? `项目 ${scope.project}` : "授权范围"} · 只读</span>
+            <span className="block truncate text-2xs text-sidebar-muted">{scope?.project ? `项目 ${scope.project}` : "授权范围"} · 已授权</span>
           </span>
           <ChevronsUpDown className={cx("size-4 shrink-0 text-sidebar-muted", collapsed && "lg:hidden")} />
         </button>
@@ -207,7 +209,7 @@ function Topbar({ page, collapsed, onToggleCollapsed, onOpenMobile, onOpenSearch
       <strong className="truncate font-semibold text-ink">{navItem(page).label}</strong>
     </nav>
     <span className="ml-1 hidden items-center gap-1.5 rounded-full border border-line bg-panel px-2 py-0.5 text-2xs font-medium text-muted md:inline-flex">
-      <ShieldCheck className="size-3 text-success" />真实只读
+      <ShieldCheck className="size-3 text-success" />真实连接
     </span>
     <div className="ml-auto flex items-center gap-1.5">
       <button type="button" onClick={onOpenSearch} className="hidden h-9 w-64 items-center gap-2 rounded-control border border-line bg-panel px-3 text-[13px] text-faint transition-colors hover:border-line-strong md:flex">
@@ -267,43 +269,34 @@ function SourceHealth({ onNavigate }: { onNavigate: (page: WorkspacePage) => voi
 
 function AttentionPopover({ onNavigate }: { onNavigate: (page: WorkspacePage) => void }) {
   const reminders = useNotifications();
+  const { session } = useWorkspace();
   const navigate = useNavigate();
-  const items = useMemo(() => reminders.rows.filter((item) => item.state === "unread" && item.priority === "normal" && item.presence === "live").slice(0, 6), [reminders.rows]);
-  const count = reminders.unread;
-  return <PopoverRoot>
-    <PopoverTrigger asChild>
-      <Button variant="ghost" size="icon-sm" aria-label={count ? `需要关注 ${count} 项` : "需要关注"} className="relative" data-attention-count={count}>
-        <Bell className="size-[18px]" />
-        {count > 0 && <span className="absolute right-1 top-1 size-2 rounded-full bg-danger ring-2 ring-canvas" />}
-      </Button>
-    </PopoverTrigger>
-    <PopoverContent className="w-[min(360px,calc(100vw-24px))] p-0">
-      <div className="border-b border-line px-4 py-3">
-        <p className="text-[13px] font-semibold">需要关注 <span className="tabular text-muted">{count}</span></p>
-        <p className="text-2xs text-muted">未确认的失败提醒。轮询不会重复计数。</p>
-      </div>
-      {items.length ? <ul className="max-h-80 divide-y divide-line overflow-y-auto">
-        {items.map((item) => <li key={item.id}>
-          <button type="button" className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => navigate(`/reminders?focus=${encodeURIComponent(item.id)}`)}>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span>
-              <span className="block truncate text-2xs text-muted">{ownerLabel(item.owner)} · {item.project} · {reminderStateLabels[item.state]}</span>
-            </span>
-            <TaskStatePill state={item.task_state} />
-          </button>
-        </li>)}
-      </ul> : <p className="px-4 py-8 text-center text-[13px] text-muted">没有未确认的失败提醒</p>}
-      <div className="border-t border-line p-2">
-        <Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => onNavigate("reminders")}>打开提醒中心<ArrowRight className="size-4" /></Button>
-      </div>
-    </PopoverContent>
-  </PopoverRoot>;
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState(false);
+  const [limit, setLimit] = useState(10);
+  const [failure, setFailure] = useState("");
+  const [mobile, setMobile] = useState(() => window.innerWidth < 640);
+  useEffect(() => { const query = matchMedia("(max-width: 639px)"); const update = () => setMobile(query.matches); query.addEventListener("change", update); return () => query.removeEventListener("change", update); }, []);
+  const filtered = reminders.rows.filter((item) => all || !item.read_at);
+  const content = <div className="min-w-0">
+    <div className="border-b border-line px-4 py-3"><p className="text-[13px] font-semibold">通知 · {reminders.unread} 条未读</p><p className="text-2xs text-muted">{reminders.error ? "部分来源暂不可用" : reminders.syncing ? "正在核验来源" : "阅读通知不会确认处理提醒"}</p></div>
+    <div className="flex gap-2 p-2"><Button size="sm" variant={!all ? "secondary" : "ghost"} onClick={() => { setAll(false); setLimit(10); }}>未读</Button><Button size="sm" variant={all ? "secondary" : "ghost"} onClick={() => { setAll(true); setLimit(10); }}>全部</Button></div>
+    {failure && <p role="alert" className="px-4 text-xs text-danger">{failure}</p>}
+    {filtered.length ? <ul className="max-h-[60dvh] divide-y divide-line overflow-y-auto">{filtered.slice(0, limit).map((item) => <li key={item.id}><button className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => {
+      if (!session) return;
+      void api.readNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => { reminders.apply(reminders.rows.map((row) => row.id === item.id ? notification : row)); setOpen(false); navigate(item.target_path || `/tasks?task=${encodeURIComponent(item.task_key)}`); }).catch((error) => setFailure(errorCode(error)));
+    }}><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span><span className="block text-2xs text-muted">{item.category === "failure" ? `${ownerLabel(item.owner)} · ${reminderStateLabels[item.state]}` : "项目协作"} · {item.read_at ? "已读" : "未读"}</span></span>{!item.read_at && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />}</button></li>)}</ul> : <p className="p-8 text-center text-sm text-muted">{all ? "暂无通知" : "没有未读通知"}</p>}
+    {(filtered.length > limit || reminders.hasMore) && <Button size="sm" variant="ghost" className="w-full" onClick={() => { setLimit((n) => n + 10); if (filtered.length <= limit) reminders.loadMore(); }}>加载更多</Button>}
+    <div className="border-t border-line p-2"><Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => { setOpen(false); onNavigate("reminders"); }}>打开提醒中心<ArrowRight className="size-4" /></Button></div>
+  </div>;
+  const trigger = <Button variant="ghost" size="icon-sm" aria-label={reminders.unread ? `需要关注 ${reminders.unread} 项` : "需要关注"} className="relative" data-attention-count={reminders.unread} onClick={() => setOpen(true)}><Bell className="size-[18px]" />{reminders.unread > 0 && <span className="absolute right-1 top-1 size-2 rounded-full bg-danger ring-2 ring-canvas" />}</Button>;
+  return mobile ? <>{trigger}<DetailSheet open={open} onOpenChange={setOpen} title="通知">{content}</DetailSheet></> : <PopoverRoot open={open} onOpenChange={setOpen}><PopoverTrigger asChild>{trigger}</PopoverTrigger><PopoverContent className="w-[min(360px,calc(100vw-24px))] p-0">{content}</PopoverContent></PopoverRoot>;
 }
 
 function IdentityMenu({ onNavigate }: { onNavigate: (page: WorkspacePage) => void }) {
   const { session, logout } = useWorkspace();
   if (!session) return null;
-  const roleLabel = session.role === "admin" ? "控制中心管理员" : "只读成员";
+  const roleLabel = session.role === "admin" ? "控制中心管理员" : "控制中心成员";
   return <MenuRoot>
     <MenuTrigger asChild>
       <button type="button" aria-label={`当前身份：${session.name}`} className="ml-1 grid size-8 place-items-center rounded-full bg-primary text-[13px] font-semibold text-primary-ink ring-2 ring-transparent transition-shadow hover:ring-line-strong">{initials(session.name)}</button>

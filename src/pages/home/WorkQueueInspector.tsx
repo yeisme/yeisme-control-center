@@ -6,6 +6,7 @@ import type { ActionOwner, ControlAction } from "../../shared/action-contract";
 import { creativeFlowStages } from "../../shared/creative-flow";
 import { TaskInspectorFrame, type TaskInspectorMode } from "../tasks/TaskDetail";
 import { useWorkspace } from "../../app/workspace";
+import { OwnerLinkRow } from "../../components/OwnerLinkRow";
 import { Button, CopyRef, CoverageChip, Facts, InlineNotice, Pill, TaskStatePill, Unknown, ownerLabel, useToast, type Tone } from "../../components/ui";
 import { createIdempotencyKey } from "../../shared/action-runner";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
@@ -163,6 +164,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
     return undefined;
   };
 
+  const episodeRef = item.workflow_stage ? item.safe_links.find((link) => link.kind === "owner" && link.launch?.episode_ref)?.launch?.episode_ref : undefined;
   const internalLinks = item.safe_links.filter((link) => link.kind === "control-center");
   const ownerLinks = item.safe_links.filter((link) => link.kind === "owner");
   const reason = workQueueReasonLabel(item.attention_reason);
@@ -206,7 +208,8 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
               <span className={stage === item.workflow_stage ? "rounded-chip bg-info-soft px-2 py-1 font-medium text-info" : "rounded-chip border border-line px-2 py-1"}>{stageLabels[stage]}</span>
             </li>)}
           </ol>
-          {item.lineage_refs?.length ? <div className="space-y-1"><p className="text-2xs text-muted">安全引用</p><div className="flex flex-wrap gap-1.5">{item.lineage_refs.map((ref) => <CopyRef key={ref} value={ref} label="引用" />)}</div></div> : null}
+          {item.lineage_refs?.length ? <div className="space-y-1"><p className="text-2xs text-muted">安全引用</p><div className="flex flex-wrap gap-1.5">{[...new Set(item.lineage_refs)].map((ref) => <CopyRef key={ref} value={ref} label="引用" />)}</div></div> : null}
+          {episodeRef && <Button size="sm" variant="secondary" icon={<ArrowRight className="size-3.5" />} onClick={() => onNavigate(`/drama?episode=${encodeURIComponent(episodeRef)}`)}>在剧集制作中查看这一集</Button>}
         </> : <p className="text-body-sm text-muted">当前工作项不属于剧本到分镜流程。</p>}
       </section>
 
@@ -247,7 +250,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
         <h3 className="text-body-sm font-semibold text-ink">安全交接</h3>
         <div className="space-y-2">
           {internalLinks.map((link) => <Button key={`${link.target}:${link.ref || ""}`} size="sm" variant="secondary" onClick={() => onNavigate(`/${link.target}${link.ref ? `?${link.target === "tasks" ? "task" : "ref"}=${encodeURIComponent(link.ref)}` : ""}`)} icon={<ArrowRight className="size-3.5" />}>{link.label}</Button>)}
-          {ownerLinks.map((link) => <div key={`${link.target}:${link.launch?.target_route || ""}`} className="flex items-center gap-3 rounded-control border border-line bg-panel-soft p-3"><Route className="size-4 shrink-0 text-faint" /><span className="min-w-0 flex-1"><span className="block text-body-sm font-medium">{link.label}</span><span className="block text-2xs text-muted">受控 LaunchContext · owner 负责最终读取</span>{link.command && <code className="mt-1 block break-all text-2xs text-faint">{link.command}</code>}</span>{link.launch?.url ? <Button size="sm" variant="secondary" onClick={() => { const opened = window.open(link.launch?.url, "_blank", "noopener,noreferrer"); if (!opened) window.location.assign(link.launch!.url!); }}>打开</Button> : <Button size="sm" variant="ghost" disabled disabledReason={link.launch?.owner === "muweave" ? "MuWeave 尚未提供可打开的入口合同" : "owner 没有提供可打开的入口，可复制上方命令"}>{link.launch?.owner === "muweave" ? "待合同" : "复制命令"}</Button>}</div>)}
+          {ownerLinks.map((link) => <OwnerLinkRow key={`${link.target}:${link.launch?.target_route || ""}`} link={link} />)}
           {!internalLinks.length && !ownerLinks.length && <p className="text-body-sm text-muted">当前工作项没有安全交接入口。</p>}
         </div>
       </section>

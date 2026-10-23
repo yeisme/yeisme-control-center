@@ -2,7 +2,8 @@ import { useMemo, useState, type ChangeEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { AudioLines, Check, CircleAlert, Cpu, FileImage, Image, LockKeyhole, Plus, Sparkles, X, Video } from "../../icons";
 import { api, type ProviderCapabilityProjection } from "../../shared/api/control-center-client";
-import { useScopedRead } from "../../app/workspace";
+import { BatchGeneration } from "./BatchGeneration";
+import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
 import { Button, EmptyState, Field, InlineNotice, PageToolbar, Panel, Pill, ReadStateView, Select, SkeletonRows, Textarea, cx, ownerLabel } from "../../components/ui";
 import { reasonLabel } from "../../shared/read-model/labels";
@@ -27,6 +28,12 @@ const modalityLabel = { image: "图像", video: "视频", audio: "音频", text:
 const roleLabels: Record<CreativeReferenceRole, string> = { subject: "主体", style: "风格", composition: "构图", motion: "运动", first_frame: "首帧", last_frame: "尾帧", keyframe: "关键帧" };
 
 export default function CreationPage() {
+  const { scopeId } = useWorkspace();
+  const project = useScopedRead((_scope, signal) => api.sharedProject(scopeId, signal), { enabled: scopeId.startsWith("project_"), key: scopeId });
+  if (scopeId.startsWith("project_")) return <ReadStateView status={project.status} error={project.error} onRetry={project.reload} skeleton={<SkeletonRows rows={5} />}>{project.data && <BatchGeneration key={project.data.id} project={project.data} />}</ReadStateView>;
+  return <OwnerCreationPage />;
+}
+function OwnerCreationPage() {
   const navigate = useNavigate();
   const capabilities = useScopedRead((scope, signal) => api.capabilities(scope, signal), { isEmpty: (data) => data.capabilities.length === 0 });
   const usage = useScopedRead((scope, signal) => api.usage(scope, signal));

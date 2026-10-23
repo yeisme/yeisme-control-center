@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, errorClassOf, errorCode, isAbort, type AuthMethods, type SessionScope, type WorkspaceSession } from "../shared/api/control-center-client";
+import { clearMediaSessionCaches } from "./media-cache";
 import { statusForFailure, type ReadState } from "../shared/read-model/read-state";
 
 export type AuthPhase = "loading" | "login_required" | "forbidden" | "offline" | "ready";
@@ -52,7 +53,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (isAbort(error)) return;
       const code = errorCode(error);
       setPhaseCode(code);
-      setSession(null);
+      clearMediaSessionCaches();
+    setSession(null);
       const errorClass = errorClassOf(error);
       setPhase(errorClass === "login_required" ? "login_required" : errorClass === "forbidden" ? "forbidden" : "offline");
     }
@@ -66,14 +68,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [loadSession]);
 
   const setScope = useCallback((id: string) => {
+    clearMediaSessionCaches();
     sessionStorage.setItem(scopeStorageKey, id);
     setScopeId(id);
     setGeneration((value) => value + 1);
   }, []);
 
-  const refresh = useCallback(() => setGeneration((value) => value + 1), []);
+  const refresh = useCallback(() => { void loadSession(); setGeneration((value) => value + 1); }, [loadSession]);
 
   const expire = useCallback(() => {
+    clearMediaSessionCaches();
     setSession(null);
     setPhase("login_required");
     setPhaseCode("login_required");
@@ -83,6 +87,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const noteEpoch = useCallback((epoch: number | undefined) => {
     // Only a newer epoch invalidates; an older one is a late response that the generation guard already discards.
     if (epoch === undefined || epochRef.current === undefined || epoch <= epochRef.current || reloading.current) return;
+    clearMediaSessionCaches();
     reloading.current = true;
     void loadSession().finally(() => {
       reloading.current = false;
@@ -98,6 +103,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     const csrf = session?.csrf;
+    clearMediaSessionCaches();
     setSession(null);
     setPhase("login_required");
     setPhaseCode("");
@@ -160,6 +166,8 @@ export function useScopedRead<T extends object>(
   optionsRef.current = options;
   const identity = `${scopeId}|${generation}|${key}`;
   const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const loadedIdentity = useRef("");
   const failures = useRef(0);
 
   useEffect(() => {
@@ -179,6 +187,7 @@ export function useScopedRead<T extends object>(
         if (controller.signal.aborted || identityRef.current !== requested) return;
         noteEpoch("epoch" in data && typeof data.epoch === "number" ? data.epoch : undefined);
         failures.current = 0;
+        loadedIdentity.current = requested;
         const empty = optionsRef.current.isEmpty?.(data) ?? false;
         setState({ status: empty ? "empty" : "ready", data, error: null, observedAt: new Date().toISOString() });
         schedule(data);
@@ -209,5 +218,5 @@ export function useScopedRead<T extends object>(
   }, [identity, enabled, scopeId, phase, tick, expire, noteEpoch]);
 
   const reload = useCallback(() => setTick((value) => value + 1), []);
-  return { ...state, reload };
+  return loadedIdentity.current === identity || state.data === null ? { ...state, reload } : { status: "loading", data: null, error: null, observedAt: null, reload };
 }

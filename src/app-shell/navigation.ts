@@ -1,6 +1,7 @@
 export type WorkspacePage =
   | "home"
   | "projects"
+  | "drama"
   | "creation"
   | "assets"
   | "tasks"
@@ -22,6 +23,7 @@ export interface NavItem {
 export const navItems: NavItem[] = [
   { id: "home", label: "工作台", group: "创作空间", description: "需要处理的事项、服务状态和最近结果" },
   { id: "projects", label: "项目", group: "创作空间", description: "授权范围与 owner 项目连接" },
+  { id: "drama", label: "剧集制作", group: "创作空间", description: "每一集走到哪一步、卡在哪、下一步谁来做" },
   { id: "creation", label: "AI 创作", group: "创作空间", description: "能力、参数合同与预算预检" },
   { id: "assets", label: "资源库", group: "创作空间", description: "任务结果、内容权限和逐结果预览" },
   { id: "tasks", label: "任务中心", group: "生产协作", description: "机器执行状态、事件和原任务恢复" },
@@ -47,6 +49,8 @@ const aliases: Record<string, WorkspacePage> = {
   settings: "team",
   audit: "team",
   connections: "services",
+  episodes: "drama",
+  series: "drama",
 };
 
 export function pageFromPath(pathname: string): WorkspacePage {

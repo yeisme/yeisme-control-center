@@ -37,7 +37,7 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
   const [state, setState] = useState<ThumbnailState>("idle");
   const [src, setSrc] = useState<string | null>(null);
   const kind: MediaKind = kindOf(result?.mime, undefined);
-  const image = kind === "image" && !!result && !!task.task_key;
+  const image = (kind === "image" || kind === "video") && !!result && !!task.task_key;
 
   useEffect(() => {
     const node = host.current;
@@ -56,8 +56,8 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
   }, []);
 
   useEffect(() => {
-    thumbnailSessionCache.setIdentity(`${scopeId}|${session?.epoch || 0}`);
-  }, [scopeId, session?.epoch]);
+    thumbnailSessionCache.setIdentity(`${session?.identity}|${scopeId}|${session?.epoch || 0}`);
+  }, [scopeId, session?.identity, session?.epoch]);
 
   useEffect(() => {
     if (!image || !visible || !result || !task.task_key || !session) {
@@ -73,7 +73,7 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
       setState("forbidden");
       return;
     }
-    const key = mediaCacheKey(scopeId, session.epoch, task.task_key, result.ref, result.mime);
+    const key = mediaCacheKey(scopeId, session.epoch, task.task_key, result.ref + "|thumbnail|" + task.revision + "|" + result.thumbnail?.ref, "image/webp");
     const cached = thumbnailSessionCache.get(key);
     if (cached) {
       setSrc(cached.url);
@@ -83,7 +83,7 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
     let cancelled = false;
     setState("loading");
     void thumbnailSessionCache.load(key, () => withThumbnailSlot(async () => {
-      const grant = await api.artifactAccess(scopeId, task.task_key!, result.ref, "preview", session.csrf);
+      const grant = await api.artifactAccess(scopeId, task.task_key!, result.ref, "thumbnail", session.csrf);
       const response = await fetch(grant.url, { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) throw new Error(response.status === 403 ? "content_not_authorized" : response.status === 422 ? "media_needs_contract" : "media_unavailable");
       return { blob: await response.blob(), expiresAt: Date.parse(grant.expires_at) };

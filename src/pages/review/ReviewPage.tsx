@@ -27,9 +27,12 @@ import { labelFrom } from "../../shared/read-model/labels";
 import { readErrorMessage } from "../../shared/read-model/read-state";
 import { taskKind } from "../../shared/read-model/tasks";
 import { SourceCoverage } from "../../components/SourceCoverage";
-import { api } from "../../shared/api/control-center-client";
+import { api, isRouteUnavailable } from "../../shared/api/control-center-client";
 import { useScopedRead } from "../../app/workspace";
 import { taskNeedsReview } from "../../shared/read-model/review";
+import type { DramaEpisodesResponse } from "../../shared/drama";
+import { dramaOwnerNames, dramaStageLabels } from "../../shared/read-model/drama";
+import { StageNode } from "../drama/StageRail";
 
 type Tab = "review" | "delivery";
 
@@ -84,9 +87,38 @@ function FactsPopover() {
   </PopoverRoot>;
 }
 
+type StageReviewRead = DramaEpisodesResponse | { route_unavailable: true };
+
+/** Stages an owner has put in review for an episode. Deciding happens in the owner; this only points to it. */
+function StageReviews({ read, onOpen }: { read: ReturnType<typeof useScopedRead<StageReviewRead>>; onOpen: (episode: string) => void }) {
+  const data = read.data && !("route_unavailable" in read.data) ? read.data : null;
+  const waiting = (data?.rows || []).flatMap((row) => (row.flow?.rail || []).filter((node) => node.state === "waiting_review").map((node) => ({ row, node })));
+  const unread = data ? data.total - data.read_count : 0;
+  return <Panel title="剧集阶段审阅" actions={<span className="text-meta text-muted">来自 Auctra / Scaena 的阶段状态</span>} bodyClassName="p-0">
+    <ReadStateView status={read.status === "empty" ? "ready" : read.status} error={read.error} onRetry={read.reload} skeleton={<SkeletonRows rows={2} />}>
+      {waiting.length === 0
+        ? <EmptyState compact icon={<CheckCircle2 />} title={data?.universe.bound === false ? "没有连接剧集来源" : "已读取的剧集里没有待审阅的阶段"} body={unread > 0 ? `只读取了最近更新的 ${data?.read_count} 集，还有 ${unread} 集没有读取实时状态，到「剧集制作」查看全部。` : "待审阅的剧本、导演计划或分镜会出现在这里。"} />
+        : <ul className="divide-y divide-line">{waiting.map(({ row, node }) => <li key={`${row.episode_ref}:${node.stage}`} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3.5">
+          <span className="min-w-0 flex-1 basis-48">
+            <span className="block truncate text-body-sm font-medium">{row.title}</span>
+            <span className="block truncate text-2xs text-muted">{dramaStageLabels[node.stage]} · 由 {dramaOwnerNames[node.owner]} 审阅 · 控制中心不代为决定</span>
+          </span>
+          <StageNode node={node} />
+          <Button size="sm" variant="ghost" onClick={() => onOpen(row.episode_ref)}>查看剧集<ArrowRight className="size-3.5" /></Button>
+        </li>)}</ul>}
+    </ReadStateView>
+  </Panel>;
+}
+
 export default function ReviewPage() {
   const tasks = useTasks();
   const services = useScopedRead((scope, signal) => api.services(scope, signal));
+  const stageReviews = useScopedRead<StageReviewRead>(async (scope, signal) => {
+    try { return await api.dramaEpisodes(scope, { limit: 12, order: "recent" }, signal); } catch (error) {
+      if (isRouteUnavailable(error)) return { route_unavailable: true };
+      throw error;
+    }
+  });
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const tab = (params.get("tab") === "delivery" ? "delivery" : "review") as Tab;
@@ -119,6 +151,8 @@ export default function ReviewPage() {
       options={[{ id: "review", label: "审阅队列", count: queue.length }, { id: "delivery", label: "交付", count: exports.length }]}
     >
       <TabPanel value="review">
+        <div className="space-y-4">
+        {!(stageReviews.data && "route_unavailable" in stageReviews.data) && <StageReviews read={stageReviews} onOpen={(episode) => navigate(`/drama?episode=${encodeURIComponent(episode)}`)} />}
         <Panel title="待审阅" actions={<span className="text-meta text-muted">来自任务观察批次</span>} bodyClassName="p-0">
           <ReadStateView status={tasks.status === "empty" ? "ready" : tasks.status} error={tasks.error} onRetry={tasks.refresh} skeleton={<SkeletonRows rows={4} />}>
             {queue.length === 0 ? <EmptyState icon={<CheckCircle2 />} title={reviewEmptyTitle} body={reviewEmptyBody} /> : <ul className="divide-y divide-line">
@@ -140,6 +174,7 @@ export default function ReviewPage() {
             </ul>}
           </ReadStateView>
         </Panel>
+        </div>
       </TabPanel>
       <TabPanel value="delivery">
         <Panel title="交付" bodyClassName="p-0">

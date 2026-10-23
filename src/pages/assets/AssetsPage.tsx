@@ -17,6 +17,7 @@ import { useTasks } from "../../app/tasks-context";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
 import {
   Button,
+  Field,
   DataTable,
   Dot,
   EmptyState,
@@ -62,6 +63,9 @@ import {
   type CodeLabel,
 } from "./asset-view";
 import { InspectorShell } from "../../components/InspectorShell";
+import { useScopedRead, useWorkspace } from "../../app/workspace";
+import { api } from "../../shared/api/control-center-client";
+import { ProjectFiles } from "./ProjectFiles";
 
 type KindFilter = "all" | MediaKind;
 type AccessFilter = "all" | "available" | "locked";
@@ -91,6 +95,15 @@ function readPreference<T>(key: string, fallback: T, parse: (value: string | nul
 }
 
 export default function AssetsPage() {
+  const { scopeId, setScope } = useWorkspace();
+  const projects = useScopedRead((_s, signal) => api.sharedProjects({}, signal));
+  if (projects.data?.rows.length) {
+    const project = projects.data.rows.find((p) => p.id === scopeId);
+    return <div className="page-enter space-y-4" data-page="assets"><PageToolbar summary="共享项目成果 · 自动归组与文件夹整理" /><Field label="项目"><Select value={project?.id || ""} onChange={(e) => setScope(e.target.value)}><option value="" disabled>选择项目</option>{projects.data.rows.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>{project && <ProjectFiles project={project} />}</div>;
+  }
+  return <OwnerAssetsPage />;
+}
+function OwnerAssetsPage() {
   const tasks = useTasks();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();

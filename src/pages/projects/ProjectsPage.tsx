@@ -56,6 +56,7 @@ import { taskNeedsReview } from "../../shared/read-model/review";
 import { closeProjectTask, selectProjectTab, selectProjectTask } from "../../shared/read-model/project-navigation";
 import { taskIsActive, taskNeedsAttention } from "../../task-observation";
 import { TaskDetail, type TaskInspectorMode } from "../tasks/TaskDetail";
+import SharedProjects from "./SharedProjects";
 
 type Tab = "overview" | "tasks" | "assets" | "review" | "delivery";
 type ProjectFilter = "all" | "hidden";
@@ -250,6 +251,13 @@ function RenameDialog({ project, open, onOpenChange, onSave, saving, error }: {
 }
 
 export default function ProjectsPage() {
+  const [params, setParams] = useSearchParams();
+  const organizations = useScopedRead((_s, signal) => api.organizations(signal));
+  if (params.has("shared") || params.has("sharedProject") || (params.get("catalog") !== "owner" && !!organizations.data?.rows.length)) return <SharedProjects />;
+  return <><div className="mb-3 flex justify-end"><Button size="sm" variant="secondary" onClick={() => setParams({ shared: "1" })}>共享项目与分配</Button></div><OwnerProjectsPage /></>;
+}
+
+function OwnerProjectsPage() {
   const { scope, scopeId, session } = useWorkspace();
   const tasks = useTasks();
   const notify = useToast();

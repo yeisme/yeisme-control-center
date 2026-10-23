@@ -17,18 +17,23 @@ interface MediaCacheOptions {
   revokeObjectURL?: (url: string) => void;
 }
 
+const sessionCaches = new Set<MediaSessionCache>();
+export function clearMediaSessionCaches() { for (const cache of sessionCaches) cache.clear(); }
+
 /** Session-only media bytes. It never writes to disk and is scoped by the caller's identity key. */
 export class MediaSessionCache {
   private entries = new Map<string, Entry>();
   private pending = new Map<string, Promise<MediaCacheValue | null>>();
   private totalBytes = 0;
   private identity = "";
+  private generation = 0;
   private readonly maxEntries: number;
   private readonly maxBytes: number;
   private readonly createObjectURL: (blob: Blob) => string;
   private readonly revokeObjectURL: (url: string) => void;
 
   constructor(options: MediaCacheOptions = {}) {
+    sessionCaches.add(this);
     this.maxEntries = options.maxEntries ?? 8;
     this.maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
     this.createObjectURL = options.createObjectURL ?? ((blob) => URL.createObjectURL(blob));
@@ -59,7 +64,9 @@ export class MediaSessionCache {
     if (cached) return cached;
     const running = this.pending.get(key);
     if (running) return running;
+    const generation = this.generation;
     const pending = loader().then(({ blob, expiresAt }) => {
+      if (generation !== this.generation) return null;
       if (!blob.size || expiresAt <= Date.now() || blob.size > this.maxBytes) return null;
       const value: Entry = {
         key,
@@ -90,6 +97,8 @@ export class MediaSessionCache {
   }
 
   clear() {
+    this.generation++;
+    this.pending.clear();
     for (const entry of this.entries.values()) this.revokeObjectURL(entry.url);
     this.entries.clear();
     this.totalBytes = 0;

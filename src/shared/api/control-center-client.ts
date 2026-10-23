@@ -6,8 +6,10 @@ import type { ControlCenterErrorClass } from "../types";
 import type { ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt } from "../action-contract";
 import type { WorkQueueFilters, WorkQueueResponse } from "../work-queue";
 import type { CreativeFlowProjection } from "../creative-flow";
+import type { DramaEpisodeDetail, DramaEpisodesResponse } from "../drama";
 import type { CreativeCapabilityContract, CreativeInputSpec } from "../creative-input";
 import type { ToolCatalog } from "../tool-catalog";
+import type { CollaborationMember, CollaborationOrganization, CollaborationTeam, DirectoryPage, DirectoryQuery, GenerationBatch, ProjectBinding, ProjectFolder, ProjectItem, SharedProject } from "../collaboration";
 
 export const controlCenterPrefix = "/api/control-center/v1";
 export type { TaskConnectionState, TaskEvent, TaskPage, TaskSnapshot, ServiceDirectoryEntry, AttachmentRead, ContentRead, Coverage, CoverageState, Owner, RequestProjection, RequestQuery, RequestSummary, ProcessObservation, ProcessCheckpoint, PromptCaptureObservation, ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt, WorkQueueFilters, WorkQueueResponse, CreativeFlowProjection, CreativeCapabilityContract, CreativeInputSpec };
@@ -79,11 +81,14 @@ async function readJson<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-type Query = Record<string, string | number | undefined | null>;
+type Query = Record<string, string | number | string[] | undefined | null>;
 
 function url(path: string, query: Query = {}) {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  for (const [key, value] of Object.entries(query)) {
+    if (Array.isArray(value)) for (const item of value) { if (item !== "") params.append(key, item); }
+    else if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
   const search = params.toString();
   return controlCenterPrefix + path + (search ? "?" + search : "");
 }
@@ -309,6 +314,9 @@ export type TaskNotificationState = "unread" | "acknowledged" | "muted" | "snooz
 export type TaskNotificationPriority = "normal" | "low" | "history";
 
 export interface TaskNotification {
+  category?: string;
+  read_at?: string | null;
+  target_path?: string | null;
   id: string;
   scope_id: string;
   task_key: string;
@@ -333,6 +341,8 @@ export interface TaskNotification {
 }
 
 export interface NotificationPage extends Epoch {
+  next_cursor?: string | null;
+  total?: number;
   rows: TaskNotification[];
   unread: number;
 }
@@ -430,6 +440,18 @@ export function requestParams(query: RequestQuery): Query {
 }
 
 export const api = {
+  organizations: (signal?: AbortSignal) => get<{ rows: CollaborationOrganization[]; can_create: boolean }>("/organizations", {}, signal),
+  collaborationMembers: (organization: string, signal?: AbortSignal) => get<{ rows: CollaborationMember[] }>(`/organizations/${encodeURIComponent(organization)}/members`, {}, signal),
+  collaborationTeams: (organization: string, signal?: AbortSignal) => get<{ rows: CollaborationTeam[] }>(`/organizations/${encodeURIComponent(organization)}/teams`, {}, signal),
+  collaborationCandidates: (organization: string, signal?: AbortSignal) => get<{ rows: { identity: string; name: string }[] }>(`/organizations/${encodeURIComponent(organization)}/candidates`, {}, signal),
+  bindingOptions: (organization: string, signal?: AbortSignal) => get<{ rows: ProjectBinding[] }>(`/organizations/${encodeURIComponent(organization)}/binding-options`, {}, signal),
+  sharedProjects: (query: { organization?: string; q?: string; hidden?: string } = {}, signal?: AbortSignal) => get<DirectoryPage<SharedProject>>("/projects", query, signal),
+  sharedProject: (id: string, signal?: AbortSignal) => get<SharedProject>(`/projects/${encodeURIComponent(id)}`, {}, signal),
+  projectFolders: (project: string, signal?: AbortSignal) => get<{ rows: ProjectFolder[] }>(`/projects/${encodeURIComponent(project)}/folders`, {}, signal),
+  projectItemTask: (project: string, item: string, signal?: AbortSignal) => get<TaskSnapshot & Epoch>(`/projects/${encodeURIComponent(project)}/items/${encodeURIComponent(item)}/task`, {}, signal),
+  projectItems: (project: string, query: DirectoryQuery = {}, signal?: AbortSignal) => get<DirectoryPage<ProjectItem> & { next_source_cursor?: string | null }>(`/projects/${encodeURIComponent(project)}/items`, { ...query }, signal),
+  generationBatches: (project: string, signal?: AbortSignal) => get<{ rows: GenerationBatch[] }>(`/projects/${encodeURIComponent(project)}/generation-batches`, {}, signal),
+  readNotification: (scope: string, id: string, csrf: string) => post<{ notification: TaskNotification }>(`/notifications/${encodeURIComponent(id)}/read`, { scope }, {}, csrf),
   authMethods: (signal?: AbortSignal) => get<AuthMethods>("/auth/methods", {}, signal),
   session: (signal?: AbortSignal) => get<WorkspaceSession>("/session", {}, signal),
   login: (input: { username?: string; secret: string; keyRequired: boolean }) =>
@@ -448,11 +470,13 @@ export const api = {
   actions: (scope: string, owner?: string, signal?: AbortSignal) => get<{ scope: string; actions: ActionDescriptor[] } & Epoch>("/actions", { scope, owner }, signal),
   workQueue: (scope: string, filters: WorkQueueFilters = {}, cursor?: string, limit = 50, signal?: AbortSignal) => get<WorkQueueResponse>("/work-queue", { scope, ...filters, cursor, limit }, signal),
   creativeFlow: (scope: string, query: { episode_ref?: string; breakdown_ref?: string } = {}, signal?: AbortSignal) => get<CreativeFlowProjection & Epoch>("/creative-flow", { scope, ...query }, signal),
+  dramaEpisodes: (scope: string, query: { q?: string; limit?: number; cursor?: string; read?: "all"; order?: "recent"; episode_ref?: string[] } = {}, signal?: AbortSignal) => get<DramaEpisodesResponse>("/drama/episodes", { scope, ...query }, signal),
+  dramaEpisode: (scope: string, episodeRef: string, options: { scaena_episode_ref?: string; refresh?: boolean } = {}, signal?: AbortSignal) => get<DramaEpisodeDetail>("/drama/episode", { scope, episode_ref: episodeRef, scaena_episode_ref: options.scaena_episode_ref, refresh: options.refresh ? 1 : undefined }, signal),
   previewAction: (input: ActionPreviewRequest, csrf: string, signal?: AbortSignal) => post<ActionPreview>("/actions/preview", { scope: input.scope_id }, input, csrf, signal),
   confirmAction: (input: ActionConfirmRequest, csrf: string, signal?: AbortSignal) => post<ActionReceipt>("/actions/confirm", { scope: input.scope_id }, input, csrf, signal),
   actionReceipt: (scope: string, receiptRef: string, signal?: AbortSignal) => get<ActionReceipt & Epoch>("/actions/receipts/" + encodeURIComponent(receiptRef), { scope }, signal),
 
-  notifications: (scope: string, signal?: AbortSignal) => get<NotificationPage>("/notifications", { scope }, signal),
+  notifications: (scope: string, signal?: AbortSignal, cursor?: string) => get<NotificationPage>("/notifications", { scope, cursor }, signal),
   syncNotifications: (scope: string, body: { tasks: Pick<TaskSnapshot, "task_key" | "state" | "revision" | "native_state" | "title" | "locator" | "provider_recovery">[]; present_task_keys: string[]; complete: boolean }, csrf: string, signal?: AbortSignal) =>
     post<NotificationPage & { inserted: string[]; touched: string[]; staled: string[]; owner_writes: number }>("/notifications/sync", { scope }, body, csrf, signal),
   acknowledgeNotification: (scope: string, id: string, csrf: string) =>
@@ -475,7 +499,7 @@ export const api = {
     get<TaskSnapshot & Epoch>("/tasks/resolve", { scope, ...target }, signal),
   taskEvents: (scope: string, taskKey: string, cursor?: string, signal?: AbortSignal, after?: string) =>
     get<TaskEventsPage>("/tasks/" + encodeURIComponent(taskKey) + "/events", { scope, cursor, after }, signal),
-  artifactAccess: (scope: string, taskKey: string, artifactRef: string, purpose: "preview" | "download", csrf: string) =>
+  artifactAccess: (scope: string, taskKey: string, artifactRef: string, purpose: "preview" | "download" | "thumbnail", csrf: string) =>
     post<ArtifactGrant>("/tasks/" + encodeURIComponent(taskKey) + "/artifacts/" + encodeURIComponent(artifactRef) + "/access", { scope }, { purpose }, csrf),
 
   requests: (scope: string, query: RequestQuery, signal?: AbortSignal) => get<RequestPage>("/requests", { scope, ...requestParams(query) }, signal),

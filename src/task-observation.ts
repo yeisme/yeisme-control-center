@@ -16,6 +16,7 @@ export interface TaskProgress {
   percent: number | null;
 }
 export interface TaskArtifact {
+  version?: string;
   ref: string;
   name: string;
   mime: string;
@@ -195,18 +196,19 @@ export function promptCaptureForTask(task: Pick<TaskSnapshot, "prompt_capture" |
 // timestamps cannot satisfy an explicit UTC creation-date range.
 export function filterTasks(tasks: TaskSnapshot[], filters: TaskFilters) {
   const needle = filters.text.trim().toLocaleLowerCase();
+  const includes = (selected: string, value: string | undefined) => !selected || selected.split(",").includes(value || "");
   return tasks.filter((task) => {
-    if (filters.connection && task.connection_id !== filters.connection)
+    if (!includes(filters.connection, task.connection_id))
       return false;
-    if (filters.owner && task.locator.owner !== filters.owner) return false;
-    if (filters.project && task.locator.project !== filters.project) return false;
-    if (filters.state && task.state !== filters.state) return false;
-    if (filters.family && task.locator.task_family !== filters.family)
+    if (!includes(filters.owner, task.locator.owner)) return false;
+    if (!includes(filters.project, task.locator.project)) return false;
+    if (!includes(filters.state, task.state)) return false;
+    if (!includes(filters.family, task.locator.task_family))
       return false;
     const resultCount = task.results?.length || 0;
     if (filters.results === "yes" && resultCount === 0) return false;
     if (filters.results === "no" && resultCount > 0) return false;
-    if (filters.prompt && promptCaptureForTask(task)?.state !== filters.prompt) return false;
+    if (!includes(filters.prompt, promptCaptureForTask(task)?.state)) return false;
     if (
       needle &&
       ![

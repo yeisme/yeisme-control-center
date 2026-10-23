@@ -1,6 +1,8 @@
 import type { Owner } from "../request-visibility";
+import { collaborationActions } from "./collaboration";
 
 export const actionNames = [
+  ...collaborationActions,
   "task.cancel",
   "provider_runs.create",
   "provider_runs.reconcile",
@@ -64,6 +66,7 @@ export interface ActionConfirmRequest {
 }
 
 export interface ActionReceipt {
+  generation_items?: import("./collaboration").GenerationBatchItem[];
   receipt_ref: string;
   action: ControlAction;
   owner: ActionOwner;
