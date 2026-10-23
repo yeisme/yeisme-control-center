@@ -1,3 +1,7 @@
+# 历史方向提示
+
+本设计保留原始内容用于追溯，当前实施遵循本项目 `AGENTS.md`。2026-10-21 起停止旧 v10 视觉迁移；有效行为要求与接续任务见 [README.md](README.md)，未验收状态保持不变。
+
 ## 背景与输入
 
 OpenDesign 项目 `yeisme-service-control-center` 的 v10 提案是视觉和交互输入，不是后端能力证明。正式客户端继续以 AdminCN Free 固定版本 `dd1afd2f3a794ea9e746197de314f81d43670ea1`、Geist、Lucide 和现有六入口为唯一实现约束。控制中心只拥有导航、展示、UI 偏好和有界只读聚合；项目、任务、资产、权限和账本仍由各 owner 持有。

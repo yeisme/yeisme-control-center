@@ -15,3 +15,4 @@
 - [x] `bun run test:v18` | evidence: formal App Shell/browser route verification passed (4/4)
 - [ ] 真实 canary：`bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5` | evidence: intentionally not executed; requires separate explicit authorization and real paid Provider calls
 - [x] 本地预算 dry-run：`bun run test:provider-live -- --dry-run --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5` | evidence: passed; provider_calls=false, mutations=false
+- [ ] 2.1 CONTRACT：拆分图像/视频/音频真实canary准入与交付证据；owner=Control Center；scope=docs/provider-live.md、本变更specs；依赖=现有dry-run；视频等待shared-projects固定报价合同；lane=串行；验证=openspec validate yeisme-provider-live-v1 --strict；预期=每模态有渠道/模型/授权/预算币种上限/原键、下载可播放或可解码和实际费用证据；不执行原付费命令，不隐式换汇；失败=保留脱敏证据并归类，只重检失败切片，不改原键或升级证据

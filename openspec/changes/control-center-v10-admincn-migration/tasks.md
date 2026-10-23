@@ -25,3 +25,4 @@
 - [ ] 4.3 完成本地源码包构建与 OpenDesign 逐文件读回；设计通过、工程通过、真实接入和部署分别报告。
 
 使用 `openspec validate control-center-v10-admincn-migration --strict` 检查本变更；任务状态只通过项目脚本或 OpenSpec 命令推进，不手改生成状态文件。
+- [ ] 5.1 CONTRACT：停止旧视觉方向实施并逐条映射14项历史行为到现行UI/测试或后续任务；owner=Control Center；scope=本变更supersession说明、docs/completion-roadmap.md；依赖=当前AGENTS；completion 1.1；lane=串行；验证=openspec validate control-center-v10-admincn-migration --strict；git diff --check；预期=旧OpenDesign/demo命令不再作为执行入口；五维/上下文/恢复/响应式要求保留，无证据不勾选，归档前审查主规格delta；失败=保留脱敏证据并归类，只重检失败切片，不改原键或升级证据

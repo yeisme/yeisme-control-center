@@ -29,3 +29,4 @@ bun run test:app
 本轮证据：server boot 6/6、contract integration 21/21、完整单元 33 files/191 tests、App 静态门 4/4、typecheck 和 build 通过。浏览器旅程在独立端口重跑时大部分场景通过，但登录等待与 `ERR_NETWORK_CHANGED` 仍为环境级失败；CI browser 端口启动也未形成有效证据，因此 2.2 和最终浏览器门保持未完成。
 
 既有真实 owner 只读入口通过：`temp/integration-test-runs/real-owner-read-2026-10-19T17-30-03-781Z`；Eikona/Sonora 有历史任务读取，Scaena 当前无观察任务，Provider submit gate 仍保持 disabled。
+- [ ] 3.1 INTEGRATION：补真实来源状态与queue coverage只读证据并回读原安全交接；owner=Control Center；scope=现有owner-live-read与目标浏览器旅程；依赖=既有work_queue合同和合法observer；lane=串行；验证=bun run test:owner-live-read；bun run test:browser-journey；预期=Eikona/Sonora/Scaena独立状态；Scaena空集不升级task覆盖，queue数量不等于领域完成，原2.2仍据实结项；失败=保留脱敏证据并归类，只重检失败切片，不改原键或升级证据
