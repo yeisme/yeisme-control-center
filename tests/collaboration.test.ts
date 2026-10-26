@@ -108,4 +108,23 @@ describe("member delegation", () => {
     expect((await (await app(request("/projects"))).json()).rows[0].id).toBe(project);
     const state = await (await app(request("/session"))).json(); expect(state.shared_projects).toHaveLength(1);
   });
+  it("reads folder covers from stored rows without listing owner tasks", async () => {
+    const { db, auth, service, admin, org, project } = fixture();
+    service.execute(admin, "project.bindings.set", project, "1", { bindings: service.bindingOptions(admin, org) });
+    const [folder] = service.execute(admin, "folder.create", project, "2", { name: "角色定稿" });
+    const task = { task_key: "task-cover", connection_id: "connection", locator: { owner: "eikona", instance_id: "fixture", project: "same-owner-project", task_family: "run", task_ref: "run-cover" }, results: [{ ref: "artifact-cover", name: "cover.png", mime: "image/png", state: "candidate" }], revision: "1", created_at: new Date().toISOString() } as unknown as import("../src/task-observation").TaskSnapshot;
+    service.syncItems(admin, project, [task]);
+    const revision = String(service.project(admin, project).revision);
+    service.execute(admin, "item.move", project, revision, { folder_id: folder, item_ids: service.items(admin, project, {}).rows.map((row) => row.id) });
+    let ownerReads = 0;
+    const tasks = { list: async () => { ownerReads += 1; return { rows: [], connections: [], next_cursors: {} }; } };
+    auth.sessions.set(admin.id, admin);
+    const app = createApp(config, { db, auth, tasks: tasks as never });
+    const request = (path: string) => new Request(config.origin + "/api/control-center/v1" + path, { headers: { Cookie: "yeisme_session=admin" } });
+    const cover = await (await app(request(`/projects/${project}/items?folder=${folder}&limit=3&local=1`))).json();
+    expect(ownerReads).toBe(0);
+    expect(cover).toMatchObject({ total: 1, coverage: "partial", next_cursor: null, next_source_cursor: null, sources: [] });
+    expect(cover.rows).toHaveLength(1);
+    expect((await app(request(`/projects/${project}/items?folder=${folder}&local=1&cursor=item_x`))).status).toBe(400);
+  });
 });

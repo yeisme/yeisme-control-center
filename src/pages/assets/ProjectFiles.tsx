@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { useCollaborationAction } from "../../app/collaboration-action";
 import { Button, Checkbox, CopyRef, DetailSheet, EmptyState, Field, Input, InlineNotice, Panel, ReadStateView, Select, SkeletonRows, ToggleGroup, kindOf, ownerLabel } from "../../components/ui";
-import { FolderClosed, Plus, ArrowLeft, Images } from "../../icons";
+import { FolderClosed, Plus, Images } from "../../icons";
 import { FilterBar } from "../../components/FilterBar";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
 import { InlineMediaPreview, useMediaPreview, type PreviewTarget } from "../../components/media-preview";
-import type { ProjectItem, SharedProject } from "../../shared/collaboration";
+import { FolderArt } from "../../components/FolderArt";
+import { coverSheets, folderMeta, folderTone } from "./folder-cover";
+import type { ProjectFolder, ProjectItem, SharedProject } from "../../shared/collaboration";
 
 export function ProjectFiles({ project }: { project: SharedProject }) {
   const { scopeId, setScope } = useWorkspace(); const [params, setParams] = useSearchParams();
@@ -51,7 +53,7 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
         {[{ id: "image", label: "图片" }, { id: "video", label: "视频" }, { id: "audio", label: "音频" }].map((type) => <Button key={type.id} variant="ghost" size="sm" className="shrink-0 lg:w-full lg:justify-start" onClick={() => patch({ kind: type.id, folder: null, batch: null })}>{type.label}</Button>)}
         <p className="px-2 pt-2 text-xs text-muted">按生成批次</p>{batchRows.data?.rows.map((b) => <Button key={b.id} variant={batch === b.id ? "secondary" : "ghost"} size="sm" className="w-full justify-start" onClick={() => patch({ batch: b.id, folder: null })}><span className="truncate">{b.name} · {b.items.reduce((n, i) => n + i.candidate_count, 0)} 项</span></Button>)}
         <p className="px-2 pt-2 text-xs text-muted">我的整理</p>
-        {(folders.data?.rows || []).map((f) => <Button key={f.id} variant={folder === f.id ? "secondary" : "ghost"} size="sm" className="shrink-0 lg:w-full lg:justify-start" onClick={() => patch({ folder: f.id, batch: null })}><FolderClosed className="size-3.5 shrink-0" /><span className="truncate">{f.name}</span></Button>)}
+        {(folders.data?.rows || []).map((f) => <Button key={f.id} variant={folder === f.id ? "secondary" : "ghost"} size="sm" className="shrink-0 lg:w-full lg:justify-start" onClick={() => patch({ folder: f.id, batch: null })}><FolderClosed className="folder-glyph size-3.5 shrink-0" data-tone={folderTone(f.name)} /><span className="truncate">{f.name}</span></Button>)}
       </nav>
       <div className="min-w-0 space-y-3">
         <nav aria-label="文件夹路径" className="flex flex-wrap items-center gap-1 text-sm"><Button variant="ghost" size="sm" onClick={() => patch({ folder: null, batch: null })}>成果</Button>{folderPath.map((f) => <span key={f.id}>/ <button className="hover:underline" onClick={() => patch({ folder: f.id })}>{f.name}</button></span>)}{folder === "unfiled" && " / 未整理"}{currentFolder && canEdit && <Button size="sm" variant="ghost" onClick={() => { action.reset(); setForm("rename"); setName(currentFolder.name); }}>重命名文件夹</Button>}</nav>
@@ -59,7 +61,7 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
         {files.data?.coverage !== "complete" && <InlineNotice tone="neutral">成果目录来自 owner 可读取的任务投影；当前覆盖不完整，未返回的成果不计为零。</InlineNotice>}
         {checked.length > 0 && canEdit && <Button size="sm" onClick={() => { action.reset(); setForm("move"); }}>移动 {checked.length} 项引用</Button>}
         <ReadStateView status={files.status} error={files.error} onRetry={() => { if (files.error?.includes("cursor")) patch({ cursor: null, source_cursor: null }); else files.reload(); }} skeleton={<SkeletonRows rows={5} />}>
-          {children.length > 0 && !params.get("q") && <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{children.map((f) => <button key={f.id} className="flex min-w-0 items-center gap-2 rounded-control border border-line bg-panel px-3 py-4 text-left text-sm hover:bg-panel-soft" onClick={() => setSelected(null)} onDoubleClick={() => patch({ folder: f.id })} onKeyDown={(e) => { if (e.key === "Enter") patch({ folder: f.id }); }}><FolderCover project={project.id} folder={f.id} /><span className="truncate">{f.name}</span></button>)}</div>}
+          {children.length > 0 && !params.get("q") && <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">{children.map((f) => <FolderTile key={f.id} project={project.id} folder={f} tick={tick} subfolders={folders.data?.rows.filter((r) => r.parent_id === f.id).length || 0} onSelect={() => setSelected(null)} onOpen={() => patch({ folder: f.id })} />)}</div>}
           <div className={view === "grid" ? "grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" : "divide-y divide-line rounded-control border border-line"}>
             {rows.map((item) => <article key={item.id} className={view === "grid" ? "min-w-0 rounded-control border border-line bg-panel p-2" : "flex min-w-0 items-center gap-3 bg-panel p-3"}>
               <button className={view === "grid" ? "block aspect-[4/3] w-full overflow-hidden rounded-control bg-panel-soft" : "size-12 shrink-0"} aria-label={`查看成果 ${item.name}`} onClick={() => setSelected(item)}><ItemThumbnail project={project.id} item={item} /></button>
@@ -91,7 +93,15 @@ function ItemThumbnail({ project, item }: { project: string; item: ProjectItem }
   return <span ref={host} className="block size-full">{task.data && artifact ? <TaskThumbnail task={task.data} result={artifact} size="lg" className="size-full" /> : <span className="grid size-full place-items-center text-muted"><Images className="size-6" /></span>}</span>;
 }
 
-function FolderCover({ project, folder }: { project: string; folder: string }) {
-  const files = useScopedRead((_s, signal) => api.projectItems(project, { folder, limit: 4 }, signal), { key: `${project}|cover|${folder}` });
-  return <span className="grid size-12 shrink-0 grid-cols-2 overflow-hidden rounded-control border border-line bg-panel-soft">{files.data?.rows.length ? files.data.rows.map((item) => <ItemThumbnail key={item.id} project={project} item={item} />) : <FolderClosed className="col-span-2 m-auto size-7 text-muted" />}</span>;
+// The accessible name stays the folder name; the count line is its description.
+function FolderTile({ project, folder, tick, subfolders, onSelect, onOpen }: { project: string; folder: ProjectFolder; tick: number; subfolders: number; onSelect: () => void; onOpen: () => void }) {
+  const files = useScopedRead((_s, signal) => api.projectItems(project, { folder: folder.id, limit: 3, local: "1" }, signal), { key: `${project}|cover|${folder.id}|${tick}` });
+  const metaId = useId();
+  const sheets = coverSheets(files.data?.rows || [], subfolders).map((sheet) => sheet.kind === "media" ? { key: sheet.item.id, kind: sheet.kind, content: <ItemThumbnail project={project} item={sheet.item} /> } : { key: `folder-${sheet.index}`, kind: sheet.kind });
+  const meta = folderMeta(files.data, subfolders);
+  return <button className="folder-art-host flex min-w-0 flex-col items-center rounded-card border border-transparent px-3 pt-4 pb-3 text-center transition-colors duration-150 ease-out hover:border-line hover:bg-panel focus-visible:bg-panel" aria-label={`打开文件夹 ${folder.name}`} aria-describedby={metaId} onClick={onOpen} onFocus={onSelect}>
+    <span className="mb-3 block w-full max-w-[150px]"><FolderArt tone={folderTone(folder.name)} sheets={sheets} /></span>
+    <span className="block max-w-full truncate text-sm font-medium">{folder.name}</span>
+    <span id={metaId} className="block max-w-full truncate text-xs text-muted">{meta}</span>
+  </button>;
 }

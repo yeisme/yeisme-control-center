@@ -32,5 +32,5 @@ export const collaborationActions = [
 ] as const;
 export type CollaborationAction = typeof collaborationActions[number];
 export function isCollaborationAction(value: string): value is CollaborationAction { return (collaborationActions as readonly string[]).includes(value); }
-export type DirectoryQuery = { q?: string; owner?: string; kind?: string; state?: string; from?: string; to?: string; folder?: string; batch?: string; cursor?: string; limit?: number };
+export type DirectoryQuery = { q?: string; owner?: string; kind?: string; state?: string; from?: string; to?: string; folder?: string; batch?: string; cursor?: string; limit?: number; local?: string };
 export interface DirectoryPage<T> { rows: T[]; next_cursor: string | null; total: number; coverage: "complete" | "partial" | "unknown"; epoch?: number }

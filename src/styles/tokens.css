@@ -55,6 +55,14 @@
   --chart-3: #d6457a;
   --chart-4: #6f8a10;
   --chart-grid: #ebe9e2;
+  /* Folder identity tones (forest, sand, slate, sage, stone): low chroma so they
+     never read as result kinds or task states. */
+  --folder-tone-1: oklch(0.42 0.055 165);
+  --folder-tone-2: oklch(0.86 0.045 85);
+  --folder-tone-3: oklch(0.6 0.035 240);
+  --folder-tone-4: oklch(0.72 0.05 145);
+  --folder-tone-5: oklch(0.8 0.008 80);
+  --folder-ink: #1f2b25;
   --chart-axis: #8d978f;
 
   --shadow-panel: 0 1px 2px rgb(25 49 38 / 5%), 0 8px 24px rgb(25 49 38 / 5%);
@@ -136,6 +144,11 @@
   --chart-3: #bf5884;
   --chart-4: #859e3a;
   --chart-grid: #26302b;
+  --folder-tone-1: oklch(0.52 0.055 165);
+  --folder-tone-2: oklch(0.78 0.045 85);
+  --folder-tone-3: oklch(0.6 0.035 240);
+  --folder-tone-4: oklch(0.66 0.05 145);
+  --folder-tone-5: oklch(0.72 0.008 80);
   --chart-axis: #76847b;
 
   --shadow-panel: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 0 0 1px rgb(255 255 255 / 2%);

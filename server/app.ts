@@ -441,14 +441,21 @@ export function createApp(
           for (const batch of rows.filter((b) => ["succeeded", "partial", "failed"].includes(b.state))) for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」：${batch.state}`, path: `/creation?sharedProject=${projectID}&batch=${batch.id}` });
           return json(withEpoch(session, { rows }));
         }
+        const query = Object.fromEntries(url.searchParams.entries()) as DirectoryQuery;
+        query.limit = Number(url.searchParams.get("limit") || 50);
+        // Folder covers only paint rows already stored. They must not list or sync owner tasks.
+        if (url.searchParams.get("local") === "1") {
+          if (url.searchParams.has("source_cursor") || url.searchParams.has("cursor")) throw new AuthError("local_page_not_pageable", 400);
+          delete query.local;
+          const page = collaboration.items(session, projectID, query);
+          return json(withEpoch(session, { ...page, next_cursor: null, next_source_cursor: null, coverage: "partial", sources: [] }));
+        }
         const projectScope = collaboration.scope(session, projectID);
         const sourceFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, "item_sources"])).digest("hex");
         const sourceCursors = cursor(url.searchParams.get("source_cursor"), sourceFP) as Record<string, string>;
         const observed = await tasks.list(projectScope, "history", sourceCursors);
         collaboration.syncItems(session, projectID, observed.rows);
-        const query = Object.fromEntries(url.searchParams.entries()) as DirectoryQuery;
-        query.limit = Number(url.searchParams.get("limit") || 50);
-        const filterFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, { ...query, cursor: undefined, source_cursor: undefined }])).digest("hex");
+        const filterFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, { ...query, cursor: undefined, source_cursor: undefined, local: undefined }])).digest("hex");
         query.cursor = cursor(url.searchParams.get("cursor"), filterFP).after || undefined;
         const page = collaboration.items(session, projectID, query);
         return json(withEpoch(session, { ...page, next_cursor: page.next_cursor ? sign({ fp: filterFP, expires: Date.now() + 900000, cursors: { after: page.next_cursor } }) : null, next_source_cursor: Object.keys(observed.next_cursors || {}).length ? sign({ fp: sourceFP, expires: Date.now() + 900000, cursors: observed.next_cursors }) : null, coverage: project.bindings.length > 0 && !Object.keys(projectScope.owners).length ? "unknown" : observed.connections.every((c) => c.state === "ready") && !Object.keys(observed.next_cursors || {}).length && !url.searchParams.has("source_cursor") ? "complete" : "partial", sources: observed.connections }));

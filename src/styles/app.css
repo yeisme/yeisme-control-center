@@ -1,6 +1,7 @@
 @import "tailwindcss" source(none);
 @source "../";
 @import "./tokens.css";
+@import "./folder-art.css";
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
