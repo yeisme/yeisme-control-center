@@ -1218,7 +1218,8 @@ try {
     // Nothing listens on the fixture's MuWeave origin; a stub body lets the popup keep the real launch URL instead of an error page.
     await context.route("http://127.0.0.1:4399/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>muweave fixture</title>" }));
     const [popup] = await Promise.all([context.waitForEvent("page", { timeout: 10_000 }), open.click()]);
-    await popup.waitForLoadState("domcontentloaded").catch(() => {});
+    // A noopener popup starts with an empty URL; on a slow runner it is still empty when its first load state resolves.
+    await popup.waitForURL((url) => url.origin === "http://127.0.0.1:4399", { timeout: 15_000 }).catch(() => {});
     const target = popup.url();
     await popup.close().catch(() => {});
     if (page.url() !== before) throw new Error(`control_center_navigated_away:${page.url()}`);
@@ -1413,13 +1414,15 @@ try {
     // that page on 页面加载失败 until a manual reload. The probe page shares the session; the main page is not touched.
     const chunk = /\/pages\/usage\/UsageAnalytics\.tsx|\/assets\/UsageAnalytics-[^/]+\.js$/;
     for (const mode of ["once", "always"] as const) {
-      let aborted = 0;
+      let aborted = 0, loads = 0;
       const handler = (route: Route) => {
         if (mode === "always" || aborted === 0) { aborted += 1; return route.abort("internetdisconnected"); }
         return route.continue();
       };
-      await context.route(chunk, handler);
+      // Only the probe's own requests fail: a route on the whole context also caught the main page's prefetches.
       const probe = await context.newPage();
+      probe.on("load", () => { loads += 1; });
+      await probe.route(chunk, handler);
       try {
         await probe.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" });
         // A cold document under the dev server compiles every module again; on a busy machine that alone can pass 30s.
@@ -1430,13 +1433,13 @@ try {
           await probe.locator('[data-page="usage"]').waitFor({ timeout: 30_000 });
         } else {
           await probe.getByText("页面加载失败").waitFor({ timeout: 30_000 });
-          // One reload, then the error screen stays: a second failure within a minute must not reload again.
+          // One reload, then the error screen stays: a second failure within a minute must not reload again. Documents are
+          // counted rather than chunk requests, since one document may fetch the chunk twice (prefetch, then import).
           await probe.waitForTimeout(2_000);
-          if (aborted !== 2) throw new Error(`chunk_reload_count:${aborted}`);
+          if (loads !== 2) throw new Error(`chunk_reload_count:${loads - 1}`);
           await expect(probe.getByText("页面加载失败")).toBeVisible();
         }
       } finally {
-        await context.unroute(chunk, handler);
         await probe.close();
       }
     }
