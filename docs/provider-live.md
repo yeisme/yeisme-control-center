@@ -63,7 +63,7 @@ bun scripts/run-provider-canary.ts --confirm-live --modality audio --run-label <
 
 ## 2026-10-30 真实验收
 
-经用户授权真实消费，在私有实例上验收（当时的提交加本节的修复，未发布）。
+经用户授权真实消费，在私有实例上验收（当时的提交加本节的修复）。这些修复已于同日发布到 4312（`control-release-2026-10-30T08-03-42-569Z`）。
 
 - **音频：通过。**
   - 运行 `live-canary-20261030c-sonora` 成功。

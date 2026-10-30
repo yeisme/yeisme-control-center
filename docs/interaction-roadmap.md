@@ -362,7 +362,7 @@
 - 控制中心保持 `needs_contract`，不实现领域写入，也不改 owner 仓库。
 - 新增 HTTP 测试：交付和 Aigora 管理动作预览时返回 `needs_contract` 与各自的拒绝码，确认后只产生 `needs_contract` 回执。
 
-#### Provider canary 分模态与预算币种（provider-live 2.1，2026-10-30，未发布）
+#### Provider canary 分模态与预算币种（provider-live 2.1，2026-10-30，已发布）
 
 - 发现并修复了预算换算问题。owner 都用美元为一次运行设上限，而控制中心原来按人民币下预算，适配层又私下换算：
   - Scaena 把 ¥10 当成 $10，上限放宽约 7 倍；
@@ -376,9 +376,10 @@
 - canary 脚本可按模态单独运行（`--modality`），新尝试用 `--run-label` 换幂等键；不带标签时只核对 10-14 的原键。
 - [Provider 实时调用](provider-live.md) 新增分模态准入表。图像缺 owner 执行的上限（Eikona 的 MCP 生成不接收 `max_cost_usd`），视频等待 known-cost 报价合同。没有执行任何真实付费调用。
 
-#### 真实消费验收（2026-10-30，未发布）
+#### 真实消费验收（2026-10-30，已发布）
 
-- 先把四天的工作分 6 个提交收进 git（本地 `main`，未推送）。
+- 先把四天的工作分 6 个提交收进 git，与验收修复一起推送到 GitHub。
+- 修复已发布到 4312（`control-release-2026-10-30T08-03-42-569Z`）：发布前另存恢复点，无新迁移，HTTPS 回读与本地构建逐字节一致。
 - 音频 canary 在本仓的私有实例上真实验收通过：真实配置副本，canary 账本放在仓外，不发布、不碰线上。实际费用 0 USD，输出的 WAV 能解码。
 - 途中修了 5 个只有接真实 owner 才会暴露的问题：
   - canary 缺 Origin；
