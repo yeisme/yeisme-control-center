@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve, extname, sep } from "node:path";
+import { createReadStream, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createApp } from "./app";
+import { planStatic } from "./static";
 import { validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
 import {
@@ -51,15 +52,7 @@ const db = openDatabase(dbPath);
 migrateDatabase(db);
 const interrupted = new RunStore(db).markInterrupted();
 const app = createApp(config, { db }),
-  root = resolve("dist"),
-  types: Record<string, string> = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript",
-    ".css": "text/css",
-    ".svg": "image/svg+xml",
-    ".png": "image/png",
-    ".woff2": "font/woff2",
-  };
+  root = resolve("dist");
 createServer(async (req, res) => {
   try {
     if (req.headers.host !== new URL(config.origin).host) {
@@ -73,7 +66,7 @@ createServer(async (req, res) => {
       let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 262144 : 16384;
+        const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 524288 : 16384;
         if (bytes > limit) {
           res.writeHead(413);
           res.end();
@@ -114,29 +107,14 @@ createServer(async (req, res) => {
       res.end();
       return;
     }
-    const target = resolve(root, "." + decodeURIComponent(url.pathname));
-    if (!target.startsWith(root + sep) && target !== root) {
-      res.writeHead(404);
-      res.end();
+    const plan = planStatic(root, url.pathname, { range: req.headers.range, ifModifiedSince: req.headers["if-modified-since"] });
+    res.writeHead(plan.status, plan.headers);
+    if (!plan.file || req.method === "HEAD") {
+      res.end(plan.status === 503 ? "Build the client before starting the server." : undefined);
       return;
     }
-    const path =
-      existsSync(target) && statSync(target).isFile()
-        ? target
-        : resolve(root, "index.html");
-    if (!existsSync(path)) {
-      res.writeHead(503, { "Content-Type": "text/plain" });
-      res.end("Build the client before starting the server.");
-      return;
-    }
-    res.writeHead(200, {
-      "Content-Type": types[extname(path)] || "application/octet-stream",
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "same-origin",
-      "Content-Security-Policy":
-        "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-    });
-    res.end(req.method === "HEAD" ? undefined : readFileSync(path));
+    // Streamed, so a long video never sits whole in memory; a range sends only its bytes.
+    await pipeline(createReadStream(plan.file, plan.start === undefined ? undefined : { start: plan.start, end: plan.end }), res);
   } catch {
     if (res.headersSent) {
       res.destroy();

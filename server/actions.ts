@@ -39,6 +39,9 @@ const actionDescriptors: ActionDescriptor[] = [
   { action: "project.metadata.rename", owner: "control-center", target_kinds: ["project"], risk_tier: "write", availability: "available" },
   { action: "project.metadata.hide", owner: "control-center", target_kinds: ["project"], risk_tier: "write", availability: "available" },
   { action: "project.metadata.unhide", owner: "control-center", target_kinds: ["project"], risk_tier: "write", availability: "available" },
+  // Reuses a configured connection's credential for another owner project; the owner decides whether it is accepted.
+  { action: "owner_project.connect", owner: "control-center", target_kinds: ["owner_project"], risk_tier: "admin", availability: "available" },
+  { action: "owner_project.disconnect", owner: "control-center", target_kinds: ["owner_project"], risk_tier: "admin", availability: "available" },
 ];
 
 interface PreviewRecord {
@@ -96,6 +99,8 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
     "project.metadata.rename": ["expected_revision", "display_name"],
     "project.metadata.hide": ["expected_revision"],
     "project.metadata.unhide": ["expected_revision"],
+    "owner_project.connect": ["template_connection_id", "project_ref", "label"],
+    "owner_project.disconnect": ["connection_id"],
   };
   const record = input as Record<string, unknown>;
   const strictRows = (key: string, fields: string[], maximum: number) => {
@@ -104,7 +109,8 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
   };
   if (action === "project.members.set") strictRows("grants", ["subject_type", "subject_id", "role"], 200);
   if (action === "project.bindings.set" || action === "project.create") strictRows("bindings", ["owner", "project_ref", "source_scope", "connection_ids"], 10);
-  if (action === "generation.input.prepare") strictRows("rows", ["id", "prompt", "prompt_ref", "model_ref", "size", "aspect", "candidate_count", "references", "folder_id"], 50);
+  if (action === "generation.input.prepare") strictRows("rows", ["id", "prompt", "prompt_ref", "model_ref", "size", "aspect", "candidate_count", "references", "folder_id", "project_ref"], 50);
+  if (action === "generation.batch.create") strictRows("items", ["id", "owner", "modality", "model_ref", "candidate_count", "folder_id", "input_ref", "input_digest", "plan_digest", "estimated_cost", "currency", "state", "reason", "task_refs", "binding_digest", "prompt_capture", "project_ref"], 50);
   if (Object.keys(record).some((key) => !allowed[action].includes(key))) throw new AuthError("invalid_action_input", 400);
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 10000) : value]));
 }

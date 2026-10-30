@@ -1,5 +1,6 @@
 import type { ScopeBinding, Session } from "./contracts";
 import type { TaskNotification } from "./notifications";
+import { taskIdentityOf } from "./task-connections";
 import type { TaskConnectionState, TaskSnapshot } from "../src/task-observation";
 import type {
   WorkQueueAction,
@@ -340,16 +341,24 @@ function workflowItem(stage: CreativeFlowStageProjection, flow: CreativeFlowProj
 
 export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQueueResponse {
   const items: WorkQueueItem[] = [];
-  const taskKeys = new Set<string>();
+  // Reminders and tasks meet on the task identity: the signed key may differ after a restart.
+  const identityOf = (key: string) => taskIdentityOf(key || "");
+  const quiet = new Set(input.notifications.filter((n) => n.state === "archived" || n.state === "muted").map((n) => `${n.task_identity || identityOf(n.task_key)}|${n.task_revision}|${n.task_state}|${n.native_state}|${n.last_error_code}`));
+  const taskIdentities = new Set<string>();
   for (const task of input.tasks) {
     const item = itemFromTask(task, input.scope.id, now);
-    if (item) {
-      items.push(item);
-      if (task.task_key) taskKeys.add(task.task_key);
-    }
+    if (!item) continue;
+    if (task.task_key) taskIdentities.add(identityOf(task.task_key));
+    // A failure whose reminder was archived or muted for this very failure version stays off the home queue.
+    if ((item.kind === "task_failure" || item.kind === "task_unknown") && quiet.has(`${identityOf(task.task_key || "")}|${task.revision || ""}|${task.state}|${task.native_state || ""}|${task.provider_recovery?.error_code || ""}`)) continue;
+    items.push(item);
   }
+  const listed = new Set<string>();
   for (const notification of input.notifications) {
-    if (!taskKeys.has(notification.task_key) && notification.state !== "archived" && notification.state !== "muted") items.push(itemFromNotification(notification, input.scope.id));
+    const identity = notification.task_identity || identityOf(notification.task_key);
+    if (taskIdentities.has(identity) || listed.has(identity) || notification.state === "archived" || notification.state === "muted" || notification.recovered_at) continue;
+    listed.add(identity);
+    items.push(itemFromNotification(notification, input.scope.id));
   }
   for (const connection of input.connections) {
     const item = itemFromConnection(connection, input.scope.id);

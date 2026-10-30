@@ -1,0 +1,1 @@
+CREATE INDEX `collaboration_batch_page_idx` ON `collaboration_batches` (`project_id`,`created_at`,`id`);

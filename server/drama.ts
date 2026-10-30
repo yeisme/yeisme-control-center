@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { AuthError } from "./auth";
-import type { AuctraCollectionReader, AuctraCreativeFlowSnapshot } from "./auctra";
+import { auctraConnection, collectionFingerprint, type AuctraCollectionReader, type AuctraCreativeFlowSnapshot } from "./auctra";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { AuctraCollectionStore } from "./db/auctra-collection-store";
-import type { ScaenaStoryboardReader } from "./scaena-storyboard";
+import { scaenaStoryboardConnection, type ScaenaStoryboardReader } from "./scaena-storyboard";
 import { buildCreativeFlow } from "./creative-flow";
 import { stageOwnerLinks } from "./work-queue";
 import type { CoverageState } from "../src/request-visibility";
@@ -12,11 +12,13 @@ import {
   dramaEpisodeSchema,
   dramaEpisodesSchema,
   railFromFlow,
+  unconnectedReasons,
   validDramaRef,
   type DramaEpisodeDetail,
   type DramaEpisodeRow,
   type DramaEpisodesResponse,
   type DramaFlowSummary,
+  type DramaSource,
   type StoryboardOutline,
 } from "../src/shared/drama";
 
@@ -27,7 +29,8 @@ const refreshGapMs = 10_000;
 const cacheLimit = 200;
 const poolSize = 4;
 const defaultReadBudget = 8;
-export const dramaLimits = { maxPage: 24, defaultPage: 12, maxExtra: 12 } as const;
+/** `maxExtra` covers task episodes plus ones opened earlier in the tab; the live-read budget, not this, bounds owner calls. */
+export const dramaLimits = { maxPage: 24, defaultPage: 12, maxExtra: 24 } as const;
 export { validDramaRef };
 
 interface FlowValue {
@@ -69,6 +72,14 @@ export class DramaService {
   private auctraBound(scope: ScopeBinding) {
     const target = this.deps.config.collection?.auctra;
     return Boolean(target && target.enabled !== false && scope.collection?.auctra);
+  }
+
+  /** Configuration-only view of both owners, so the page can say what is missing instead of one generic "not connected". */
+  sources(scope: ScopeBinding, session: Session): DramaSource[] {
+    return [
+      { owner: "auctra", state: auctraConnection(this.deps.config, scope, session).state },
+      { owner: "scaena", state: scaenaStoryboardConnection(this.deps.config, scope, session).state },
+    ];
   }
 
   /** Owner reads are delegated per session, so no cached projection may cross a session, epoch, scope or binding. */
@@ -173,10 +184,15 @@ export class DramaService {
     const limit = Math.min(Math.max(query.limit ?? dramaLimits.defaultPage, 1), dramaLimits.maxPage);
     const offset = Math.max(query.offset ?? 0, 0);
     const bound = this.auctraBound(scope);
+    const connection = auctraConnection(this.deps.config, scope, session);
     const sync = this.deps.store.coverage(scope.id);
+    const last = bound ? this.deps.store.cursor(scope.id, collectionFingerprint(this.deps.config, scope)) : undefined;
+    // A sync that stopped before Auctra's last page leaves episodes out; saying "complete" would hide them.
+    const complete = !last || last.coverage !== "partial";
     const units = bound ? this.deps.store.episodeUnits(scope.id) : [];
-    const universeCoverage: CoverageState = !bound ? "needs_contract" : sync.state === "unknown" ? "unknown" : sync.state === "stale" ? "expired" : "complete";
-    const universeReason = !bound ? "source_not_configured" : sync.state === "unknown" ? "collection_not_synced" : undefined;
+    const universeCoverage: CoverageState = !bound ? "needs_contract" : sync.state === "unknown" ? "unknown" : sync.state === "stale" ? "expired" : complete ? "complete" : "partial";
+    // Never synced with no way to sync says what is actually in the way.
+    const universeReason = !bound ? connection.reason : sync.state === "unknown" ? (connection.state === "connected" ? "collection_not_synced" : connection.reason) : !complete ? "collection_partial" : undefined;
 
     const rows: DramaEpisodeRow[] = units.map((unit) => ({
       episode_ref: unit.unit_ref,
@@ -214,7 +230,11 @@ export class DramaService {
         row.flow = this.summary(value);
         const unreadable = value.flow.source_coverage.every((source) => ["unavailable", "forbidden", "needs_contract"].includes(source.state));
         row.read = unreadable ? "failed" : cache === "hit" ? "cached" : "read";
-        if (unreadable) row.read_reason = value.flow.source_coverage.find((source) => source.reason)?.reason || "owner_unreadable";
+        if (unreadable) {
+          // A real failure outranks "not connected"; when nothing is connected that is configuration to do, not a failed read.
+          const reasons = value.flow.source_coverage.map((source) => source.reason).filter((reason): reason is string => !!reason);
+          row.read_reason = reasons.find((reason) => !unconnectedReasons.has(reason)) || (reasons.length ? "sources_not_connected" : "owner_unreadable");
+        }
       } catch (error) {
         row.read = "failed";
         row.read_reason = error instanceof AuthError ? error.code : "owner_unavailable";
@@ -233,7 +253,10 @@ export class DramaService {
         ...(universeReason ? { reason: universeReason } : {}),
         total: units.length,
         ...(sync.observed_at ? { observed_at: sync.observed_at } : {}),
+        can_sync: connection.state === "connected",
+        ...(bound ? { complete } : {}),
       },
+      sources: this.sources(scope, session),
       read_count: page.filter((row) => row.flow).length,
       row_count: page.length,
       total: matched.length,

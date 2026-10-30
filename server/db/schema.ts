@@ -132,11 +132,16 @@ export const taskNotifications = sqliteTable(
     category: text("category").notNull().default("failure"),
     readAt: text("read_at"),
     targetPath: text("target_path"),
+    /** Unsigned half of the task key: the same task across server restarts. */
+    taskIdentity: text("task_identity").notNull().default(""),
+    /** Set when a fresh owner read shows the task is no longer failing. */
+    recoveredAt: text("recovered_at"),
   },
   (t) => [
     index("notifications_scope_session_idx").on(t.scopeId, t.sessionId, t.subject),
     index("notifications_fingerprint_idx").on(t.sessionId, t.failureFingerprint),
     index("notifications_task_idx").on(t.scopeId, t.taskKey),
+    index("notifications_identity_idx").on(t.scopeId, t.subject, t.taskIdentity),
   ],
 );
 
@@ -291,9 +296,32 @@ export const collaborationBatches = sqliteTable("collaboration_batches", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull(), name: text("name").notNull(), state: text("state").notNull(),
   revision: integer("revision").notNull().default(1), idempotencyKey: text("idempotency_key").notNull(), items: text("items").notNull(),
   totalCost: real("total_cost"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
-}, (t) => [uniqueIndex("collaboration_batch_key_idx").on(t.projectId, t.idempotencyKey)]);
+}, (t) => [
+  uniqueIndex("collaboration_batch_key_idx").on(t.projectId, t.idempotencyKey),
+  // The batch list reads a project newest first, one page at a time.
+  index("collaboration_batch_page_idx").on(t.projectId, t.createdAt, t.id),
+]);
 export const actionRecords = sqliteTable("action_records", {
   id: text("id").primaryKey(), context: text("context").notNull(), key: text("key").notNull(), requestDigest: text("request_digest").notNull(),
   request: text("request").notNull(), preview: text("preview").notNull(), createdAt: integer("created_at").notNull(),
   started: integer("started", { mode: "boolean" }).notNull().default(false), receipt: text("receipt"),
 }, (t) => [uniqueIndex("action_context_key_idx").on(t.context, t.key)]);
+/** Small server-owned values: the task-key signing key and one-time repair markers. */
+export const controlState = sqliteTable("control_state", {
+  name: text("name").primaryKey(), value: text("value").notNull(), updatedAt: text("updated_at").notNull(),
+});
+/** Lasting mute rules: a task, or one owner's error code, stays quiet for later failure versions too. */
+export const notificationMuteRules = sqliteTable("notification_mute_rules", {
+  id: text("id").primaryKey(), scopeId: text("scope_id").notNull(), subject: text("subject").notNull(),
+  kind: text("kind").notNull(), owner: text("owner").notNull().default(""), key: text("key").notNull(),
+  label: text("label").notNull().default(""), createdAt: text("created_at").notNull(),
+}, (t) => [index("notification_mute_rules_subject_idx").on(t.scopeId, t.subject)]);
+/**
+ * Tool projects an administrator connected from the control center: a configured connection's endpoint and credential
+ * reused for another owner project. Never written back into the config file; the owner still decides access.
+ */
+export const ownerProjectConnections = sqliteTable("owner_project_connections", {
+  id: text("id").primaryKey(), scopeId: text("scope_id").notNull(), tenant: text("tenant").notNull(),
+  templateId: text("template_id").notNull(), owner: text("owner").notNull(), projectRef: text("project_ref").notNull(),
+  label: text("label").notNull().default(""), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
+}, (t) => [uniqueIndex("owner_project_connections_scope_idx").on(t.scopeId, t.tenant, t.owner, t.projectRef)]);

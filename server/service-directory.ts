@@ -1,5 +1,6 @@
 import { serviceDefinitions, type ServiceDirectory, type ServiceDirectoryEntry } from "../src/service-directory";
-import type { ScopeBinding, ServerConfig, Session } from "./contracts";
+import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "./contracts";
+import { auctraConnection } from "./auctra";
 import type { TaskConnectionState } from "../src/task-observation";
 
 /**
@@ -34,12 +35,12 @@ function freshness(
   return { coverage: { state: "not_recorded", observed_at } };
 }
 
-export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, session: Session, observations: TaskConnectionState[] = []): ServiceDirectory {
+export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, session: Session, observations: TaskConnectionState[] = [], scopeConnections: TaskConnection[] = (config.connections || []).filter((c) => scope.connection_ids?.includes(c.id))): ServiceDirectory {
   return {
     schema_version: "yeisme.service_directory.v1",
     services: serviceDefinitions.map((definition): ServiceDirectoryEntry => {
       const connections = session.personal
-        ? (config.connections || []).filter(c => c.owner === definition.id && scope.connection_ids?.includes(c.id))
+        ? scopeConnections.filter(c => c.owner === definition.id)
           .map(c => ({
             id: c.id,
             instance_id: c.instance_id,
@@ -55,8 +56,7 @@ export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, sess
         : [];
       const requestOwner = definition.id === "aigora" || definition.id === "scaena" || definition.id === "eikona" || definition.id === "sonora"
         ? definition.id : undefined;
-      const collectionConfigured = definition.id === "auctra" && !!config.collection?.auctra && config.collection.auctra.enabled !== false && !!scope.collection?.auctra
-        && ((!!session.accessToken && session.accessAudience.includes(config.collection.auctra.audience)) || !!config.collection.auctra.credential_ref);
+      const collectionConfigured = definition.id === "auctra" && auctraConnection(config, scope, session).state === "connected";
       // Request-owner reads need either an OIDC session delegation or a
       // configured service credential; personal sessions are no longer excluded.
       const ownerTarget = requestOwner !== undefined ? config.owners[requestOwner as "aigora"] : undefined;

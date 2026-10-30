@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, gt, inArray, like, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, like, lt, or, sql, type SQL } from "drizzle-orm";
 import { AuthError, type SessionAuth } from "./auth";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { ControlDB } from "./db/client";
+import { ConnectionCatalog } from "./connection-catalog";
 import { collaborationOrganizations as organizations, collaborationMembers as members, collaborationTeams as teams, collaborationProjects as projects, collaborationFolders as folders, collaborationItems as items, collaborationBatches as batches, projectMetadata } from "./db/schema";
-import type { CollaborationAction, CollaborationMember, CollaborationOrganization, CollaborationTeam, DirectoryPage, DirectoryQuery, GenerationBatch, GenerationBatchItem, ProjectBinding, ProjectFolder, ProjectGrant, ProjectItem, ProjectRole, SharedProject } from "../src/shared/collaboration";
+import { maxProjectBindings, type BindingOption, type CollaborationAction, type CollaborationMember, type CollaborationOrganization, type CollaborationTeam, type DirectoryPage, type DirectoryQuery, type GenerationBatch, type GenerationBatchItem, type ProjectBinding, type ProjectFolder, type ProjectGrant, type ProjectItem, type ProjectRole, type SharedProject } from "../src/shared/collaboration";
 import type { TaskSnapshot } from "../src/task-observation";
+import type { BatchPosition, BatchQuery } from "./generation-batches";
 export const identityOf = (session: Pick<Session, "issuer" | "subject">) => `${session.issuer}|${session.subject}`;
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
 const stable = (...parts: string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
@@ -14,8 +16,20 @@ const name = (v: unknown) => { if (typeof v !== "string" || !v.trim() || [...v.t
 const ref = (v: unknown): string => { if (typeof v !== "string" || !v || v.length > 512 || /[\x00-\x1f\x7f]/.test(v)) throw new AuthError("invalid_reference", 400); return v; };
 const array = <T>(raw: string): T[] => JSON.parse(raw);
 
+/**
+ * The bound tool project a generation item writes to. With one project for the item's owner, `project_ref` may be
+ * left out; with several, it must name one of them.
+ */
+export function targetBinding(project: Pick<SharedProject, "bindings">, item: Pick<GenerationBatchItem, "owner" | "project_ref">): ProjectBinding | null {
+  const candidates = project.bindings.filter((b) => b.owner === item.owner);
+  if (item.project_ref) return candidates.find((b) => b.project_ref === item.project_ref) || null;
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+const toBatch = (r: typeof batches.$inferSelect): GenerationBatch => ({ id: r.id, project_id: r.projectId, revision: r.revision, name: r.name, state: r.state, idempotency_key: r.idempotencyKey, items: array<GenerationBatchItem>(r.items), total_cost: r.totalCost, created_at: r.createdAt, updated_at: r.updatedAt });
+
 export class CollaborationService {
-  constructor(readonly db: ControlDB, private config: ServerConfig, private auth: SessionAuth) {}
+  constructor(readonly db: ControlDB, private config: ServerConfig, private auth: SessionAuth, private connections: ConnectionCatalog = new ConnectionCatalog(config, db)) {}
   private member(session: Session, org: string, minimum: "member" | "admin" = "member") {
     if (typeof session.expires === "number" && session.expires <= Date.now()) throw new AuthError("session_expired", 401);
     const row = this.db.select().from(members).where(and(eq(members.organizationId, org), eq(members.identity, identityOf(session)), eq(members.status, "active"))).get();
@@ -80,20 +94,56 @@ export class CollaborationService {
     const project = this.project(session, projectID);
     const org = this.db.select().from(organizations).where(eq(organizations.id, project.organization_id)).get()!;
     const result: ScopeBinding = { id: project.id, tenant: project.organization_id, team: project.team_id || "", project: project.id, label: project.name, owners: {}, connection_ids: [] };
+    result.projects = [];
     for (const binding of project.bindings) {
-      // Read with the recipient's pre-existing owner binding, including its actor.
-      const source = this.auth.principal(session)?.scopes.find((s) => s.id === binding.source_scope && s.tenant === org.sourceTenant && s.owners[binding.owner as keyof ScopeBinding["owners"]]?.project === binding.project_ref);
-      if (!source) continue;
+      // Read with the recipient's own access: the tool project must be pinned in, or connected to, the source scope.
+      const source = this.auth.principal(session)?.scopes.find((s) => s.id === binding.source_scope && s.tenant === org.sourceTenant);
+      const reachable = source && this.toolProjects(source).find((p) => p.owner === binding.owner && p.project_ref === binding.project_ref);
+      if (!source || !reachable) continue;
       const owner = binding.owner as keyof ScopeBinding["owners"];
-      result.owners[owner] = source.owners[owner];
-      result.connection_ids!.push(...binding.connection_ids.filter((c) => source.connection_ids?.includes(c)));
+      // Project-wide delegated reads (members, requests, storyboards) keep the source scope's actor and audience and go
+      // to one bound project per owner: the source's pinned project when it is bound, else the first bound one. They
+      // never reach a project this shared project does not bind.
+      const delegated = source.owners[owner];
+      if (delegated && (!result.owners[owner] || binding.project_ref === delegated.project)) result.owners[owner] = { ...delegated, project: binding.project_ref };
+      result.projects.push({ owner: binding.owner, project_ref: binding.project_ref, connection_ids: reachable.connection_ids });
+      result.connection_ids!.push(...reachable.connection_ids.filter((c) => !result.connection_ids!.includes(c)));
     }
     return result;
+  }
+  /** Tool projects a scope can read: its pinned owner projects, and the project of every connection it reads. */
+  toolProjects(scope: ScopeBinding): { owner: string; project_ref: string; connection_ids: string[]; pinned: boolean; registered: boolean }[] {
+    const found = new Map<string, { owner: string; project_ref: string; connection_ids: string[]; pinned: boolean; registered: boolean }>();
+    for (const [owner, b] of Object.entries(scope.owners)) if (b?.project) found.set(`${owner}\u0000${b.project}`, { owner, project_ref: b.project, connection_ids: [], pinned: true, registered: false });
+    for (const c of this.connections.forScope(scope)) {
+      const key = `${c.owner}\u0000${c.project}`;
+      const entry = found.get(key) || { owner: c.owner, project_ref: c.project, connection_ids: [], pinned: false, registered: false };
+      entry.connection_ids.push(c.id);
+      if ("registered" in c) entry.registered = true;
+      found.set(key, entry);
+    }
+    // Grouped by owner, the pinned project first, so pickers and saved bindings read the same way everywhere.
+    return [...found.values()].sort((a, b) => a.owner.localeCompare(b.owner) || Number(b.pinned) - Number(a.pinned));
+  }
+  /**
+   * Saved bindings: each must be one of the caller's options, matched on owner, project and source scope; connection
+   * ids are rebuilt from the server's own view. Several projects of one owner are allowed, the same project once.
+   */
+  private normalizeBindings(session: Session, org: string, raw: unknown): ProjectBinding[] {
+    if (!Array.isArray(raw) || raw.length > maxProjectBindings) throw new AuthError("invalid_project_bindings", 400);
+    const options = this.bindingOptions(session, org);
+    const seen = new Set<string>();
+    return raw.map((b) => {
+      const match = b && typeof b === "object" ? options.find((o) => o.owner === b.owner && o.project_ref === b.project_ref && o.source_scope === b.source_scope) : undefined;
+      if (!match || seen.has(`${match.owner}\u0000${match.project_ref}`)) throw new AuthError("invalid_project_bindings", 400);
+      seen.add(`${match.owner}\u0000${match.project_ref}`);
+      return { owner: match.owner, project_ref: match.project_ref, source_scope: match.source_scope, connection_ids: match.connection_ids };
+    });
   }
   bindingOptions(session: Session, org: string) {
     this.member(session, org, "admin");
     const row = this.db.select().from(organizations).where(eq(organizations.id, org)).get()!;
-    return (this.auth.principal(session)?.scopes || []).filter((s) => s.tenant === row.sourceTenant).flatMap((s) => Object.entries(s.owners).map(([owner, b]) => ({ owner, project_ref: b!.project, source_scope: s.id, connection_ids: (s.connection_ids || []).filter((id) => this.config.connections?.some((c) => c.id === id && c.owner === owner && c.project === b!.project)) })));
+    return (this.auth.principal(session)?.scopes || []).filter((s) => s.tenant === row.sourceTenant).flatMap((s) => this.toolProjects(s).map((p): BindingOption => ({ ...p, source_scope: s.id })));
   }
   folders(session: Session, projectID: string): ProjectFolder[] {
     this.project(session, projectID);
@@ -110,8 +160,10 @@ export class CollaborationService {
     this.db.transaction((tx) => {
       const batchRows = this.batches(session, projectID);
       for (const task of tasks) {
-        const sourceBatch = batchRows.find((b) => b.items.some((v) => v.owner === task.locator.owner && v.task_refs?.includes(task.locator.task_ref)));
-        const sourceItem = sourceBatch?.items.find((v) => v.owner === task.locator.owner && v.task_refs?.includes(task.locator.task_ref));
+        // With several projects per owner, an item's task refs only count within its own target project.
+        const fromItem = (v: GenerationBatchItem) => v.owner === task.locator.owner && (!v.project_ref || v.project_ref === task.locator.project) && v.task_refs?.includes(task.locator.task_ref);
+        const sourceBatch = batchRows.find((b) => b.items.some(fromItem));
+        const sourceItem = sourceBatch?.items.find(fromItem);
         const destination = sourceItem?.folder_id && this.folders(session, projectID).some((f) => f.id === sourceItem.folder_id) ? sourceItem.folder_id : null;
         if (!task.task_key || !project.bindings.some((b) => b.owner === task.locator.owner && b.project_ref === task.locator.project)) continue;
         for (const artifact of task.results) {
@@ -135,7 +187,7 @@ export class CollaborationService {
     const limit = q.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (q.q?.length || 0) > 200) throw new AuthError("invalid_query", 400);
     const allowed = this.scope(session, projectID);
-    const filters = [eq(items.projectId, projectID), or(...Object.entries(allowed.owners).map(([owner, b]) => and(eq(items.owner, owner), sql`json_extract(${items.taskSource}, '$.project') = ${b!.project}`))) || sql`0 = 1`];
+    const filters = [eq(items.projectId, projectID), or(...(allowed.projects || []).map((b) => and(eq(items.owner, b.owner), sql`json_extract(${items.taskSource}, '$.project') = ${b.project_ref}`))) || sql`0 = 1`];
     if (q.q) filters.push(sql`instr(lower(${items.name}), lower(${q.q})) > 0`);
     for (const [value, column] of [[q.owner, items.owner], [q.state, items.sourceState]] as const) if (value) filters.push(inArray(column, value.split(",")));
     if (q.kind) filters.push(or(...q.kind.split(",").map((k) => like(items.mime, `${k}/%`)))!);
@@ -152,7 +204,33 @@ export class CollaborationService {
   }
   batches(session: Session, projectID: string): GenerationBatch[] {
     this.project(session, projectID);
-    return this.db.select().from(batches).where(eq(batches.projectId, projectID)).all().map((r) => ({ id: r.id, project_id: r.projectId, revision: r.revision, name: r.name, state: r.state, idempotency_key: r.idempotencyKey, items: array<GenerationBatchItem>(r.items), total_cost: r.totalCost, created_at: r.createdAt, updated_at: r.updatedAt }));
+    return this.db.select().from(batches).where(eq(batches.projectId, projectID)).all().map(toBatch);
+  }
+  /** One batch of a project, or undefined; the project must be visible to the session. */
+  batch(session: Session, projectID: string, batchID: string): GenerationBatch | undefined {
+    this.project(session, projectID);
+    const row = this.db.select().from(batches).where(and(eq(batches.projectId, projectID), eq(batches.id, batchID))).get();
+    return row && toBatch(row);
+  }
+  /**
+   * One page of a project's batches after `after`, newest first (`created_at DESC, id DESC`), with how many match in all.
+   * Filtered, ordered and counted in SQL, so a poll parses only the page it returns, not the project's whole history.
+   */
+  batchPage(session: Session, projectID: string, query: BatchQuery, after?: BatchPosition): { rows: GenerationBatch[]; total: number; next?: BatchPosition } {
+    this.project(session, projectID);
+    const filters: SQL[] = [eq(batches.projectId, projectID)];
+    // A batch id typed into the search finds that batch even when its name does not match.
+    if (query.q) filters.push(or(sql`instr(lower(${batches.name}), ${query.q.toLowerCase()}) > 0`, eq(batches.id, query.q))!);
+    if (query.states) filters.push(inArray(batches.state, query.states));
+    if (query.owners) filters.push(sql`exists (select 1 from json_each(${batches.items}) where json_extract(json_each.value, '$.owner') in (${sql.join(query.owners.map((owner) => sql`${owner}`), sql`, `)}))`);
+    if (query.from) filters.push(sql`${batches.createdAt} >= ${query.from}`);
+    if (query.to) filters.push(lt(batches.createdAt, query.to));
+    const total = Number(this.db.select({ n: sql<number>`count(*)` }).from(batches).where(and(...filters)).get()?.n || 0);
+    if (after) filters.push(or(lt(batches.createdAt, after.created_at), and(eq(batches.createdAt, after.created_at), lt(batches.id, after.id)))!);
+    const found = this.db.select().from(batches).where(and(...filters)).orderBy(desc(batches.createdAt), desc(batches.id)).limit(query.limit + 1).all().map(toBatch);
+    const rows = found.slice(0, query.limit);
+    const last = rows[rows.length - 1];
+    return { rows, total, next: found.length > query.limit && last ? { created_at: last.created_at, id: last.id } : undefined };
   }
   authorize(session: Session, action: CollaborationAction, target: string, input: Record<string, unknown>) {
     if (session.expires <= Date.now()) throw new AuthError("session_expired", 401);
@@ -213,8 +291,7 @@ export class CollaborationService {
       const actorMember = this.member(session, target, "admin");
       const member = input.admin_member_id ? this.directory(session, target).members.find((m) => m.id === input.admin_member_id && m.status === "active") : actorMember;
       if (!member) throw new AuthError("invalid_project_administrator", 400);
-      const initialBindings = input.bindings || [];
-      if (!Array.isArray(initialBindings) || initialBindings.length > 4 || new Set(initialBindings.map((b) => b?.owner)).size !== initialBindings.length || initialBindings.some((b) => !this.bindingOptions(session, target).some((o) => JSON.stringify(o) === JSON.stringify(b)))) throw new AuthError("invalid_project_bindings", 400);
+      const initialBindings = this.normalizeBindings(session, target, input.bindings || []);
       const projectID = id("project");
       const team = input.team_id ? this.directory(session, target).teams.find((t) => t.id === input.team_id) : null;
       if (input.team_id && !team) throw new AuthError("team_not_found", 404);
@@ -249,8 +326,7 @@ export class CollaborationService {
       updateProject({ grants: JSON.stringify(grants) }); this.auth.sessions.bumpAll(); return [p.id];
     }
     if (action === "project.bindings.set") {
-      const options = this.bindingOptions(session, p.organization_id); const selected = input.bindings as ProjectBinding[];
-      if (!Array.isArray(selected) || selected.length > 4 || selected.some((b) => !options.some((o) => JSON.stringify(o) === JSON.stringify(b))) || new Set(selected.map((b) => b.owner)).size !== selected.length) throw new AuthError("invalid_project_bindings", 400);
+      const selected = this.normalizeBindings(session, p.organization_id, input.bindings);
       updateProject({ bindings: JSON.stringify(selected) }); this.auth.sessions.bumpAll(); return [p.id];
     }
     if (action === "folder.create") {
@@ -272,7 +348,7 @@ export class CollaborationService {
       const values = input.items as GenerationBatchItem[];
       if (!Array.isArray(values) || !values.length || values.length > 50) throw new AuthError("invalid_generation_batch", 400);
       for (const v of values) {
-        if (!v || !["eikona", "scaena"].includes(v.owner) || !["image", "video"].includes(v.modality) || !Number.isInteger(v.candidate_count) || v.candidate_count < 1 || v.candidate_count > 16 || !p.bindings.some((b) => b.owner === v.owner)) throw new AuthError("invalid_generation_item", 400);
+        if (!v || !["eikona", "scaena"].includes(v.owner) || !["image", "video"].includes(v.modality) || !Number.isInteger(v.candidate_count) || v.candidate_count < 1 || v.candidate_count > 16 || !targetBinding(p, v)) throw new AuthError("invalid_generation_item", 400);
         ref(v.model_ref); ref(v.input_ref); for (const d of [v.input_digest, v.plan_digest]) if (!/^sha256:[a-f0-9]{64}$/.test(d)) throw new AuthError("invalid_generation_digest", 400);
         this.folder(target, v.folder_id);
       }
@@ -305,7 +381,8 @@ export class CollaborationService {
         }
         const projectID = "project_legacy_" + stable(scope.tenant, scope.id);
         const aliases = this.db.select().from(projectMetadata).where(eq(projectMetadata.scopeId, scope.id)).all();
-        const bindings = Object.entries(scope.owners).map(([owner, b]) => ({ owner, project_ref: b!.project, source_scope: scope.id, connection_ids: (scope.connection_ids || []).filter((id) => this.config.connections?.some((c) => c.id === id && c.owner === owner && c.project === b!.project)) }));
+        // One binding per pinned owner project, as before; connected projects can be bound later from the UI.
+        const bindings = this.toolProjects(scope).filter((p) => p.pinned).map((p) => ({ owner: p.owner, project_ref: p.project_ref, source_scope: scope.id, connection_ids: p.connection_ids }));
         this.db.insert(projects).values({ id: projectID, organizationId: orgID, name: aliases.length === 1 && aliases[0].displayName || scope.label,
           bindings: JSON.stringify(bindings), grants: JSON.stringify(allowed.map((p) => ({ subject_type: "member", subject_id: "member_legacy_" + stable(orgID, `${p.issuer}|${p.subject}`), role: p.role === "admin" ? "project_admin" : "viewer" }))), createdAt: now, updatedAt: now }).onConflictDoNothing().run();
         summary.projects++;

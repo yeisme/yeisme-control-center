@@ -2,7 +2,7 @@ import { AuthError, boundedJSON, secret } from "./auth";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { CoverageState } from "../src/request-visibility";
 import { flowStateFrom } from "../src/shared/creative-flow";
-import type { StoryboardOutline, StoryboardOutlineScene, StoryboardOutlineShot } from "../src/shared/drama";
+import type { DramaSourceState, StoryboardOutline, StoryboardOutlineScene, StoryboardOutlineShot } from "../src/shared/drama";
 
 export interface ScaenaStoryboardItem {
   breakdown_ref: string;
@@ -163,6 +163,15 @@ function outlineOf(raw: Record<string, unknown>, head: ScaenaStoryboardItem, old
     finding_count: head.finding_count ?? null,
     scenes,
   };
+}
+
+/** Whether the breakdown projection can be read for this scope, from configuration alone. A Scaena task connection is not enough. */
+export function scaenaStoryboardConnection(config: ServerConfig, scope: ScopeBinding, session: Pick<Session, "accessToken" | "accessAudience">): { state: DramaSourceState } {
+  const target = config.owners.scaena;
+  if (!target) return { state: "target_missing" };
+  if (!scope.owners.scaena) return { state: "binding_missing" };
+  const delegated = !!session.accessToken && session.accessAudience.includes(target.audience);
+  return { state: delegated || target.credential_ref ? "connected" : "no_credential" };
 }
 
 export class ScaenaStoryboardReader {

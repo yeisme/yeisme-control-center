@@ -6,7 +6,8 @@ import {
 } from "node:crypto";
 import { AuthError, SessionAuth } from "./auth";
 import { OwnerReaders, owners } from "./owners";
-import { TaskConnections } from "./task-connections";
+import { TaskConnections, taskIdentity, taskIdentityOf } from "./task-connections";
+import { ConnectionCatalog, ownerProjectRef } from "./connection-catalog";
 import { MediaBridge } from "./media";
 import { serviceDirectory } from "./service-directory";
 import type { TaskSnapshot } from "../src/task-observation";
@@ -17,22 +18,25 @@ import { RunStore } from "./db/run-store";
 import { ActionService, type PreviewRecord } from "./actions";
 import type { ActionConfirmRequest, ActionPreviewRequest, ActionReceipt } from "../src/shared/action-contract";
 import { createMemoryDB, type ControlDB } from "./db/client";
-import { NotificationStore, attentionStates, type FailureFact } from "./notifications";
+import { NotificationStore, attentionStates, countsAsUnread, type FailureFact } from "./notifications";
+import { taskSigningKey } from "./db/control-state";
+import { rekeyNotifications } from "./db/notification-rekey";
 import { ToolCatalogService } from "./tool-catalog";
 import { ToolCatalogStore } from "./db/tool-catalog-store";
 import {
   ProviderRunManager,
   type ProviderRunRequest,
 } from "./provider-live";
-import { AuctraCollectionReader } from "./auctra";
+import { AuctraCollectionReader, auctraConnection, collectionFingerprint } from "./auctra";
 import { AuctraCollectionStore } from "./db/auctra-collection-store";
 import { ProjectMetadataStore } from "./db/project-metadata-store";
-import { GenerationBatches } from "./generation-batches";
+import { GenerationBatches, parseBatchQuery } from "./generation-batches";
 import { CollaborationService, identityOf } from "./collaboration";
-import { isCollaborationAction, type DirectoryQuery } from "../src/shared/collaboration";
+import { isCollaborationAction, type DirectoryQuery, type GenerationBatch } from "../src/shared/collaboration";
 import { buildWorkQueue, filterAndPageWorkQueue } from "./work-queue";
 import { workQueueKinds } from "../src/shared/work-queue";
 import { DramaService, dramaLimits, validDramaRef } from "./drama";
+import { collectionSyncLimits, syncCollection } from "./auctra-sync";
 import { ScaenaStoryboardReader } from "./scaena-storyboard";
 import {
   defaultRequestQuery,
@@ -120,9 +124,14 @@ export function createApp(
   } = {},
 ) {
   const db = deps.db ?? createMemoryDB(),
+    // Task keys stay valid across restarts: the signing key is kept with the database. If it cannot be stored, keys
+    // are signed per process, as before.
+    signingKey = (() => { try { return taskSigningKey(db); } catch { return randomBytes(32); } })(),
     auth = deps.auth || new SessionAuth(config, undefined, new SessionStore(db)),
     readers = deps.readers || new OwnerReaders(config),
-    tasks = deps.tasks || new TaskConnections(config),
+    // Configured connections plus tool projects registered from the control center; one catalog for every reader.
+    connectionCatalog = deps.tasks?.catalog ?? new ConnectionCatalog(config, db),
+    tasks = deps.tasks || new TaskConnections(config, undefined, signingKey, connectionCatalog),
     providers =
       deps.providers || new ProviderRunManager(config, undefined, new RunStore(db)),
     auctra = deps.auctra || new AuctraCollectionReader(config),
@@ -135,9 +144,42 @@ export function createApp(
     catalog = new ToolCatalogService(providers, new ToolCatalogStore(db)),
     media = new MediaBridge(tasks, undefined, audit),
     actions = new ActionService(db),
-    collaboration = new CollaborationService(db, config, auth),
+    collaboration = new CollaborationService(db, config, auth, connectionCatalog),
     generationBatches = new GenerationBatches(collaboration, readers, config),
     cursorKey = randomBytes(32);
+  // One-time repair of reminders duplicated by earlier restarts; a no-op once its marker is set. A failed repair never
+  // keeps the server from starting: it rolls back and runs again on the next start.
+  try { rekeyNotifications(db, { key: signingKey }); } catch (error) { console.warn(`[control-center] reminder repair skipped: ${error instanceof Error ? error.message : "unknown"}`); }
+  /**
+   * Checks a tool-project registration and asks the owner once, through a throwaway connection that copies a
+   * configured template. A refusal concerns only that throwaway connection; the template keeps working.
+   */
+  const checkToolProject = async (s: Session, scope: ScopeBinding, input: Record<string, unknown>) => {
+    if (!s.personal || auth.role(s) !== "admin") throw new AuthError("control_center_admin_required", 403);
+    if (scope.id.startsWith("project_")) throw new AuthError("owner_project_scope_required", 400);
+    const template = connectionCatalog.configured().find((c) => c.id === input.template_connection_id && c.enabled && scope.connection_ids?.includes(c.id));
+    if (!template) throw new AuthError("owner_project_template_not_found", 404);
+    const project = typeof input.project_ref === "string" ? input.project_ref.trim() : "";
+    if (!ownerProjectRef.test(project)) throw new AuthError("invalid_owner_project_ref", 400);
+    const label = typeof input.label === "string" ? input.label.trim().slice(0, 80) : "";
+    if (/[\x00-\x1f\x7f]/.test(label)) throw new AuthError("invalid_display_name", 400);
+    if (connectionCatalog.forScope(scope).some((c) => c.owner === template.owner && c.project === project)) throw new AuthError("owner_project_already_connected", 409);
+    try {
+      await tasks.probe(connectionCatalog.probe(template, project));
+    } catch (e) {
+      const status = e instanceof AuthError ? e.status : 503;
+      if (status === 401 || status === 403 || status === 404) throw new AuthError("owner_project_not_accessible", 403);
+      if (status === 422) throw new AuthError("owner_project_contract_missing", 422);
+      throw new AuthError("owner_project_unreachable", 503);
+    }
+    return { template, project, label };
+  };
+  const registeredIn = (s: Session, scope: ScopeBinding, id: unknown) => {
+    if (!s.personal || auth.role(s) !== "admin") throw new AuthError("control_center_admin_required", 403);
+    const found = connectionCatalog.registered().find((c) => c.id === id && c.scope_id === scope.id);
+    if (!found) throw new AuthError("owner_project_not_found", 404);
+    return found;
+  };
   const scoped = (s: Session, id: string | null): ScopeBinding => {
     if (id?.startsWith("project_")) return collaboration.scope(s, id);
     const p = auth.principal(s);
@@ -162,6 +204,20 @@ export function createApp(
   const auditError = (e: unknown) =>
     e instanceof AuthError ? e.code : "source_unavailable";
   const readCreativeFlow = (scope: ScopeBinding, session: Session, query: { episode_ref?: string; breakdown_ref?: string } = {}) => drama.flow(scope, session, query);
+  /**
+   * One reminder per batch and finished state, for every project member; its link opens that batch directly. Lists and
+   * details announce only the changes they observed themselves, so paging back through old batches never re-announces them.
+   */
+  const batchEndings: Record<string, string> = { succeeded: "已完成", partial: "部分完成", failed: "失败" };
+  const changed = (before: GenerationBatch[], after: GenerationBatch[]) => after.filter((batch, index) => batch.state !== before[index]?.state);
+  const announceBatches = (projectID: string, rows: GenerationBatch[]) => {
+    for (const batch of rows) {
+      const ending = batchEndings[batch.state];
+      if (!ending) continue;
+      for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」${ending}`, path: `/creation?${new URLSearchParams({ sharedProject: projectID, batch: batch.id })}` });
+    }
+  };
+
   const sign = (payload: any) => {
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
     return (
@@ -427,6 +483,19 @@ export function createApp(
         if (!item.source?.connection || !item.source.project || !item.source.family || !item.source.ref) throw new AuthError("item_source_unavailable", 409);
         return json(withEpoch(session, await tasks.resolve(collaboration.scope(session, projectID), item.source)));
       }
+      const batchRoute = path.match(/^\/projects\/([^/]+)\/generation-batches\/([^/]+)$/);
+      if (r.method === "GET" && batchRoute) {
+        const projectID = decodeURIComponent(batchRoute[1]);
+        const batchID = decodeURIComponent(batchRoute[2]);
+        // A project the session cannot see and a batch that is not in it answer alike.
+        let stored;
+        try { stored = collaboration.batch(session, projectID, batchID); }
+        catch (error) { if (error instanceof AuthError && (error.status === 403 || error.status === 404)) throw new AuthError("generation_batch_not_found", 404); throw error; }
+        if (!stored) throw new AuthError("generation_batch_not_found", 404);
+        const observed = await generationBatches.observeBatches(session, projectID, [stored]);
+        announceBatches(projectID, changed([stored], observed.rows));
+        return json(withEpoch(session, { batch: observed.rows[0], coverage: observed.sources.some((source) => source.state !== "ready") ? "partial" : "complete", observed_at: new Date().toISOString(), sources: observed.sources }));
+      }
       const sharedRoute = path.match(/^\/projects\/([^/]+)(?:\/(members|bindings|folders|items|generation-batches))?$/);
       if (r.method === "GET" && sharedRoute) {
         const projectID = decodeURIComponent(sharedRoute[1]);
@@ -437,9 +506,22 @@ export function createApp(
         if (kind === "bindings") return json(withEpoch(session, { rows: project.bindings }));
         if (kind === "folders") return json(withEpoch(session, { rows: collaboration.folders(session, projectID) }));
         if (kind === "generation-batches") {
-          const rows = await generationBatches.observe(session, projectID);
-          for (const batch of rows.filter((b) => ["succeeded", "partial", "failed"].includes(b.state))) for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」：${batch.state}`, path: `/creation?sharedProject=${projectID}&batch=${batch.id}` });
-          return json(withEpoch(session, { rows }));
+          const query = parseBatchQuery(url.searchParams);
+          // The cursor is bound to who reads, the session epoch, the project and its revision, and every filter.
+          const fp = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, project.revision, project.role, query])).digest("hex");
+          const position = cursor(url.searchParams.get("cursor"), fp) as Record<string, string>;
+          const after = position.created_at && position.id ? { created_at: position.created_at, id: position.id } : undefined;
+          const page = collaboration.batchPage(session, projectID, query, after);
+          const observed = await generationBatches.observeBatches(session, projectID, page.rows);
+          announceBatches(projectID, changed(page.rows, observed.rows));
+          return json(withEpoch(session, {
+            rows: observed.rows,
+            next_cursor: page.next ? sign({ fp, expires: Date.now() + 900000, cursors: page.next }) : null,
+            total: page.total,
+            coverage: observed.sources.some((source) => source.state !== "ready") ? "partial" : "complete",
+            observed_at: new Date().toISOString(),
+            sources: observed.sources,
+          }));
         }
         const query = Object.fromEntries(url.searchParams.entries()) as DirectoryQuery;
         query.limit = Number(url.searchParams.get("limit") || 50);
@@ -448,7 +530,9 @@ export function createApp(
           if (url.searchParams.has("source_cursor") || url.searchParams.has("cursor")) throw new AuthError("local_page_not_pageable", 400);
           delete query.local;
           const page = collaboration.items(session, projectID, query);
-          return json(withEpoch(session, { ...page, next_cursor: null, next_source_cursor: null, coverage: "partial", sources: [] }));
+          // A truncated cover must not report the filtered table count as rows read.
+          const truncated = page.next_cursor !== null;
+          return json(withEpoch(session, { ...page, total: truncated ? page.rows.length : page.total, next_cursor: null, next_source_cursor: null, coverage: truncated ? "partial" : "complete", sources: [] }));
         }
         const projectScope = collaboration.scope(session, projectID);
         const sourceFP = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, projectID, "item_sources"])).digest("hex");
@@ -493,6 +577,22 @@ export function createApp(
           clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin },
         })));
       }
+      if (r.method === "GET" && path === "/owner-projects") {
+        // Tool projects across every scope of this identity, with local names; no owner calls.
+        const scopes = auth.principal(session)?.scopes || [];
+        const names = scopes.flatMap((s) => projectMetadata.list(s.id).map((row) => ({ ...row, scope_id: s.id, tenant: s.tenant })));
+        const registered = connectionCatalog.registered();
+        const rows = scopes.flatMap((s) => collaboration.toolProjects(s).map((p) => {
+          // A name given in this scope wins; otherwise one given for the same project in another scope of the tenant.
+          const own = names.find((n) => n.scope_id === s.id && n.owner === p.owner && n.project_ref === p.project_ref);
+          const other = names.filter((n) => n.tenant === s.tenant && n.owner === p.owner && n.project_ref === p.project_ref && n.display_name).sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+          return { ...p, scope_id: s.id, scope_label: s.label, tenant: s.tenant, display_name: own?.display_name || other?.display_name || "", hidden: own?.hidden === true, revision: own?.revision || 0,
+            registrations: registered.filter((c) => c.scope_id === s.id && c.owner === p.owner && c.project === p.project_ref).map((c) => ({ id: c.id, template_id: c.template_id, label: c.label })) };
+        }));
+        const admin = !!session.personal && auth.role(session) === "admin";
+        const templates = admin && !scope.id.startsWith("project_") ? connectionCatalog.configured().filter((c) => c.enabled && scope.connection_ids?.includes(c.id)).map((c) => ({ id: c.id, owner: c.owner, label: c.label, project: c.project })) : [];
+        return json(withEpoch(session, { schema_version: "yeisme.owner_projects.v1", scope: scope.id, rows, can_register: templates.length > 0, templates }));
+      }
       if (r.method === "GET" && path === "/project-metadata") {
         return json(withEpoch(session, {
           schema_version: "yeisme.project_metadata.page.v1",
@@ -517,7 +617,13 @@ export function createApp(
           cursor: cursor ? Number(cursor) : 0,
         });
         const localCoverage = collectionStore.coverage(scope.id);
-        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.page.v1", owner: "auctra", scope: scope.id, observed_at: localCoverage.observed_at || new Date().toISOString(), coverage: config.collection?.auctra ? localCoverage.state : "unknown", rows: result.rows, total: result.total, ...(result.nextCursor !== undefined ? { next_cursor: String(result.nextCursor) } : {}) }));
+        const connection = auctraConnection(config, scope, session);
+        const lastSync = connection.state === "target_missing" || connection.state === "binding_missing" ? undefined : collectionStore.cursor(scope.id, collectionFingerprint(config, scope));
+        return json(withEpoch(session, {
+          schema_version: "yeisme.auctra.collection.page.v1", owner: "auctra", scope: scope.id, observed_at: localCoverage.observed_at || new Date().toISOString(), coverage: config.collection?.auctra ? localCoverage.state : "unknown", rows: result.rows, total: result.total, ...(result.nextCursor !== undefined ? { next_cursor: String(result.nextCursor) } : {}),
+          connection,
+          ...(lastSync ? { last_sync: { at: lastSync.lastSuccessAt, complete: lastSync.coverage !== "partial", ...(lastSync.reason ? { reason: lastSync.reason } : {}) } } : {}),
+        }));
       }
       const collectionRecordMatch = path.match(/^\/auctra\/collection\/records\/([^/]+)$/);
       if (r.method === "GET" && collectionRecordMatch) {
@@ -531,16 +637,15 @@ export function createApp(
         if (raw) {
           try { body = JSON.parse(raw) as typeof body; } catch { throw new AuthError("invalid_request", 400); }
         }
-        const limit = Number(body.limit || url.searchParams.get("limit") || 100);
+        // `limit` is the page size; one sync keeps reading pages until Auctra has none left or a sync limit stops it.
+        const limit = Number(body.limit || url.searchParams.get("limit") || collectionSyncLimits.pageSize);
         if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new AuthError("invalid_query", 400);
         const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "auctra.collection.sync", owner: "auctra", purpose: "metadata_collection" });
         try {
-          const snapshot = await auctra.snapshot(scope.id, scope, session, { cursor: body.cursor || url.searchParams.get("cursor") || undefined, updated_after: body.updated_after || url.searchParams.get("updated_after") || undefined, limit });
-          const fingerprint = createHash("sha256").update(JSON.stringify([config.collection?.auctra?.origin || "", scope.collection?.auctra?.project || ""])).digest("hex");
-          const counts = snapshot.coverage === "complete" ? collectionStore.upsertSnapshot(scope.id, snapshot) : { inserted: 0, updated: 0, returned: 0, total: 0 };
-          if (snapshot.coverage === "complete") collectionStore.saveCursor(scope.id, fingerprint, snapshot.next_cursor || "", createHash("sha256").update(JSON.stringify(snapshot.records)).digest("hex"), snapshot.coverage);
-          audit.complete(eventId, snapshot.coverage === "complete" ? "succeeded" : "unavailable", snapshot.blocker);
-          return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.sync.v1", sync_ref: "sync_" + randomBytes(12).toString("hex"), scope: scope.id, coverage: snapshot.coverage, freshness: snapshot.freshness, observed_at: snapshot.observed_at, cursor: snapshot.next_cursor || null, counts, blocker: snapshot.blocker || null }), 200);
+          const result = await syncCollection({ reader: auctra, store: collectionStore, config }, scope, session, { cursor: body.cursor || url.searchParams.get("cursor") || undefined, updated_after: body.updated_after || url.searchParams.get("updated_after") || undefined, limit });
+          // A sync that stored some pages succeeded as far as it got; the stop reason stays on the audit row.
+          audit.complete(eventId, result.counts.returned || result.complete ? "succeeded" : "unavailable", result.blocker || undefined);
+          return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.sync.v1", sync_ref: "sync_" + randomBytes(12).toString("hex"), scope: scope.id, ...result }), 200);
         } catch (e) {
           audit.complete(eventId, auditOutcome(e), auditError(e));
           throw e;
@@ -550,6 +655,8 @@ export function createApp(
       const failureOf = (task: TaskSnapshot): FailureFact => ({
         scope_id: scope.id,
         task_key: task.task_key || "",
+        // From the verified snapshot, not the key string the browser proposed.
+        task_identity: task.connection_id ? taskIdentity({ scope: scope.id, c: task.connection_id, ref: task.locator.task_ref, family: task.locator.task_family }) : taskIdentityOf(task.task_key || ""),
         state: task.state,
         revision: task.revision || "",
         native_state: task.native_state || "",
@@ -561,24 +668,35 @@ export function createApp(
       if (path === "/notifications" || path.startsWith("/notifications/")) {
         // Reminder state is control-center data and follows the signed-in scope.
         const identity = { scopeId: scope.id, sessionId: session.id, subject };
-        const notificationPage = () => {
+        // A project scope lists the reminders of every project in its organization; actions may target any of them.
+        const reminderScopes = () => {
           const project = scope.id.startsWith("project_") ? collaboration.project(session, scope.id) : null;
-          const scopes = project ? collaboration.list(session, project.organization_id).map((p) => p.id) : [scope.id];
+          return project ? collaboration.list(session, project.organization_id).map((p) => p.id) : [scope.id];
+        };
+        const rowScope = (id: string) => {
+          const owner = notifications.scopeOf(id, subject);
+          if (!reminderScopes().includes(owner)) throw new AuthError("notification_not_found", 404);
+          return owner;
+        };
+        const notificationPage = () => {
+          const scopes = reminderScopes();
           const rows = scopes.flatMap((id) => notifications.list(id, session.id, subject)).sort((a, b) => b.first_seen_at.localeCompare(a.first_seen_at) || a.id.localeCompare(b.id));
           const limit = Number(url.searchParams.get("limit") || 50);
           if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new AuthError("invalid_query", 400);
           const query = { q: url.searchParams.get("q") || "", category: url.searchParams.get("category") || "", read: url.searchParams.get("read") || "" };
           if (query.q.length > 200) throw new AuthError("invalid_query", 400);
-          const filtered = rows.filter((row) => row.title.toLocaleLowerCase().includes(query.q.toLocaleLowerCase()) && (!query.category || query.category.split(",").includes(row.category || "failure")) && (!query.read || query.read.split(",").includes(row.read_at ? "read" : "unread")));
+          const filtered = rows.filter((row) => row.title.toLocaleLowerCase().includes(query.q.toLocaleLowerCase()) && (!query.category || query.category.split(",").includes(row.category || "failure")) && (!query.read || query.read.split(",").includes(countsAsUnread(row) ? "unread" : "read")));
           const fp = createHash("sha256").update(JSON.stringify([subject, session.epoch, scope.id, query, limit])).digest("hex");
           const offset = Number(cursor(url.searchParams.get("cursor"), fp).offset || 0);
           if (!Number.isInteger(offset) || offset < 0) throw new AuthError("invalid_query", 400);
-          return { rows: filtered.slice(offset, offset + limit), unread: rows.filter((row) => !row.read_at).length, total: filtered.length, next_cursor: offset + limit < filtered.length ? sign({ fp, expires: Date.now() + 900000, cursors: { offset: String(offset + limit) } }) : null };
+          // Counted over every row, not the loaded page: handled, read, snoozed and recovered reminders never count.
+          return { rows: filtered.slice(offset, offset + limit), unread: rows.filter((row) => countsAsUnread(row)).length, attention: rows.filter((row) => notifications.actionable(row)).length, total: filtered.length, next_cursor: offset + limit < filtered.length ? sign({ fp, expires: Date.now() + 900000, cursors: { offset: String(offset + limit) } }) : null };
         };
         const readMatch = path.match(/^\/notifications\/([^/]+)\/read$/);
         if (r.method === "POST" && readMatch) {
           auth.csrf(r, session);
-          return json(withEpoch(session, { notification: notifications.read(decodeURIComponent(readMatch[1]), scope.id, session.id, subject) }));
+          const id = decodeURIComponent(readMatch[1]);
+          return json(withEpoch(session, { notification: notifications.read(id, rowScope(id), session.id, subject) }));
         }
         if (r.method === "GET" && path === "/notifications") {
           notifications.cleanup(scope.id, session.id, subject);
@@ -600,13 +718,26 @@ export function createApp(
             try { verified.push(await tasks.detail(candidate.task_key, scope)); } catch { verificationComplete = false; }
           }
           const observed = verified.filter((task) => attentionStates.has(task.state)).map(failureOf);
+          // Open reminders whose task the browser now lists as not failing: confirm with the owner before marking them
+          // recovered, so a stale page can never silence a failure. At most 20 extra owner reads per sync.
+          const present = Array.isArray(body.present_task_keys) ? body.present_task_keys.filter((key) => typeof key === "string").slice(0, 4000) : [];
+          const failing = new Set(body.tasks.map((task) => taskIdentityOf(String(task?.task_key || ""))));
+          const candidates = new Set(notifications.recoveryCandidates(scope.id, subject));
+          const recovered: string[] = [];
+          for (const key of present.filter((key) => candidates.has(taskIdentityOf(key)) && !failing.has(taskIdentityOf(key))).slice(0, 20)) {
+            try {
+              const task = await tasks.detail(key, scope);
+              if (!attentionStates.has(task.state)) recovered.push(failureOf(task).task_identity);
+            } catch { verificationComplete = false; }
+          }
           const result = notifications.sync({
             ...identity,
             observed,
-            presentTaskKeys: Array.isArray(body.present_task_keys) ? body.present_task_keys.filter((key) => typeof key === "string").slice(0, 4000) : undefined,
+            presentTaskKeys: Array.isArray(body.present_task_keys) ? present : undefined,
             complete: false, // A browser page cannot establish complete owner coverage.
+            recovered,
           });
-          return json(withEpoch(session, { ...result, ...notificationPage(), owner_writes: 0 }));
+          return json(withEpoch(session, { ...result, ...notificationPage(), owner_writes: 0, verification_complete: verificationComplete }));
         }
         if (r.method === "POST" && path === "/notifications/bulk") {
           auth.csrf(r, session);
@@ -617,36 +748,49 @@ export function createApp(
           if (!body || (body.action !== "acknowledge" && body.action !== "archive" && body.action !== "mute") || (body.ids !== undefined && (!Array.isArray(body.ids) || body.ids.some((id) => typeof id !== "string") || body.ids.length > 500))) {
             throw new AuthError("invalid_notification_action", 400);
           }
-          const result = notifications.bulk({ ...identity, action: body.action, ids: body.ids, all: body.all === true });
-          return json({ ...result, task_states_changed: 0 });
+          if (body.all === true) return json({ ...notifications.bulk({ ...identity, action: body.action, all: true }), task_states_changed: 0 });
+          // Rows can belong to sibling projects of the same organization; apply each group in its own scope.
+          const byScope = new Map<string, string[]>();
+          for (const id of body.ids || []) byScope.set(rowScope(id), [...(byScope.get(rowScope(id)) || []), id]);
+          const updated = [...byScope].flatMap(([owner, ids]) => notifications.bulk({ ...identity, scopeId: owner, action: body.action as "acknowledge" | "archive" | "mute", ids }).updated);
+          return json({ updated, owner_writes: 0, task_states_changed: 0 });
         }
         if (r.method === "POST" && path === "/notifications/cleanup") {
           auth.csrf(r, session);
           const result = notifications.cleanup(scope.id, session.id, subject);
           return json({ ...result, task_states_changed: 0 });
         }
+        if (r.method === "GET" && path === "/notifications/mute-rules") {
+          return json(withEpoch(session, { rows: notifications.muteRules(reminderScopes(), subject) }));
+        }
+        const ruleMatch = path.match(/^\/notifications\/mute-rules\/([^/]+)\/remove$/);
+        if (r.method === "POST" && ruleMatch) {
+          auth.csrf(r, session);
+          return json({ ...notifications.removeMuteRule(decodeURIComponent(ruleMatch[1]), reminderScopes(), subject), task_states_changed: 0 });
+        }
         const one = path.match(/^\/notifications\/([^/]+)\/(acknowledge|mute|archive|reopen)$/);
         if (one && r.method === "POST") {
           auth.csrf(r, session);
           const id = decodeURIComponent(one[1]);
           const action = one[2];
+          const owner = rowScope(id);
           if (action === "mute") {
             const raw = await r.text();
-            let muteScope: "fingerprint" | "error_code" = "fingerprint";
+            let muteScope: "fingerprint" | "task" | "error_code" = "fingerprint";
             if (raw) {
               if (raw.length > 256) throw new AuthError("invalid_request", 400);
               let body: { scope?: string };
               try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
-              if (body?.scope === "error_code") muteScope = "error_code";
+              if (body?.scope === "error_code" || body?.scope === "task") muteScope = body.scope;
               else if (body?.scope && body.scope !== "fingerprint") throw new AuthError("invalid_request", 400);
             }
-            return json({ ...notifications.mute(id, scope.id, session.id, subject, undefined, muteScope), task_states_changed: 0 });
+            return json({ ...notifications.mute(id, owner, session.id, subject, undefined, muteScope), task_states_changed: 0 });
           }
           const updated = action === "acknowledge"
-            ? notifications.acknowledge(id, scope.id, session.id, subject)
+            ? notifications.acknowledge(id, owner, session.id, subject)
             : action === "archive"
-              ? notifications.archive(id, scope.id, session.id, subject)
-              : notifications.reopen(id, scope.id, session.id, subject);
+              ? notifications.archive(id, owner, session.id, subject)
+              : notifications.reopen(id, owner, session.id, subject);
           return json({ notification: updated, task_state: updated.task_state, task_states_changed: 0, owner_writes: 0 });
         }
         return methodNotAllowed(["GET", "POST"]);
@@ -670,6 +814,8 @@ export function createApp(
           if (isCollaborationAction(body.action)) collaboration.authorize(session, body.action, body.target_ref, body.input);
           if (body.action === "generation.batch.create") body.input.items = await generationBatches.verify(session, body.target_ref, body.input.items);
           if (body.action === "provider_runs.create" && scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
+          if (body.action === "owner_project.connect") await checkToolProject(session, scope, body.input || {});
+          if (body.action === "owner_project.disconnect") registeredIn(session, scope, body.input?.connection_id);
           const preview = actions.preview(body, identityOf(session));
           audit.complete(eventId, "succeeded");
           return json(withEpoch(session, preview));
@@ -708,7 +854,7 @@ export function createApp(
             }
             if (record.request.action === "generation.batch.submit" || record.request.action === "generation.batch.reconcile") {
               const batch = await generationBatches.operate(session, record.request.target_ref, String(input.batch_id), record.request.action === "generation.batch.submit");
-              for (const recipient of collaboration.recipients(batch.project_id)) notifications.event({ scope: batch.project_id, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」：${batch.state}`, path: `/creation?batch=${encodeURIComponent(batch.id)}` });
+              announceBatches(batch.project_id, [batch]);
               return { ...ActionService.unavailable(record, ""), state: batch.state === "unknown" ? "unknown" : "succeeded", error_code: batch.state === "unknown" ? "generation_reconcile_required" : null, owner_state: batch.state, operation_ref: batch.id, result_refs: [batch.id] };
             }
             if (isCollaborationAction(record.request.action)) {
@@ -749,6 +895,25 @@ export function createApp(
                     ? collectionStore.labels(scope.id, recordRef, expected, actor, Array.isArray(input.labels) ? input.labels.filter((value): value is string => typeof value === "string") : [])
                     : collectionStore.note(scope.id, recordRef, expected, actor, typeof input.note === "string" ? input.note : "");
               return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: recordRef, state: "succeeded", owner_state: result.collection_state, error_code: null, observed_at: new Date().toISOString(), operation_ref: recordRef, result_refs: [recordRef] };
+            }
+            if (record.request.owner === "control-center" && record.request.action === "owner_project.connect") {
+              // Checked again: time passed since the preview, and the owner may have changed its mind.
+              const checked = await checkToolProject(session, scope, input);
+              const connection = connectionCatalog.register({ scope, template: checked.template, project: checked.project, label: checked.label, actor: identityOf(session) });
+              // The name typed while connecting becomes the project's local name, unless it already has one.
+              if (checked.label && !projectMetadata.get(scope.id, checked.template.owner, checked.project)) {
+                try { projectMetadata.rename(scope.id, checked.template.owner, checked.project, "0", checked.label, identityOf(session)); } catch { /* the connection stands; the name can be set later */ }
+              }
+              tasks.forget(connection);
+              auth.sessions.bumpAll();
+              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref, state: "succeeded", owner_state: "connected", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: [connection] };
+            }
+            if (record.request.owner === "control-center" && record.request.action === "owner_project.disconnect") {
+              const found = registeredIn(session, scope, input.connection_id);
+              connectionCatalog.disconnect(found.id, scope);
+              tasks.forget(found.id);
+              auth.sessions.bumpAll();
+              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref, state: "succeeded", owner_state: "disconnected", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: [found.id] };
             }
             if (record.request.owner === "control-center" && record.request.action.startsWith("project.metadata.")) {
               const separator = record.request.target_ref.indexOf(":");
@@ -803,7 +968,7 @@ export function createApp(
       }
       if (r.method === "GET" && path === "/services")
         return json(withEpoch(session, serviceDirectory(config, scope, session,
-          session.personal && url.searchParams.get("observe") === "1" ? await tasks.observe(scope) : [])));
+          session.personal && url.searchParams.get("observe") === "1" ? await tasks.observe(scope) : [], connectionCatalog.inScope(scope))));
       if (r.method === "GET" && path === "/capabilities")
         return json(withEpoch(session, { scope: scope.id, capabilities: await providers.capabilities(scope) }));
       if (path === "/tool-catalog") {
@@ -838,7 +1003,8 @@ export function createApp(
           typeof body.model_ref !== "string" || body.model_ref.length < 1 || body.model_ref.length > 200 ||
           typeof body.scope_id !== "string" || typeof body.project_ref !== "string" ||
           typeof body.prompt !== "string" || body.prompt.length < 1 || body.prompt.length > 10000 ||
-          !body.budget_cap || body.budget_cap.currency !== "CNY" ||
+          // The cap's currency is checked by the run manager, which knows the owners' cap currency.
+          !body.budget_cap || typeof body.budget_cap.currency !== "string" ||
           typeof body.budget_cap.amount !== "number" || !Number.isFinite(body.budget_cap.amount) ||
           typeof body.idempotency_key !== "string" ||
           (body.trace_ref !== undefined && typeof body.trace_ref !== "string") || !creativeInputValid)

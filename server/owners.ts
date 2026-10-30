@@ -236,8 +236,10 @@ export function businessText(v: any, direction: "input" | "output") {
 }
 export class OwnerReaders {
   /** Fixed owner batch routes only; callers cannot supply an outbound URL. */
-  async imageBatch(operation: "input" | "plan" | "submit" | "reconcile" | "members" | "snapshot", s: Session, scope: ScopeBinding, body: Record<string, unknown>, key?: string) {
-    const project = scope.owners.eikona?.project;
+  async imageBatch(operation: "input" | "plan" | "submit" | "reconcile" | "members" | "snapshot", s: Session, scope: ScopeBinding, body: Record<string, unknown>, key?: string, projectRef?: string) {
+    // A shared project may bind several Eikona projects; the caller names the target, which must be one of them.
+    if (projectRef && !(scope.projects || []).some((p) => p.owner === "eikona" && p.project_ref === projectRef)) throw new AuthError("generation_scope_mismatch", 403);
+    const project = projectRef || scope.owners.eikona?.project;
     if (!project) throw new AuthError("project_binding_required", 409);
     const value = { ...body, project_ref: project };
     const paths = { input: "/api/v1/owner/batch-inputs", plan: "/api/v1/owner/batch-input/plan", submit: "/api/v1/owner/batches:submit", reconcile: "/api/v1/owner/batches:reconcile", members: "/api/v1/owner/batch-members", snapshot: "/api/v1/owner/batch-input" };

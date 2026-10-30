@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { AuthError, boundedJSON, secret } from "./auth";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { CoverageState } from "../src/request-visibility";
+import type { DramaSourceState } from "../src/shared/drama";
 
 export type AuctraCollectionCoverage = "complete" | "partial" | "needs_contract" | "forbidden" | "unavailable" | "unknown" | "stale";
 
@@ -82,6 +84,25 @@ export interface AuctraCreativeFlowSnapshot {
 type AuctraTarget = NonNullable<NonNullable<ServerConfig["collection"]>["auctra"]>;
 type AuctraBinding = NonNullable<NonNullable<ScopeBinding["collection"]>["auctra"]>;
 
+/**
+ * Whether a scope can read its Auctra collection, from configuration alone. The board, the services page and the reader share
+ * this answer, so "not configured on the server", "this scope has no Auctra project" and "no usable credential" never blur.
+ */
+export function auctraConnection(config: ServerConfig, scope: ScopeBinding, session: Pick<Session, "accessToken" | "accessAudience">): { state: DramaSourceState; reason?: string; project_ref?: string } {
+  const target = config.collection?.auctra;
+  if (!target || target.enabled === false) return { state: "target_missing", reason: "collection_target_missing" };
+  const binding = scope.collection?.auctra;
+  if (!binding) return { state: "binding_missing", reason: "collection_binding_missing" };
+  const delegated = !!session.accessToken && session.accessAudience.includes(target.audience);
+  if (!binding.actor || binding.audience !== target.audience || (!delegated && !target.credential_ref)) return { state: "no_credential", reason: "delegation_unavailable", project_ref: binding.project };
+  return { state: "connected", project_ref: binding.project };
+}
+
+/** Identifies the Auctra project a scope's local index was synced from; a new origin or project starts a new sync record. */
+export function collectionFingerprint(config: ServerConfig, scope: ScopeBinding) {
+  return createHash("sha256").update(JSON.stringify([config.collection?.auctra?.origin || "", scope.collection?.auctra?.project || ""])).digest("hex");
+}
+
 function text(value: unknown, max = 512) { return typeof value === "string" ? value.slice(0, max) : ""; }
 function opaque(value: unknown, max = 512) {
   const result = text(value, max);
@@ -127,25 +148,29 @@ function normalizeRecord(value: unknown): AuctraCollectionRecord | null {
 
 export class AuctraCollectionReader {
   constructor(private config: ServerConfig, private fetcher: typeof fetch = fetch) {}
-  private binding(scope: ScopeBinding, session: Session): { target: AuctraTarget; binding: AuctraBinding } {
+  private binding(scope: ScopeBinding): { target: AuctraTarget; binding: AuctraBinding } {
     const target = this.config.collection?.auctra;
     const binding = scope.collection?.auctra;
     if (!target || target.enabled === false) throw new AuthError("source_not_configured", 503);
     if (!binding || !binding.actor || binding.audience !== target.audience) throw new AuthError("delegation_unavailable", 403);
     if (!originOf(target.origin)) throw new AuthError("upstream_not_allowed", 403);
-    if (!session.accessToken && !target.credential_ref) throw new AuthError("delegation_unavailable", 403);
     return { target, binding };
   }
-  private bearer(target: AuctraTarget, session: Session) {
+  /**
+   * Auctra lets a `service-collector` key call `collection.*` only and refuses `collection.*` to every other key, so the flow read
+   * needs its own key. A single credential (a loopback token, or a deployment without access keys) still serves both.
+   */
+  private bearer(target: AuctraTarget, session: Session, use: "collection" | "flow") {
     if (session.accessToken && session.accessAudience.includes(target.audience)) return session.accessToken;
-    if (target.credential_ref) return secret(target.credential_ref);
+    const ref = use === "flow" ? target.flow_credential_ref || target.credential_ref : target.credential_ref;
+    if (ref) return secret(ref);
     throw new AuthError("delegation_unavailable", 403);
   }
-  private async request(path: string, init: RequestInit, scope: ScopeBinding, session: Session, limit = 2 * 1024 * 1024) {
-    const { target } = this.binding(scope, session);
+  private async request(path: string, init: RequestInit, scope: ScopeBinding, session: Session, use: "collection" | "flow", limit = 2 * 1024 * 1024) {
+    const { target } = this.binding(scope);
     const url = new URL(path, target.origin);
     if (url.origin !== originOf(target.origin) || url.username || url.password || url.hash || url.search) throw new AuthError("upstream_not_allowed", 403);
-    const response = await this.fetcher(url, { ...init, headers: { Authorization: "Bearer " + this.bearer(target, session), "Content-Type": "application/json", ...(init.headers || {}) }, redirect: "error", signal: AbortSignal.timeout(8000) });
+    const response = await this.fetcher(url, { ...init, headers: { Authorization: "Bearer " + this.bearer(target, session, use), "Content-Type": "application/json", ...(init.headers || {}) }, redirect: "error", signal: AbortSignal.timeout(8000) });
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) throw new AuthError("owner_forbidden", 403);
       if (response.status === 404 || response.status === 501) throw new AuthError("needs_contract", 422);
@@ -154,7 +179,7 @@ export class AuctraCollectionReader {
     return boundedJSON(response, limit);
   }
   private async invoke(operationID: string, args: Record<string, unknown>, scope: ScopeBinding, session: Session) {
-    return this.request(`/v1/operations/${encodeURIComponent(operationID)}:invoke`, { method: "POST", body: JSON.stringify({ operation_id: operationID, args: redact(args) }) }, scope, session);
+    return this.request(`/v1/operations/${encodeURIComponent(operationID)}:invoke`, { method: "POST", body: JSON.stringify({ operation_id: operationID, args: redact(args) }) }, scope, session, operationID.startsWith("collection.") ? "collection" : "flow");
   }
   async snapshot(scopeID: string, scope: ScopeBinding, session: Session, query: { cursor?: string; updated_after?: string; limit?: number; project_ref?: string } = {}): Promise<AuctraCollectionSnapshot> {
     try {
@@ -182,8 +207,9 @@ export class AuctraCollectionReader {
       return { schema_version: "auctra.creative_flow_source.v1", owner: "auctra", project_ref: projectRef, episode_ref: "", observed_at: new Date().toISOString(), coverage: "unknown", stages: [], blocker: "episode_ref_required" };
     }
     try {
+      // No project_ref: Auctra resolves the project from the served root and rejects any other spelling of it, and a migrated
+      // work's collection ref can differ from that spelling. work_ref is what its scope check needs.
       const data = envelopeData(await this.invoke("creative.flow.read", {
-        project_ref: projectRef,
         ...(query.episode_ref ? { episode_ref: query.episode_ref } : {}),
         work_ref: projectRef,
       }, scope, session));

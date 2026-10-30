@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { AuthError } from "./auth";
 import type { ControlDB } from "./db/client";
-import { taskNotifications } from "./db/schema";
+import { notificationMuteRules, taskNotifications } from "./db/schema";
+import { taskIdentityOf } from "./task-connections";
 
 /** Failure facts that open an in-app reminder. Owner state stays read-only. */
 export const attentionStates = new Set([
@@ -29,6 +30,8 @@ export const HISTORY_AFTER_MS = 7 * 24 * HOUR_MS;
 export interface FailureFact {
   scope_id: string;
   task_key: string;
+  /** Unsigned half of the task key; see `taskIdentity`. It survives restarts, the signed key may not. */
+  task_identity: string;
   state: string;
   revision: string;
   native_state: string;
@@ -66,12 +69,26 @@ export interface TaskNotification {
   category?: string;
   read_at?: string | null;
   target_path?: string | null;
+  task_identity?: string;
+  recovered_at?: string | null;
 }
 
 export interface NotificationSyncResult {
   inserted: string[];
   touched: string[];
   staled: string[];
+  recovered: string[];
+}
+
+export type MuteRuleKind = "task" | "error_code";
+export interface NotificationMuteRule {
+  id: string;
+  scope_id: string;
+  kind: MuteRuleKind;
+  owner: string;
+  key: string;
+  label: string;
+  created_at: string;
 }
 
 type Row = typeof taskNotifications.$inferSelect;
@@ -80,16 +97,39 @@ function clip(value: string | undefined, max: number) {
   return (value || "").slice(0, max);
 }
 
-/** Stable identity of one failure version. Polling the same facts does not change it. */
-export function failureFingerprint(fact: Pick<FailureFact, "scope_id" | "task_key" | "state" | "revision" | "native_state" | "error_code">) {
+/**
+ * Stable identity of one failure version. Polling the same facts does not change it, and neither does a server
+ * restart: it uses the task identity, not the signed task key, whose signature used to change with every process.
+ */
+export function failureFingerprint(fact: Pick<FailureFact, "scope_id" | "task_identity" | "state" | "revision" | "native_state" | "error_code">) {
   return [
     fact.scope_id,
-    fact.task_key,
+    fact.task_identity,
     fact.state,
     fact.revision,
     fact.native_state,
     fact.error_code,
   ].join("\u001f");
+}
+
+/** How far a reminder has been dealt with. Rows of one failure version always show the furthest state. */
+export function handledRank(state: string) {
+  return state === "archived" ? 4 : state === "muted" ? 3 : state === "acknowledged" ? 2 : state === "snoozed" ? 1 : 0;
+}
+
+/** True when `candidate` should stand for its failure version instead of `current`. */
+function prefer(candidate: { state: string; readAt?: string | null }, current: { state: string; readAt?: string | null }) {
+  const rank = handledRank(candidate.state) - handledRank(current.state);
+  return rank > 0 || (rank === 0 && !!candidate.readAt && !current.readAt);
+}
+
+/**
+ * The one definition of an unread reminder, shared by the sidebar badge, the bell and the reminders page: not read,
+ * not handled (acknowledged, muted, archived), not snoozed and not recovered.
+ */
+export function countsAsUnread(item: Pick<TaskNotification, "state" | "read_at" | "snoozed_until" | "recovered_at">, now = Date.now()) {
+  if (item.read_at || item.recovered_at || item.state !== "unread") return false;
+  return !(item.snoozed_until && Date.parse(item.snoozed_until) > now);
 }
 
 export function notificationId(sessionId: string, fingerprint: string) {
@@ -139,6 +179,7 @@ function toView(row: Row, now = Date.now()): TaskNotification {
     last_error_code: row.lastErrorCode,
     reopened: row.reopened,
     category: row.category, read_at: row.readAt, target_path: row.targetPath,
+    task_identity: row.taskIdentity || taskIdentityOf(row.taskKey), recovered_at: row.recoveredAt,
   };
 }
 
@@ -159,14 +200,13 @@ export class NotificationStore {
       ))
       .orderBy(desc(taskNotifications.lastSeenAt))
       .all();
-    const unique = new Map<string, TaskNotification>();
+    const unique = new Map<string, { row: Row; view: TaskNotification }>();
     for (const row of rows) {
       const key = `${row.category}|${row.failureFingerprint}`;
       const previous = unique.get(key);
-      const value = toView(row, now);
-      if (!previous || (previous.state === "unread" && value.state !== "unread") || (!previous.read_at && value.read_at)) unique.set(key, value);
+      if (!previous || prefer(row, previous.row)) unique.set(key, { row, view: toView(row, now) });
     }
-    return [...unique.values()];
+    return [...unique.values()].map((entry) => entry.view);
   }
 
   /** Unread reminders still shown on the home attention surface (not yet demoted). */
@@ -178,6 +218,7 @@ export class NotificationStore {
     if (item.category && item.category !== "failure") return false;
     if (item.state !== "unread") return false;
     if (item.presence !== "live") return false;
+    if (item.recovered_at) return false;
     if (item.priority !== "normal") return false;
     if (item.snoozed_until && Date.parse(item.snoozed_until) > now) return false;
     return true;
@@ -198,19 +239,21 @@ export class NotificationStore {
     presentTaskKeys?: string[];
     /** False while paging is truncated; missing tasks stay live. */
     complete?: boolean;
+    /** Task identities a fresh owner read showed are no longer failing. */
+    recovered?: string[];
     now?: string;
   }): NotificationSyncResult {
     const nowIso = input.now || new Date().toISOString();
     const nowMs = Date.parse(nowIso);
     const seenFacts = new Set<string>();
     const facts = input.observed.filter((fact) => {
-      if (!attentionStates.has(fact.state) || !fact.task_key || fact.scope_id !== input.scopeId) return false;
+      if (!attentionStates.has(fact.state) || !fact.task_key || !fact.task_identity || fact.scope_id !== input.scopeId) return false;
       const fingerprint = failureFingerprint(fact);
       if (seenFacts.has(fingerprint)) return false;
       seenFacts.add(fingerprint);
       return true;
     });
-    const present = new Set(input.presentTaskKeys || facts.map((fact) => fact.task_key));
+    const present = new Set(input.presentTaskKeys ? input.presentTaskKeys.map(taskIdentityOf) : facts.map((fact) => fact.task_identity));
     const existing = this.db
       .select()
       .from(taskNotifications)
@@ -219,13 +262,19 @@ export class NotificationStore {
         eq(taskNotifications.subject, input.subject),
       ))
       .all();
-    const byFingerprint = new Map(existing.map((row) => [row.failureFingerprint, row]));
+    // Older restarts left several rows per failure version; the furthest-handled one stands for all of them.
+    const byFingerprint = new Map<string, Row>();
+    for (const row of existing) {
+      const current = byFingerprint.get(row.failureFingerprint);
+      if (!current || prefer(row, current)) byFingerprint.set(row.failureFingerprint, row);
+    }
+    const rules = this.muteRuleRows(input.scopeId, input.subject);
     const inserted: string[] = [];
     const touched: string[] = [];
     const seenTasks = new Set<string>();
 
     for (const fact of facts) {
-      seenTasks.add(fact.task_key);
+      seenTasks.add(fact.task_identity);
       const fingerprint = failureFingerprint(fact);
       const current = byFingerprint.get(fingerprint);
       if (current) {
@@ -234,6 +283,10 @@ export class NotificationStore {
           lastSeenAt: nowIso,
           presence: "live",
           priority,
+          // The key's signature may differ after a restart; keep the link current.
+          taskKey: clip(fact.task_key, 4096),
+          taskIdentity: fact.task_identity,
+          recoveredAt: null,
           title: clip(fact.title, 240) || current.title,
           owner: clip(fact.owner, 64) || current.owner,
           project: clip(fact.project, 200) || current.project,
@@ -247,15 +300,19 @@ export class NotificationStore {
       }
       if (!opensReminder(true)) continue;
       const id = notificationId(input.scopeId + "|" + input.subject, fingerprint);
+      // A lasting rule keeps later failure versions quiet: they are recorded, shown as muted and never counted.
+      const muted = rules.some((rule) => rule.kind === "task" ? rule.key === fact.task_identity : !!fact.error_code && rule.key === fact.error_code && rule.owner === (fact.owner || ""));
       this.db.insert(taskNotifications).values({
         id,
         scopeId: input.scopeId,
         sessionId: input.sessionId,
         subject: input.subject,
-        taskKey: clip(fact.task_key, 240),
+        taskKey: clip(fact.task_key, 4096),
+        taskIdentity: fact.task_identity,
         taskRevision: clip(fact.revision, 160),
         failureFingerprint: fingerprint,
-        state: "unread",
+        state: muted ? "muted" : "unread",
+        mutedAt: muted ? nowIso : null,
         priority: "normal",
         presence: "live",
         taskState: fact.state,
@@ -272,10 +329,11 @@ export class NotificationStore {
     }
 
     const staled: string[] = [];
+    const identityOf = (row: Row) => row.taskIdentity || taskIdentityOf(row.taskKey);
     const canMarkAbsent = input.complete !== false && input.presentTaskKeys !== undefined;
     if (canMarkAbsent) for (const row of existing) {
-      if (row.category !== "failure" || seenTasks.has(row.taskKey) || row.presence === "stale") continue;
-      if (present.has(row.taskKey)) {
+      if (row.category !== "failure" || seenTasks.has(identityOf(row)) || row.presence === "stale") continue;
+      if (present.has(identityOf(row))) {
         // Still projected, but no longer a failure fact. Keep the reminder and
         // stop counting it as live. Do not infer that the owner succeeded.
       }
@@ -287,7 +345,22 @@ export class NotificationStore {
       }).where(eq(taskNotifications.id, row.id)).run();
       staled.push(row.id);
     }
-    return { inserted, touched, staled };
+    // A task the owner now reports as not failing: its reminders stop counting, and stay listed as recovered.
+    const recoveredIdentities = new Set((input.recovered || []).filter((identity) => !seenTasks.has(identity)));
+    const recovered: string[] = [];
+    for (const row of existing) {
+      if (row.category !== "failure" || row.recoveredAt || !recoveredIdentities.has(identityOf(row))) continue;
+      this.db.update(taskNotifications).set({ recoveredAt: nowIso }).where(eq(taskNotifications.id, row.id)).run();
+      recovered.push(row.id);
+    }
+    return { inserted, touched, staled, recovered };
+  }
+
+  /** Open failure reminders whose task may have recovered: worth one fresh owner read. */
+  recoveryCandidates(scopeId: string, subject: string) {
+    return this.list(scopeId, "", subject)
+      .filter((item) => (!item.category || item.category === "failure") && item.state === "unread" && !item.recovered_at)
+      .map((item) => item.task_identity || taskIdentityOf(item.task_key));
   }
 
   /** Age reminders in place. Rows are never deleted. */
@@ -323,18 +396,24 @@ export class NotificationStore {
   }
 
   /**
-   * Mute this failure fingerprint. `error_code` mutes current rows that share
-   * the code. A later fingerprint still opens a new reminder.
+   * Mute a reminder. `fingerprint` mutes this failure version only. `task` and `error_code` also record a lasting
+   * rule, so later failure versions of the task, or of the owner's error code, arrive muted instead of reopening.
    */
-  mute(id: string, scopeId: string, sessionId: string, subject: string, now = new Date().toISOString(), scope: "fingerprint" | "error_code" = "fingerprint") {
+  mute(id: string, scopeId: string, sessionId: string, subject: string, now = new Date().toISOString(), scope: "fingerprint" | "task" | "error_code" = "fingerprint") {
     const row = this.owned(id, scopeId, sessionId, subject);
+    const identity = row.taskIdentity || taskIdentityOf(row.taskKey);
+    if (scope === "error_code" && !row.lastErrorCode) throw new AuthError("invalid_request", 400);
     const targets = scope === "error_code"
       ? this.db.select().from(taskNotifications).where(and(
         eq(taskNotifications.scopeId, scopeId),
         eq(taskNotifications.subject, subject),
+        eq(taskNotifications.owner, row.owner),
         eq(taskNotifications.lastErrorCode, row.lastErrorCode),
       )).all()
-      : [row];
+      : scope === "task"
+        ? this.db.select().from(taskNotifications).where(and(eq(taskNotifications.scopeId, scopeId), eq(taskNotifications.subject, subject))).all()
+          .filter((candidate) => (candidate.taskIdentity || taskIdentityOf(candidate.taskKey)) === identity)
+        : [row];
     for (const target of targets) {
       this.db.update(taskNotifications).set({
         state: "muted",
@@ -342,7 +421,44 @@ export class NotificationStore {
         reopened: false,
       }).where(eq(taskNotifications.id, target.id)).run();
     }
-    return { updated: targets.map((target) => target.id), owner_writes: 0 };
+    let rule: NotificationMuteRule | null = null;
+    if (scope !== "fingerprint") {
+      const key = scope === "task" ? identity : row.lastErrorCode;
+      const existing = this.muteRuleRows(scopeId, subject).find((candidate) => candidate.kind === scope && candidate.key === key && candidate.owner === row.owner);
+      if (existing) rule = existing;
+      else {
+        rule = { id: "mute_" + randomBytes(12).toString("hex"), scope_id: scopeId, kind: scope, owner: row.owner, key, label: clip(scope === "task" ? row.title : row.lastErrorCode, 240), created_at: now };
+        this.db.insert(notificationMuteRules).values({ id: rule.id, scopeId, subject, kind: rule.kind, owner: rule.owner, key: rule.key, label: rule.label, createdAt: now }).run();
+      }
+    }
+    return { updated: targets.map((target) => target.id), rule, owner_writes: 0 };
+  }
+
+  private muteRuleRows(scopeId: string, subject: string): NotificationMuteRule[] {
+    return this.db.select().from(notificationMuteRules)
+      .where(and(eq(notificationMuteRules.scopeId, scopeId), eq(notificationMuteRules.subject, subject)))
+      .orderBy(desc(notificationMuteRules.createdAt)).all()
+      .map((rule) => ({ id: rule.id, scope_id: rule.scopeId, kind: rule.kind as MuteRuleKind, owner: rule.owner, key: rule.key, label: rule.label, created_at: rule.createdAt }));
+  }
+
+  /** Lasting mute rules in the given scopes. Rule keys are task identities or error codes, never task bodies. */
+  muteRules(scopeIds: string[], subject: string) {
+    return scopeIds.flatMap((scopeId) => this.muteRuleRows(scopeId, subject));
+  }
+
+  /** Remove a lasting rule. Reminders it already muted stay muted; later failure versions notify again. */
+  removeMuteRule(id: string, scopeIds: string[], subject: string) {
+    const rule = this.db.select().from(notificationMuteRules).where(eq(notificationMuteRules.id, id)).get();
+    if (!rule || rule.subject !== subject || !scopeIds.includes(rule.scopeId)) throw new AuthError("notification_rule_not_found", 404);
+    this.db.delete(notificationMuteRules).where(eq(notificationMuteRules.id, id)).run();
+    return { removed: id };
+  }
+
+  /** The scope a reminder belongs to, for routes that list reminders of several projects at once. */
+  scopeOf(id: string, subject: string) {
+    const row = this.db.select().from(taskNotifications).where(eq(taskNotifications.id, id)).get();
+    if (!row || row.subject !== subject) throw new AuthError("notification_not_found", 404);
+    return row.scopeId;
   }
 
   archive(id: string, scopeId: string, sessionId: string, subject: string, now = new Date().toISOString()) {
@@ -355,7 +471,7 @@ export class NotificationStore {
     return this.requireView(id);
   }
 
-  /** Explicit reopen. The next new failure version may notify again. */
+  /** Explicit reopen: unread again, including for the badge. The next new failure version may notify again. */
   reopen(id: string, scopeId: string, sessionId: string, subject: string) {
     this.owned(id, scopeId, sessionId, subject);
     this.db.update(taskNotifications).set({
@@ -364,6 +480,7 @@ export class NotificationStore {
       acknowledgedAt: null,
       mutedAt: null,
       archivedAt: null,
+      readAt: null,
     }).where(eq(taskNotifications.id, id)).run();
     return this.requireView(id);
   }

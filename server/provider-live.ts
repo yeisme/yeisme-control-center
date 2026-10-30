@@ -88,7 +88,7 @@ export interface ProviderRunRequest {
   scope_id: string;
   project_ref: string;
   prompt: string;
-  budget_cap: { amount: number; currency: "CNY" };
+  budget_cap: { amount: number; currency: "USD" };
   idempotency_key: string;
   trace_ref?: string;
   generation_mode?: CreativeGenerationMode;
@@ -253,8 +253,13 @@ const modalityFor: Record<ProviderOwner, ProviderModality> = {
   scaena: "video",
   sonora: "audio",
 };
-const budgetCaps: Record<ProviderOwner, number> = { eikona: 15, scaena: 10, sonora: 5 };
-const totalBudgetCap = 30;
+/**
+ * Caps for live provider runs, in USD: the currency the owners cap a run in (Scaena takes micro-USD, Sonora USD), so a
+ * cap reaches the owner as is and is never converted. The amounts stay under the ¥30 canary authorized on 2026-10-14.
+ */
+const budgetCurrency = "USD";
+const budgetCaps: Record<ProviderOwner, number> = { eikona: 2, scaena: 1.4, sonora: 0.7 };
+const totalBudgetCap = 4;
 const state = (value: unknown): ProviderRunState => {
   const v = typeof value === "string" ? value.toLowerCase() : "unknown";
   if (["accepted", "received", "submitted"].includes(v)) return "accepted";
@@ -384,12 +389,14 @@ const normalizeReceipt = (value: any, fallback: ProviderRunProjection): Provider
       }).slice(0, 50)
     : [];
   const errorValue = find(value, ["error_code", "code", "error"]);
+  const currency = text(find(value, ["currency", "currency_code"]));
   return {
     state: state(find(value, ["state", "status", "native_state", "outcome"]) ?? fallback.state),
     source_ref: source || fallback.source_ref,
     output_refs: outputRefs,
-    upstream_cost: finite(find(value, ["upstream_cost", "cost", "amount", "price"])),
-    currency: text(find(value, ["currency", "currency_code"])) || "CNY",
+    // A cost reported without its currency cannot be accounted for, so it stays unknown instead of being read as yuan or dollars.
+    upstream_cost: currency ? finite(find(value, ["upstream_cost", "cost", "amount", "price"])) : null,
+    currency: currency || fallback.currency,
     error_code: typeof errorValue === "string" ? errorValue.slice(0, 120) : null,
     evidence_refs: [],
   };
@@ -628,9 +635,10 @@ class McpProviderAdapter implements ProviderAdapter {
     if (!action) return { amount: input.budget_cap.amount, currency: input.budget_cap.currency };
     try {
       const result = await this.call(action, { model_ref: input.model_ref, project_ref: input.project_ref, modality: input.modality });
-      return { amount: finite(find(result, ["amount", "cost", "price"])), currency: text(find(result, ["currency", "currency_code"])) || "CNY" };
+      const currency = text(find(result, ["currency", "currency_code"]));
+      return { amount: currency ? finite(find(result, ["amount", "cost", "price"])) : null, currency: currency || budgetCurrency };
     } catch {
-      return { amount: null, currency: "CNY" };
+      return { amount: null, currency: budgetCurrency };
     }
   }
   private args(input: ProviderRunRequest, sourceRef?: string) {
@@ -666,7 +674,7 @@ class McpProviderAdapter implements ProviderAdapter {
       const providerId = input.model_ref.includes("/") ? input.model_ref.split("/")[1] : "openai-tts";
       return {
         confirm_external_call: true,
-        max_cost_usd: Math.max(0.01, input.budget_cap.amount / 10).toFixed(2),
+        max_cost_usd: Math.max(0.01, input.budget_cap.amount).toFixed(2),
         provider_id: providerId,
         voice_model_ref: input.model_ref,
         text: input.prompt,
@@ -674,6 +682,7 @@ class McpProviderAdapter implements ProviderAdapter {
         ...creative,
       };
     }
+    // Eikona's MCP generate takes no cost cap, so only the reservation above bounds an image run; see docs/provider-live.md.
     return {
       prompt: input.prompt,
       model: input.model_ref,
@@ -687,19 +696,19 @@ class McpProviderAdapter implements ProviderAdapter {
     return normalizeReceipt(await this.call(this.manifest.submit, this.args(input)), {
       run_ref: "", owner: this.owner, modality: input.modality, model_ref: input.model_ref,
       scope_id: input.scope_id, project_ref: input.project_ref, trace_ref: input.trace_ref || "",
-      source_ref: null, state: "accepted", output_refs: [], upstream_cost: null, currency: "CNY",
+      source_ref: null, state: "accepted", output_refs: [], upstream_cost: null, currency: budgetCurrency,
       cost_state: "unknown", observed_at: new Date().toISOString(), created_at: new Date().toISOString(), evidence_refs: [], error_code: null, connection_state: "configured",
     });
   }
   async status(run: ProviderRunProjection) {
     if (!run.source_ref || !this.manifest.status) return { state: run.state, source_ref: run.source_ref, output_refs: run.output_refs, upstream_cost: run.upstream_cost, currency: run.currency, error_code: run.error_code, evidence_refs: run.evidence_refs };
-    return normalizeReceipt(await this.call(this.manifest.status, this.args({ mode: "live", owner: this.owner, modality: run.modality, model_ref: run.model_ref, scope_id: run.scope_id, project_ref: run.project_ref, prompt: "", budget_cap: { amount: 0, currency: "CNY" }, idempotency_key: run.trace_ref, trace_ref: run.trace_ref }, run.source_ref)), run);
+    return normalizeReceipt(await this.call(this.manifest.status, this.args({ mode: "live", owner: this.owner, modality: run.modality, model_ref: run.model_ref, scope_id: run.scope_id, project_ref: run.project_ref, prompt: "", budget_cap: { amount: 0, currency: budgetCurrency }, idempotency_key: run.trace_ref, trace_ref: run.trace_ref }, run.source_ref)), run);
   }
   async reconcile(run: ProviderRunProjection) {
     if (!run.source_ref) return this.status(run);
     const action = this.owner === "scaena" ? "reconcileVideoProviderTask" : this.manifest.reconcile;
     if (!action) return this.status(run);
-    return normalizeReceipt(await this.call(action, this.args({ mode: "live", owner: this.owner, modality: run.modality, model_ref: run.model_ref, scope_id: run.scope_id, project_ref: run.project_ref, prompt: "", budget_cap: { amount: 0, currency: "CNY" }, idempotency_key: run.trace_ref, trace_ref: run.trace_ref }, run.source_ref)), run);
+    return normalizeReceipt(await this.call(action, this.args({ mode: "live", owner: this.owner, modality: run.modality, model_ref: run.model_ref, scope_id: run.scope_id, project_ref: run.project_ref, prompt: "", budget_cap: { amount: 0, currency: budgetCurrency }, idempotency_key: run.trace_ref, trace_ref: run.trace_ref }, run.source_ref)), run);
   }
 }
 
@@ -718,8 +727,9 @@ export class ProviderRunManager {
     if (input.mode !== "live" || input.prompt.length < 1 || input.prompt.length > 10000)
       throw new AuthError("invalid_provider_request", 400);
     if (input.scope_id !== scope.id) throw new AuthError("scope_mismatch", 403);
-    if (input.budget_cap.currency !== "CNY" || !Number.isFinite(input.budget_cap.amount) || input.budget_cap.amount <= 0)
-      throw new AuthError("invalid_provider_budget", 400);
+    // A cap in any other currency would need an exchange rate, and none is assumed.
+    if (input.budget_cap?.currency !== budgetCurrency) throw new AuthError("provider_budget_currency_mismatch", 400);
+    if (!Number.isFinite(input.budget_cap.amount) || input.budget_cap.amount <= 0) throw new AuthError("invalid_provider_budget", 400);
     if (input.budget_cap.amount > budgetCaps[input.owner]) throw new AuthError("provider_budget_exceeded", 409);
     const reservedTotal = this.store.reservedBudget();
     if (reservedTotal + input.budget_cap.amount > totalBudgetCap) throw new AuthError("provider_total_budget_exceeded", 409);
@@ -850,7 +860,7 @@ export class ProviderRunManager {
       state: "accepted",
       output_refs: [],
       upstream_cost: null,
-      currency: "CNY",
+      currency: budgetCurrency,
       cost_state: "unknown",
       observed_at: now,
       created_at: now,
@@ -864,13 +874,15 @@ export class ProviderRunManager {
     const adapter = this.adapters.get(input.owner)!;
     try {
       const estimate = await adapter.estimate(input);
+      // An estimate in another currency cannot be compared with the cap without an exchange rate, so the run is not sent.
+      if (estimate.amount !== null && estimate.currency !== input.budget_cap.currency) throw new AuthError("provider_budget_currency_mismatch", 409);
       if (estimate.amount !== null && estimate.amount > input.budget_cap.amount) throw new AuthError("provider_budget_exceeded", 409);
       const receipt = await adapter.submit(input);
       run = this.applyReceipt({ ...run, state: receipt.source_ref ? "queued" : "unknown", cost_state: receipt.upstream_cost === null ? "unknown" : "confirmed" }, receipt);
       this.publish(run);
       if (!["succeeded", "failed", "unknown"].includes(run.state)) void this.monitor(run.run_ref);
     } catch (error) {
-      run = { ...run, state: error instanceof AuthError && error.code === "provider_budget_exceeded" ? "failed" : "unknown", error_code: error instanceof AuthError ? error.code : "provider_submit_unknown", observed_at: new Date().toISOString() };
+      run = { ...run, state: error instanceof AuthError && ["provider_budget_exceeded", "provider_budget_currency_mismatch"].includes(error.code) ? "failed" : "unknown", error_code: error instanceof AuthError ? error.code : "provider_submit_unknown", observed_at: new Date().toISOString() };
       this.publish(run);
     }
     return run;
@@ -879,7 +891,7 @@ export class ProviderRunManager {
   usageRows(scope: ScopeBinding) { return this.store.usageRows(scope.project); }
   budgetStatus() {
     const reserved = this.store.reservedBudget();
-    return { total: totalBudgetCap, reserved, remaining: Math.max(0, totalBudgetCap - reserved), per_owner: budgetCaps };
+    return { total: totalBudgetCap, reserved, remaining: Math.max(0, totalBudgetCap - reserved), per_owner: budgetCaps, currency: budgetCurrency };
   }
   async reconcile(runRef: string) {
     const run = this.store.getRun(runRef);

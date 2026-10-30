@@ -19,6 +19,11 @@ export interface ScopeBinding {
     >
   >;
   collection?: Partial<Record<"auctra", { tenant: string; project: string; actor: string; audience: string }>>;
+  /**
+   * Shared projects only: every bound tool project, several per owner allowed. `owners` keeps one entry per owner for
+   * delegated reads (actor and audience); results and tasks are filtered by these pairs.
+   */
+  projects?: { owner: string; project_ref: string; connection_ids: string[] }[];
 }
 export interface PrincipalBinding {
   issuer: string;
@@ -97,7 +102,10 @@ export interface ServerConfig {
   collection?: Partial<Record<"auctra", {
     origin: string;
     audience: string;
+    /** 0600 file holding an Auctra `service-collector` key; Auctra lets that purpose call `collection.*` only. */
     credential_ref?: string;
+    /** 0600 file holding a `service-consumer` key for `creative.flow.read`, which Auctra refuses to collector keys. */
+    flow_credential_ref?: string;
     enabled?: boolean;
   }>>;
   clients?: Partial<Record<"muweave", {

@@ -8,6 +8,7 @@ import {
 } from "node:crypto";
 import { AuthError, boundedJSON, secret } from "./auth";
 import type { ServerConfig, ScopeBinding, TaskConnection } from "./contracts";
+import { ConnectionCatalog } from "./connection-catalog";
 import type {
   TaskSnapshot,
   TaskEvent,
@@ -226,8 +227,33 @@ function rawResultRef(value: unknown, index: number): string | undefined {
   return typeof ref === "string" && ref.length <= 512 ? ref : undefined;
 }
 
+/** Who a task is to the control center: scope, connection, owner ref and family. The key order is fixed. */
+export interface TaskIdentityParts {
+  scope: string;
+  c: string;
+  ref: string;
+  family: string;
+}
+
+/**
+ * The unsigned half of a task key. It is the same in every server process, while the signature depends on the
+ * signing key, so reminders and other durable records key on this instead of the whole task key.
+ */
+export function taskIdentity(parts: TaskIdentityParts): string {
+  return Buffer.from(JSON.stringify({ scope: parts.scope, c: parts.c, ref: parts.ref, family: parts.family })).toString("base64url");
+}
+
+/** The identity half of a task key, for keys that arrive as plain strings. */
+export function taskIdentityOf(taskKey: string): string {
+  return taskKey.split(".")[0] || "";
+}
+
+/** A task key: the identity plus its signature. */
+export function signTaskIdentity(identity: string, key: Buffer): string {
+  return identity + "." + createHmac("sha256", key).update(identity).digest("base64url");
+}
+
 export class TaskConnections {
-  private key = randomBytes(32);
   private initialized = new Map<string, string>();
   private queues = new Map<string, Promise<unknown>>();
   private denied = new Set<string>();
@@ -239,11 +265,34 @@ export class TaskConnections {
   constructor(
     private config: ServerConfig,
     private fetcher: typeof fetch = fetch,
+    /** Signs task keys. Persisted with the database, so keys stay valid across restarts. */
+    private key: Buffer = randomBytes(32),
+    /** Configured connections plus tool projects registered from the control center. */
+    readonly catalog: ConnectionCatalog = new ConnectionCatalog(config),
   ) {}
   connections(scope: ScopeBinding) {
-    return (this.config.connections || []).filter(
-      (c) => c.enabled && scope.connection_ids?.includes(c.id),
-    );
+    return this.catalog.forScope(scope);
+  }
+  /** Drops everything remembered about a connection id, after it was registered, removed or only probed. */
+  forget(id: string) {
+    for (const map of [this.initialized, this.queues, this.pending, this.observations, this.observing, this.channels]) map.delete(id);
+    this.denied.delete(id);
+    this.contentDenied.delete(id);
+  }
+  /**
+   * One read through a connection that is not stored anywhere: the owner's capabilities and one active task. Used
+   * before registering a tool project; a refusal concerns only this throwaway connection, never its template.
+   */
+  async probe(c: TaskConnection) {
+    try {
+      const caps = await this.call(c, "control_center.capabilities", {});
+      if (caps?.schema_version !== "yeisme.task_observation.v1") throw new AuthError("needs_contract", 422);
+      const page = await this.call(c, "control_center.tasks.list", { mode: "active", limit: 1 });
+      if (!Array.isArray(page?.rows)) throw new AuthError("invalid_task_page", 503);
+      return { task_families: Array.isArray(caps.task_families) ? caps.task_families.filter((v: unknown): v is string => typeof v === "string").slice(0, 32) : [] };
+    } finally {
+      this.forget(c.id);
+    }
   }
   async observe(scope: ScopeBinding): Promise<TaskConnectionState[]> {
     return Promise.all(this.connections(scope).map(async c => ({
@@ -544,11 +593,12 @@ export class TaskConnections {
       if (this.queues.get(c.id) === work) this.queues.delete(c.id);
     }
   }
-  private token(body: unknown) {
-    const raw = Buffer.from(JSON.stringify(body)).toString("base64url");
-    return (
-      raw + "." + createHmac("sha256", this.key).update(raw).digest("base64url")
-    );
+  private token(body: TaskIdentityParts) {
+    return signTaskIdentity(taskIdentity(body), this.key);
+  }
+  /** Signed opaque value for anything else the browser hands back, such as page cursors. */
+  private sign(body: unknown) {
+    return signTaskIdentity(Buffer.from(JSON.stringify(body)).toString("base64url"), this.key);
   }
   private decode(raw: string) {
     if (raw.length > 4096) throw new AuthError("invalid_task_key", 400);
@@ -670,7 +720,7 @@ export class TaskConnections {
               rows: data.rows.map((r: any) => this.project(r, c, scope)),
               cursor:
                 typeof data.next_cursor === "string" && data.next_cursor
-                  ? this.token({
+                  ? this.sign({
                       c: c.id,
                       scope: scope.id,
                       mode,
