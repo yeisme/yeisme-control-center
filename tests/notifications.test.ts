@@ -19,6 +19,8 @@ const scope = "scope-a";
 const fact = (over: Partial<FailureFact> = {}): FailureFact => ({
   scope_id: scope,
   task_key: "task-1",
+  // The unsigned half of the key: a different signature (another server process) keeps the same identity.
+  task_identity: (over.task_key ?? "task-1").split(".")[0],
   state: "failed",
   revision: "rev-1",
   native_state: "failed",
@@ -211,9 +213,10 @@ describe("notification http boundary", () => {
     const snapshot = { task_key: "task-1", state: "failed", revision: "1", native_state: "failed", title: "失败镜头", locator: { owner: "eikona", project: "rain" }, provider_recovery: { error_code: "upstream_timeout" } };
     const synced = await call(scopedApp, "/notifications/sync?scope=scope-a", "POST", { tasks: [snapshot], present_task_keys: ["task-1"], complete: true }, first);
     expect(synced.status).toBe(200);
-    const body = await synced.json() as { unread: number; owner_writes: number };
+    const body = await synced.json() as { unread: number; owner_writes: number; verification_complete: boolean };
     expect(body.unread).toBe(0);
     expect(body.owner_writes).toBe(0);
+    expect(body.verification_complete).toBe(false);
     const other = await call(scopedApp, "/notifications?scope=scope-a", "GET", undefined, second);
     expect(other.status).toBe(200);
     expect((await other.json() as { rows: unknown[] }).rows).toEqual([]);

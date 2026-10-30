@@ -73,6 +73,26 @@ describe("action HTTP contract", () => {
   const session: Session = { id: "action-session", issuer: "https://id.example", subject: "one", name: "One", csrf: "csrf", accessToken: "token", accessAudience: [], expires: Date.now() + 60_000, epoch: 1 };
   const req = (path: string, method = "GET", body?: unknown) => new Request(config.origin + "/api/control-center/v1" + path, { method, headers: { Cookie: "yeisme_session=" + session.id, Origin: config.origin, "X-CSRF-Token": session.csrf }, body: body ? JSON.stringify(body) : undefined });
 
+  it("keeps delivery and Aigora admin actions at needs_contract with their own reasons, and writes nothing", async () => {
+    const admin: ServerConfig = { ...config, principals: [{ ...config.principals[0], role: "admin" }] };
+    const auth = new SessionAuth(admin);
+    auth.sessions.set(session.id, session);
+    const app = createApp(admin, { auth });
+    const gaps = [
+      { owner: "control-center", action: "delivery.prepare", target_kind: "delivery", input: { asset_refs: ["asset-1"] }, reason: "owner_delivery_contract_not_configured" },
+      { owner: "control-center", action: "delivery.send", target_kind: "delivery", input: { delivery_ref: "delivery-1", destination_ref: "destination-1" }, reason: "owner_delivery_contract_not_configured" },
+      { owner: "aigora", action: "owner.config.update", target_kind: "owner_config", input: { revision: "r1", changes: {} }, reason: "owner_config_contract_not_configured" },
+      { owner: "aigora", action: "owner.membership.update", target_kind: "membership", input: { member_ref: "member-1", changes: {}, revision: "r1" }, reason: "owner_membership_contract_not_configured" },
+    ];
+    for (const [index, gap] of gaps.entries()) {
+      const key = `contract_gap_${String(index).padStart(4, "0")}_action`;
+      const preview = await (await app(req("/actions/preview?scope=scope-1", "POST", { scope_id: "scope-1", owner: gap.owner, target_kind: gap.target_kind, target_ref: `${gap.target_kind}-1`, action: gap.action, expected_revision: "rev-1", idempotency_key: key, input: gap.input }))).json();
+      expect([preview.availability, preview.blockers], gap.action).toEqual(["needs_contract", [gap.reason]]);
+      const receipt = await (await app(req("/actions/confirm?scope=scope-1", "POST", { scope_id: "scope-1", preview_ref: preview.preview_ref, preview_digest: preview.preview_digest, idempotency_key: key }))).json();
+      expect([receipt.state, receipt.error_code, receipt.owner_state, receipt.result_refs], gap.action).toEqual(["needs_contract", gap.reason, null, []]);
+    }
+  });
+
   it("exposes descriptors and keeps owner review actions at needs_contract", async () => {
     const auth = new SessionAuth(config);
     auth.sessions.set(session.id, session);

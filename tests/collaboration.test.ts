@@ -123,8 +123,14 @@ describe("member delegation", () => {
     const request = (path: string) => new Request(config.origin + "/api/control-center/v1" + path, { headers: { Cookie: "yeisme_session=admin" } });
     const cover = await (await app(request(`/projects/${project}/items?folder=${folder}&limit=3&local=1`))).json();
     expect(ownerReads).toBe(0);
-    expect(cover).toMatchObject({ total: 1, coverage: "partial", next_cursor: null, next_source_cursor: null, sources: [] });
+    expect(cover).toMatchObject({ total: 1, coverage: "complete", next_cursor: null, next_source_cursor: null, sources: [] });
     expect(cover.rows).toHaveLength(1);
+    const extra = Array.from({ length: 3 }, (_, index) => ({ ...task, locator: { ...task.locator, task_ref: `run-cover-${index}` }, results: [{ ref: `artifact-cover-${index}`, name: `cover-${index}.png`, mime: "image/png", state: "candidate" }] })) as unknown as import("../src/task-observation").TaskSnapshot[];
+    service.syncItems(admin, project, extra);
+    service.execute(admin, "item.move", project, String(service.project(admin, project).revision), { folder_id: folder, item_ids: service.items(admin, project, {}).rows.map((row) => row.id) });
+    const truncated = await (await app(request(`/projects/${project}/items?folder=${folder}&limit=3&local=1`))).json();
+    expect(truncated.rows).toHaveLength(3);
+    expect(truncated).toMatchObject({ total: 3, coverage: "partial", next_cursor: null });
     expect((await app(request(`/projects/${project}/items?folder=${folder}&local=1&cursor=item_x`))).status).toBe(400);
   });
 });

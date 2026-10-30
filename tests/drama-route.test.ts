@@ -37,7 +37,7 @@ describe("GET /drama/episodes", () => {
   it("rejects unknown scopes and malformed queries", async () => {
     const { get } = setup();
     expect((await get("/drama/episodes?scope=nope")).status).toBe(404);
-    for (const query of ["limit=0", "limit=25", "limit=abc", "read=some", "order=sideways", "q=" + "x".repeat(201), Array.from({ length: 13 }, (_, index) => "episode_ref=t" + index).join("&")]) {
+    for (const query of ["limit=0", "limit=25", "limit=abc", "read=some", "order=sideways", "q=" + "x".repeat(201), Array.from({ length: 25 }, (_, index) => "episode_ref=t" + index).join("&")]) {
       const response = await get(`/drama/episodes?scope=scope-a&${query}`);
       expect(response.status, query).toBe(400);
       expect((await response.json()).error).toBe("invalid_query");

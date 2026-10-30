@@ -81,3 +81,38 @@ describe("personal configuration CLI", () => {
     expect(readFileSync(file, "utf8")).toBe(invalid);
   });
 });
+describe("personal configuration CLI: Auctra collection", () => {
+  it("registers the Auctra origin, project and both keys for the personal scope, without a network call", () => {
+    const file = join(dir, "auctra.json");
+    expect(run("init", file, "http://127.0.0.1:4312", "test-admin").status).toBe(0);
+    const collector = join(dir, "collector.key"), reader = join(dir, "reader.key");
+    writeFileSync(collector, "auctra-ak-collector\n", { mode: 0o600 });
+    writeFileSync(reader, "auctra-ak-reader\n", { mode: 0o600 });
+    const added = run("auctra", file, "https://auctra.example.test", "project:rain", collector, reader);
+    expect(added.status).toBe(0);
+    expect(JSON.parse(added.stdout)).toMatchObject({ project: "project:rain", collector_key_configured: true, reader_key_configured: true, network_called: false });
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    expect(config.collection.auctra).toEqual({ origin: "https://auctra.example.test", audience: "auctra", credential_ref: collector, flow_credential_ref: reader, enabled: true });
+    expect(config.principals[0].scopes[0].collection.auctra).toEqual({ tenant: "project:rain", project: "project:rain", actor: "personal", audience: "auctra" });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    const status = run("status", file);
+    expect(JSON.parse(status.stdout).auctra).toEqual({ origin_configured: true, enabled: true, project: "project:rain", collector_key_configured: true, reader_key_configured: true });
+    for (const leaked of ["auctra-ak-collector", "auctra-ak-reader", "https://auctra.example.test", collector]) expect(status.stdout).not.toContain(leaked);
+  });
+  it("refuses unsafe input and an accidental replacement without rewriting configuration", () => {
+    const file = join(dir, "auctra-reject.json");
+    expect(run("init", file, "http://127.0.0.1:4312", "test-admin").status).toBe(0);
+    const key = join(dir, "only.key"), loose = join(dir, "loose.key");
+    writeFileSync(key, "k\n", { mode: 0o600 });
+    writeFileSync(loose, "k\n", { mode: 0o644 });
+    const before = readFileSync(file, "utf8");
+    for (const args of [["http://auctra.example.test", "project:a", key], ["https://auctra.example.test", "rain", key], ["https://auctra.example.test", "project:a", loose], ["https://auctra.example.test", "project:a", join(dir, "missing.key")], ["https://auctra.example.test", "project:a"]]) {
+      expect(run("auctra", file, ...args).status).not.toBe(0);
+    }
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(run("auctra", file, "https://auctra.example.test", "project:a", key).status).toBe(0);
+    expect(run("auctra", file, "https://auctra.example.test", "project:b", key).status).not.toBe(0);
+    expect(run("auctra", file, "https://auctra.example.test", "project:b", key, "--replace").status).toBe(0);
+    expect(JSON.parse(readFileSync(file, "utf8")).collection.auctra.flow_credential_ref).toBeUndefined();
+  });
+});

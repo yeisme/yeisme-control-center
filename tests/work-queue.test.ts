@@ -126,6 +126,23 @@ describe("work queue projection", () => {
     expect(response.items.filter((item) => item.source_ref === "task:one")).toHaveLength(1);
   });
 
+  it("meets reminders on the task identity, and leaves handled failure versions off the queue", () => {
+    const reminder = (over: Record<string, unknown>) => ({
+      id: "n", scope_id: scope.id, session_id: "", subject: session.subject, task_key: "task:one.sig-old", task_revision: "rev:one",
+      failure_fingerprint: "fp", state: "unread", priority: "normal", presence: "live", task_state: "failed", native_state: "failed",
+      title: "旧签名提醒", owner: "eikona", project: "project:one", first_seen_at: "2026-10-20T00:00:00.000Z", last_seen_at: "2026-10-20T00:01:00.000Z",
+      acknowledged_at: null, muted_at: null, archived_at: null, snoozed_until: null, last_error_code: "", reopened: false, ...over,
+    }) as never;
+    // After a restart the live task carries a newly signed key; the reminder still names the same task.
+    const live = buildWorkQueue({ scope, session, tasks: [task({ task_key: "task:one.sig-new" })], connections: [], notifications: [reminder({}), reminder({ id: "n2" })] });
+    expect(live.items.filter((item) => item.kind === "task_failure")).toHaveLength(1);
+    const archived = buildWorkQueue({ scope, session, tasks: [task({ task_key: "task:one.sig-new" })], connections: [], notifications: [reminder({ state: "archived" })] });
+    expect(archived.items.filter((item) => item.kind === "task_failure")).toHaveLength(0);
+    // A newer failure version of the same task is not hidden by the archived older one.
+    const newer = buildWorkQueue({ scope, session, tasks: [task({ task_key: "task:one.sig-new", revision: "rev:two" })], connections: [], notifications: [reminder({ state: "archived" })] });
+    expect(newer.items.filter((item) => item.kind === "task_failure")).toHaveLength(1);
+  });
+
   it("sorts by risk before freshness and binds paging to filtered items", () => {
     const items = [
       { work_ref: "low", kind: "handoff_ready", owner: "auctra", project: "p", scope_id: "s", title: "low", state: "handoff_ready", native_state: "handoff_ready", priority: "normal", attention_reason: "", observed_at: "2026-10-20T00:10:00Z", freshness: "fresh", coverage: "complete", revision: "", source_ref: "low", safe_links: [], allowed_actions: [], preview_state: "needs_contract" },

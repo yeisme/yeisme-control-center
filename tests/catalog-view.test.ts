@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { catalogMetrics, changesByDay, entryRef, filterActions, filterChannels, filterModels, findEntry, latestHighlights, parseCatalogTab, parseOwnerFilter, parseRiskFilter, precheckTarget } from "../src/pages/capabilities/catalog-view";
+import { catalogMetrics, changesByDay, entryRef, filterActions, filterChannels, filterModels, findEntry, latestHighlights, parseCatalogTab, parseOwnerFilter, parseRiskFilter, guideTarget } from "../src/pages/capabilities/catalog-view";
 import type { CatalogAction, CatalogModel, ToolCatalog } from "../src/shared/tool-catalog";
 
 const schema = { digest: null, fields: [], field_count: 0, truncated: false };
@@ -74,12 +74,10 @@ describe("catalog view", () => {
     expect(changesByDay(catalog.changes).map((group) => group.day)).toEqual(["2026-10-20", "2026-10-19"]);
   });
 
-  it("only offers AI creation pre-check for current generation entries", () => {
-    expect(precheckTarget({ kind: "model", value: catalog.models[1] })).toBe("/creation?owner=eikona&mode=text_to_image&model=new");
-    expect(precheckTarget({ kind: "model", value: catalog.models[0] })).toBeNull();
-    expect(precheckTarget({ kind: "model", value: catalog.models[3] })).toBe("/creation?owner=scaena&mode=keyframe_video&model=wan");
-    expect(precheckTarget({ kind: "action", value: catalog.actions[0] })).toBe("/creation?owner=eikona&mode=text_to_image");
-    expect(precheckTarget({ kind: "action", value: catalog.actions[2] })).toBeNull();
-    expect(precheckTarget({ kind: "server", value: catalog.servers[0] })).toBeNull();
+  it("links catalog entries to the guide card of an owner the guide covers", () => {
+    expect(guideTarget({ kind: "model", value: catalog.models[1] })).toBe("/guide?tool=eikona");
+    expect(guideTarget({ kind: "model", value: catalog.models[3] })).toBe("/guide?tool=scaena");
+    expect(guideTarget({ kind: "action", value: catalog.actions[0] })).toBe("/guide?tool=eikona");
+    expect(guideTarget({ kind: "server", value: catalog.servers[1] })).toBeNull();
   });
 });

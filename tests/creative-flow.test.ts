@@ -93,6 +93,28 @@ describe("creative flow projection", () => {
     expect(launch?.url).not.toContain("Authorization");
   });
 
+  it("never builds a launch URL for an origin that is plain HTTP off this machine, carries credentials, or has a query", () => {
+    const flow = buildCreativeFlow({
+      scope: "scope-a",
+      project_ref: "project-a",
+      episode_ref: "episode-1",
+      auctra_records: [record("storyboard_plan", "storyboard-1", "waiting_review")],
+      auctra_coverage: "complete",
+      scaena: { owner: "scaena", project_ref: "project-a", observed_at: "2026-10-20T00:01:00.000Z", coverage: "needs_contract", freshness: "unknown", items: [], blocker: "storyboard_binding_missing" },
+    });
+    const scope = { id: "scope-a", tenant: "tenant-a", team: "team-a", project: "project-a", label: "Project A", owners: {} } as ScopeBinding;
+    const session = { id: "session-a", issuer: "test", subject: "owner", name: "Owner", csrf: "csrf", accessToken: "", accessAudience: [], expires: Date.now() + 60_000, epoch: 1 } as Session;
+    const launchFor = (origin: string) => buildWorkQueue({ scope, session, tasks: [], connections: [], notifications: [], creativeFlow: flow, clientOrigins: { muweave: origin } })
+      .items.find((value) => value.workflow_stage === "creative_storyboard")?.safe_links.find((value) => value.target === "muweave")?.launch;
+    for (const origin of ["http://muweave.example.test", "https://user:secret@muweave.example.test", "https://muweave.example.test/?next=https://elsewhere.test", "javascript:alert(1)", "not a url"]) {
+      const launch = launchFor(origin);
+      // The hand-off stays (as a disabled "待合同" row), but nothing can be opened.
+      expect(launch, origin).toBeDefined();
+      expect(launch?.url, origin).toBeUndefined();
+    }
+    expect(launchFor("http://127.0.0.1:4399")?.url).toMatch(/^http:\/\/127\.0\.0\.1:4399\/\?/);
+  });
+
   it("does not merge multiple episodes without an explicit episode ref", () => {
     const flow = buildCreativeFlow({
       scope: "scope-a",

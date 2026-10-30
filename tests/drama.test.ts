@@ -37,15 +37,45 @@ describe("drama episode universe", () => {
   it("reports an unbound scope as needs_contract instead of denied, and still serves requested refs", async () => {
     const { service } = setup();
     const { body } = await service.episodes(unboundScope, makeSession(), { extra: ["ep-9"], read: "all" });
-    expect(body.universe).toMatchObject({ bound: false, coverage: "needs_contract", reason: "source_not_configured", total: 0 });
+    expect(body.universe).toMatchObject({ bound: false, coverage: "needs_contract", reason: "collection_binding_missing", total: 0, can_sync: false });
     expect(body.rows).toEqual([expect.objectContaining({ episode_ref: "ep-9", origin: "requested" })]);
   });
 
+  it("names what is missing: the server's Auctra target, the scope's binding, or a usable credential", async () => {
+    const store = new AuctraCollectionStore(createMemoryDB());
+    const deps = { auctra: { creativeFlow: vi.fn() } as unknown as AuctraCollectionReader, scaena: { snapshot: vi.fn() } as unknown as ScaenaStoryboardReader, store };
+    const noTarget = new DramaService({ ...deps, config: { ...config, collection: undefined, owners: {} } });
+    const { body: serverGap } = await noTarget.episodes(scope, makeSession(), {});
+    expect(serverGap.universe).toMatchObject({ bound: false, reason: "collection_target_missing", can_sync: false });
+    expect(serverGap.sources).toEqual([{ owner: "auctra", state: "target_missing" }, { owner: "scaena", state: "target_missing" }]);
+    const disabled = new DramaService({ ...deps, config: { ...config, collection: { auctra: { ...config.collection!.auctra!, enabled: false } } } });
+    expect((await disabled.episodes(scope, makeSession(), {})).body.universe.reason).toBe("collection_target_missing");
+    // Bound but nobody can authenticate: syncing would only fail, so say why instead of "not synced yet".
+    const noKey = new DramaService({ ...deps, config });
+    const { body: keyGap } = await noKey.episodes(scope, makeSession(), {});
+    expect(keyGap.universe).toMatchObject({ bound: true, coverage: "unknown", reason: "delegation_unavailable", can_sync: false });
+    expect(keyGap.sources).toEqual([{ owner: "auctra", state: "no_credential" }, { owner: "scaena", state: "no_credential" }]);
+  });
+
   it("says so when the collection was never synced rather than claiming zero episodes", async () => {
-    const { service } = setup();
+    const store = new AuctraCollectionStore(createMemoryDB());
+    const keyed = { ...config, collection: { auctra: { ...config.collection!.auctra!, credential_ref: "/unused/collector.key" } } };
+    const service = new DramaService({ config: keyed, auctra: { creativeFlow: vi.fn() } as unknown as AuctraCollectionReader, scaena: { snapshot: vi.fn() } as unknown as ScaenaStoryboardReader, store });
     const { body } = await service.episodes(scope, makeSession(), {});
-    expect(body.universe).toMatchObject({ bound: true, coverage: "unknown", reason: "collection_not_synced", total: 0 });
+    expect(body.universe).toMatchObject({ bound: true, coverage: "unknown", reason: "collection_not_synced", total: 0, can_sync: true });
     expect(body.rows).toEqual([]);
+  });
+
+  it("calls a row whose owners are simply not connected unconnected, and lets a real failure outrank that", async () => {
+    const store = new AuctraCollectionStore(createMemoryDB());
+    const notConnected = (episode: string) => auctraFlow(episode, [], { coverage: "needs_contract", stages: [], blocker: "source_not_configured" });
+    const scaenaMissing = (episode: string) => scaenaSnapshot(episode, { coverage: "needs_contract", items: [], source: undefined, blocker: "scaena_storyboard_binding_missing" });
+    const scaenaDown = (episode: string) => scaenaSnapshot(episode, { coverage: "unavailable", items: [], source: undefined, blocker: "owner_unavailable" });
+    const make = (scaena: (episode: string) => ReturnType<typeof scaenaSnapshot>) => new DramaService({ config, store, auctra: { creativeFlow: vi.fn(async (_s: string, _scope: unknown, _session: unknown, query: { episode_ref?: string } = {}) => notConnected(query.episode_ref || "")) } as unknown as AuctraCollectionReader, scaena: { snapshot: vi.fn(async (_scope: unknown, _session: unknown, query: { episode_ref?: string } = {}) => scaena(query.episode_ref || "")) } as unknown as ScaenaStoryboardReader });
+    const { body: quiet } = await make(scaenaMissing).episodes(unboundScope, makeSession(), { extra: ["episode:01"], read: "all" });
+    expect(quiet.rows[0]).toMatchObject({ read: "failed", read_reason: "sources_not_connected" });
+    const { body: loud } = await make(scaenaDown).episodes(unboundScope, makeSession("session-b"), { extra: ["episode:01"], read: "all" });
+    expect(loud.rows[0]).toMatchObject({ read: "failed", read_reason: "owner_unavailable" });
   });
 
   it("defers rows beyond the read budget and reads them all on request", async () => {

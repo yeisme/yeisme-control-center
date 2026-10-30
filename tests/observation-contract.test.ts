@@ -40,4 +40,17 @@ describe("observation cache", () => {
     await expect(second).resolves.toMatchObject({ data: "ok" });
     expect(cache.peek<string>("scope-a")?.data).toBe("ok");
   });
+
+  it("reads again when the shared in-flight read was cancelled by the reader that started it", async () => {
+    const cache = new ObservationCacheStore();
+    let reject!: (error: unknown) => void;
+    const first = cache.read("scope-a", () => new Promise<string>((_done, fail) => { reject = fail; }), 10, 1000);
+    const second = cache.read("scope-a", async () => "fresh", 10, 1000);
+    reject(new DOMException("aborted", "AbortError"));
+    await expect(first).rejects.toThrow("aborted");
+    await expect(second).resolves.toMatchObject({ data: "fresh" });
+    const failed = cache.read("scope-b", () => Promise.reject(new Error("owner_unavailable")), 10, 1000);
+    await expect(cache.read("scope-b", async () => "unused", 10, 1000)).rejects.toThrow("owner_unavailable");
+    await expect(failed).rejects.toThrow("owner_unavailable");
+  });
 });

@@ -122,5 +122,9 @@ describe("route aliases", () => {
     expect(pageFromPath("/requests")).toBe("requests");
     expect(pageFromPath("/settings")).toBe("team");
     expect(pageFromPath("/nonexistent")).toBe("home");
+    expect(pageFromPath("/guide")).toBe("guide");
+    expect(pageFromPath("/mcp")).toBe("guide");
+    // The batch-generation route stays addressable for project notifications without a sidebar entry.
+    expect(pageFromPath("/creation")).toBe("creation");
   });
 });
