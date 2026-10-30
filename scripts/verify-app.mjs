@@ -50,7 +50,8 @@ async function check(name, fn) {
 // loading screen, so wait for the rendered shell before asserting or measuring on it.
 async function waitForShell() {
   try {
-    await page.waitForFunction(() => /Yeisme|进入团队工作空间/.test(document.body?.innerText || ""), undefined, { timeout: 20_000 });
+    // The boot splash in index.html also says "Yeisme"; the shell only counts once React has dismissed it.
+    await page.waitForFunction(() => !document.getElementById("boot-splash") && /Yeisme|进入团队工作空间/.test(document.body?.innerText || ""), undefined, { timeout: 20_000 });
   } catch {
     const body = (await page.locator("body").innerText({ timeout: 2000 }).catch(() => "")).trim().slice(0, 160);
     throw new Error(`shell_not_rendered: body=${JSON.stringify(body)} page_errors=${errors.length}`);

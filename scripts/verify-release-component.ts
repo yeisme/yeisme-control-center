@@ -20,6 +20,9 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("invali
 const origin = `http://127.0.0.1:${port}`;
 configSource.origin = origin;
 configSource.port = port;
+// Never open the live database: the candidate gets a fresh one beside the isolated config. Migrating real data is
+// rehearsed separately on a copy, and happens for real only when the release is activated.
+delete configSource.database;
 await writeFile(config, JSON.stringify(configSource, null, 2), { mode: 0o600 });
 // Never grade a foreign server: if anything already answers here, the candidate cannot bind and the checks would hit it instead.
 const busy = await fetch(origin + "/api/control-center/v1/health", { signal: AbortSignal.timeout(500) }).then(() => true, () => false);
@@ -32,7 +35,7 @@ const request = async (path: string) => {
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       const response = await fetch(origin + path, { headers: { Origin: origin } });
-      return { status: response.status, body: await response.text() };
+      return { status: response.status, type: response.headers.get("content-type") || "", body: await response.text() };
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -47,8 +50,14 @@ try {
   if (health.status !== 200 || methods.status !== 200) throw new Error("candidate_http_contract_failed");
   const parsed = JSON.parse(methods.body);
   if (parsed.key_required !== true || parsed.username_required !== true || parsed.oidc !== false) throw new Error("candidate_key_auth_contract_failed");
+  // The guide is public: it must open with no session cookie, and be the guide rather than the sign-in shell.
+  const guide = await request("/guide.html");
+  if (guide.status !== 200 || !guide.body.includes("使用指南")) throw new Error("candidate_public_guide_failed");
+  // Its recorded samples ship with it, as media rather than the HTML fallback.
+  const sample = await request("/guide/showcase/eikona-gpt-1.webp");
+  if (sample.status !== 200 || sample.type !== "image/webp") throw new Error("candidate_guide_samples_failed");
   status = "passed";
-  await writeFile(join(run, "stdout.log"), "candidate health and username+key auth contract passed\n");
+  await writeFile(join(run, "stdout.log"), "candidate health, username+key auth contract, public guide and its samples passed\n");
   await writeFile(join(run, "stderr.log"), "");
 } catch (error) {
   await writeFile(join(run, "stdout.log"), "");

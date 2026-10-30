@@ -149,6 +149,32 @@ try {
     }
   });
 
+  await check("the task signing key survives restarts and duplicated reminders are repaired once on start", async () => {
+    // Simulates the first start of this release on a database written by older releases: one failure seen
+    // under two signatures, handled under the first and reopened as unread under the second.
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(dbPath);
+    const key = (db.prepare("select value from control_state where name = 'task_signing_key'").get() as { value: string } | null)?.value;
+    assert.ok(key, "signing key persisted on first start");
+    db.run("delete from control_state where name = 'notifications_rekey_v1'");
+    const identity = Buffer.from(JSON.stringify({ scope: "boot-scope", c: "boot-c", ref: "run-1", family: "run" })).toString("base64url");
+    for (const [id, signature, state] of [["n-old", "sig-a", "acknowledged"], ["n-new", "sig-b", "unread"]]) {
+      db.run(`insert into task_notifications (id, scope_id, session_id, subject, task_key, failure_fingerprint, state, first_seen_at, last_seen_at) values ('${id}', 'boot-scope', '', 'boot|user', '${identity}.${signature}', '${["boot-scope", identity + "." + signature, "failed", "r1", "failed", ""].join("\u001f")}', '${state}', '2026-10-27T08:00:00Z', '2026-10-27T10:27:31Z')`);
+    }
+    db.close();
+    const restarted = await startServer();
+    try {
+      const after = new Database(dbPath, { readonly: true });
+      const states = after.prepare("select state from task_notifications where scope_id = 'boot-scope' order by id").all() as { state: string }[];
+      assert.deepEqual(states.map((row) => row.state), ["acknowledged", "acknowledged"]);
+      assert.equal((after.prepare("select value from control_state where name = 'task_signing_key'").get() as { value: string }).value, key);
+      assert.ok(after.prepare("select value from control_state where name = 'notifications_rekey_v1'").get());
+      after.close();
+    } finally {
+      await stopServer(restarted.child);
+    }
+  });
+
   await check("sessions survive a restart from the sqlite file", async () => {
     const third = await startServer();
     try {

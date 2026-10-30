@@ -9,14 +9,22 @@ const value = (name: string, fallback: string) => {
   return index >= 0 ? process.argv[index + 1] || fallback : fallback;
 };
 if (!dryRun && !args.has("--confirm-live")) throw Error("Refusing live calls. Re-run with --confirm-live and explicit budget flags.");
-const total = Number(value("--total-cny", "0"));
-const caps = { eikona: Number(value("--image-cny", "0")), scaena: Number(value("--video-cny", "0")), sonora: Number(value("--audio-cny", "0")) };
-if (!Number.isFinite(total) || total <= 0 || Object.values(caps).some((v) => !Number.isFinite(v) || v <= 0) || Object.values(caps).reduce((a, b) => a + b, 0) > total)
-  throw Error("Invalid budget. Example: --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5");
+// Owners cap a live run in USD, so budgets are given in USD and handed over unconverted; CNY flags are refused, not converted.
+if (process.argv.some((arg) => arg.endsWith("-cny"))) throw Error("Budgets are in USD, the currency owners cap runs in. Use --total-usd and --image-usd/--video-usd/--audio-usd.");
+const modalities = { eikona: "image", scaena: "video", sonora: "audio" } as const;
+const only = new Set(value("--modality", "image,video,audio").split(","));
+const selected = (["eikona", "scaena", "sonora"] as const).filter((owner) => only.has(modalities[owner]));
+// The original keys are those of the 2026-10-14 canary: re-running without a label only reconciles those runs.
+const label = value("--run-label", "20261014");
+const total = Number(value("--total-usd", "0"));
+const caps = { eikona: Number(value("--image-usd", "0")), scaena: Number(value("--video-usd", "0")), sonora: Number(value("--audio-usd", "0")) };
+if (!selected.length || !/^[a-z0-9-]{4,40}$/.test(label) || !Number.isFinite(total) || total <= 0 || selected.some((owner) => !Number.isFinite(caps[owner]) || caps[owner] <= 0) || selected.reduce((sum, owner) => sum + caps[owner], 0) > total)
+  throw Error("Invalid budget. Example: --modality audio --run-label 20261030 --total-usd 0.5 --audio-usd 0.5");
+const command = `bun run test:provider-live -- --confirm-live --modality ${selected.map((owner) => modalities[owner]).join(",")} --run-label ${label} --total-usd ${total} ${selected.map((owner) => `--${modalities[owner]}-usd ${caps[owner]}`).join(" ")}`;
 const origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312";
 const loginFile = process.env.YEISME_CONTROL_LOGIN_FILE || join(homedir(), ".config/yeisme-control-center/test-login.json");
 if (dryRun) {
-  console.log(JSON.stringify({ status: "passed", dry_run: true, provider_calls: false, mutations: false, total_budget_cny: total, per_owner_cny: caps }));
+  console.log(JSON.stringify({ status: "passed", dry_run: true, provider_calls: false, mutations: false, budget_currency: "USD", total_budget: total, per_owner: Object.fromEntries(selected.map((owner) => [owner, caps[owner]])), run_label: label }));
   process.exit(0);
 }
 const login = JSON.parse(await readFile(loginFile, "utf8"));
@@ -46,13 +54,12 @@ if (!scope) throw Error("no_authorized_scope");
 const capabilitiesResponse = await request(`/capabilities?scope=${encodeURIComponent(scope.id)}`);
 const capabilities = capabilitiesResponse.ok ? await capabilitiesResponse.json() as { capabilities: Array<{ owner: "eikona" | "scaena" | "sonora"; modality: "image" | "video" | "audio"; model_ref: string; supports_live_submit: boolean }> } : { capabilities: [] };
 const prompts = { eikona: "Yeisme live canary: abstract rain-lit street lamp, no text", scaena: "Yeisme live canary: a one second slow move through a rain-lit empty street", sonora: "Yeisme live canary audio" };
-const modalities = { eikona: "image", scaena: "video", sonora: "audio" } as const;
 const results: unknown[] = [];
-for (const owner of ["eikona", "scaena", "sonora"] as const) {
+for (const owner of selected) {
   const capability = capabilities.capabilities.find((item) => item.owner === owner && item.supports_live_submit);
   if (!capability) { results.push({ owner, state: "needs_contract" }); continue; }
-  const key = `live-canary-20261014-${owner}`;
-  const response = await request(`/provider-runs?scope=${encodeURIComponent(scope.id)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify({ mode: "live", owner, modality: modalities[owner], model_ref: capability.model_ref, scope_id: scope.id, project_ref: scope.project, prompt: prompts[owner], budget_cap: { amount: caps[owner], currency: "CNY" }, idempotency_key: key, trace_ref: key }) });
+  const key = `live-canary-${label}-${owner}`;
+  const response = await request(`/provider-runs?scope=${encodeURIComponent(scope.id)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify({ mode: "live", owner, modality: modalities[owner], model_ref: capability.model_ref, scope_id: scope.id, project_ref: scope.project, prompt: prompts[owner], budget_cap: { amount: caps[owner], currency: "USD" }, idempotency_key: key, trace_ref: key }) });
   const run = await response.json();
   results.push(redact(run));
   if (!response.ok || !run.run_ref) continue;
@@ -66,9 +73,9 @@ for (const owner of ["eikona", "scaena", "sonora"] as const) {
     Object.assign(run, await reconciled.json());
   }
 }
-await writeFile(join(evidence, "command.txt"), "bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5\n");
-await writeFile(join(evidence, "env.json"), JSON.stringify({ origin, scope: scope.id, total_budget_cny: total, per_owner_cny: caps, real_provider_calls: true, credentials_redacted: true }, null, 2) + "\n");
+await writeFile(join(evidence, "command.txt"), command + "\n");
+await writeFile(join(evidence, "env.json"), JSON.stringify({ origin, scope: scope.id, budget_currency: "USD", total_budget: total, per_owner: Object.fromEntries(selected.map((owner) => [owner, caps[owner]])), run_label: label, real_provider_calls: true, credentials_redacted: true }, null, 2) + "\n");
 await writeFile(join(evidence, "stdout.log"), JSON.stringify(results, null, 2) + "\n");
 await writeFile(join(evidence, "stderr.log"), "");
-await writeFile(join(evidence, "summary.json"), JSON.stringify({ schema_version: "yeisme.integration_test_evidence.v1", project: "client/yeisme-control-center", run_id: evidence.split("/").at(-1), layer: "system", command: "bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5", status: "passed", exit_code: 0, started_at: new Date(started).toISOString(), finished_at: new Date().toISOString(), duration_ms: Date.now() - started, evidence: { stdout: evidence + "/stdout.log", stderr: evidence + "/stderr.log", command: evidence + "/command.txt", env: evidence + "/env.json", artifacts: evidence + "/artifacts" }, redaction: { enabled: true, policy: "provider-live-v1" } }, null, 2) + "\n");
+await writeFile(join(evidence, "summary.json"), JSON.stringify({ schema_version: "yeisme.integration_test_evidence.v1", project: "client/yeisme-control-center", run_id: evidence.split("/").at(-1), layer: "system", command, status: "passed", exit_code: 0, started_at: new Date(started).toISOString(), finished_at: new Date().toISOString(), duration_ms: Date.now() - started, evidence: { stdout: evidence + "/stdout.log", stderr: evidence + "/stderr.log", command: evidence + "/command.txt", env: evidence + "/env.json", artifacts: evidence + "/artifacts" }, redaction: { enabled: true, policy: "provider-live-v1" } }, null, 2) + "\n");
 console.log(JSON.stringify({ status: "passed", evidence }));

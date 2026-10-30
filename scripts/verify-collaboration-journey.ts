@@ -17,6 +17,7 @@ fixture.stdout.on("data", (chunk) => { ready += chunk; });
 fixture.stderr.on("data", () => {});
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 let fullMediaRequests = 0;
+let projectID = "", seededBatches: string[] = [];
 try {
   const deadline = Date.now() + 45000;
   while (!ready.includes('"status": "ready"')) { if (Date.now() > deadline || fixture.exitCode !== null) throw Error("fixture startup failed"); await new Promise((done) => setTimeout(done, 250)); }
@@ -39,7 +40,7 @@ try {
     await page.getByRole("dialog").getByLabel(/^名称/).fill("协作验收组织"); await save();
     await page.getByRole("button", { name: "创建项目", exact: true }).click();
     await page.getByRole("dialog").getByLabel(/^名称/).fill("共享影像项目");
-    await page.getByRole("dialog").getByRole("checkbox", { name: "eikona rain-reunion", exact: true }).check();
+    await page.getByRole("dialog").getByRole("checkbox", { name: "Eikona rain-reunion（Fixture · 雨夜重逢）", exact: true }).check();
     await save(); await page.getByRole("heading", { name: "共享影像项目", exact: true }).waitFor();
     await page.getByRole("button", { name: /^查看成果 / }).first().waitFor();
   });
@@ -55,9 +56,21 @@ try {
     await page.getByRole("button", { name: /^查看成果 / }).first().click();
     await page.getByRole("dialog").waitFor(); await page.waitForTimeout(500);
     if (fullMediaRequests !== before) throw Error("selection requested original media");
-    await page.getByRole("dialog").getByRole("button", { name: "预览 / 播放", exact: true }).click();
-    await page.locator('[data-inline-media-preview="image"] img').waitFor();
-    await page.getByRole("button", { name: "放大图片", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "预览", exact: true }).click();
+    const viewer = page.locator("[data-media-viewer]");
+    await viewer.locator(".viewer-stage img").waitFor();
+    await viewer.getByRole("button", { name: "放大", exact: true }).click();
+    // A failed read of the next item keeps the viewer on the current one and announces why inside the dialog.
+    const title = viewer.getByRole("heading").first(); const shown = await title.textContent();
+    await page.route("**/projects/*/items/*/task", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "owner_unavailable", message: "owner unavailable" } }) }), { times: 1 });
+    await viewer.getByRole("button", { name: "下一项", exact: true }).click();
+    await expect(viewer.getByRole("status").filter({ hasText: "没能打开这一项" })).toBeVisible();
+    await expect(title).toHaveText(shown!);
+    await viewer.getByRole("button", { name: "下一项", exact: true }).click();
+    await expect(title).not.toHaveText(shown!); await expect(viewer.getByText("没能打开这一项")).toHaveCount(0);
+    // The viewer stacks over the detail sheet: Escape closes the viewer first, then the sheet.
+    await page.keyboard.press("Escape"); await viewer.waitFor({ state: "detached" });
+    await expect(page.getByRole("dialog")).toHaveCount(1);
     await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0);
   });
   await check("rename uses stable project id and URL filtering restores", async () => {
@@ -71,7 +84,8 @@ try {
     await page.getByRole("button", { name: "重置", exact: true }).click();
   });
   await check("clipboard rejection offers selectable text and notifications separate read from acknowledge", async () => {
-    await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw Error("denied"); } } }); });
+    // Refuse both the Clipboard API and the legacy execCommand fallback, so the manual copy box is the only way out.
+    await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw Error("denied"); } } }); Object.defineProperty(document, "execCommand", { configurable: true, value: () => false }); });
     await page.getByRole("button", { name: "项目操作：共享影像项目 · 更新" }).click(); await page.getByRole("menuitem", { name: "复制项目引用", exact: true }).click();
     const fallback = page.getByLabel("手动复制项目引用"); await expect(fallback).toHaveValue(/^yeisme-project:project_/); await fallback.focus();
     const selected = await fallback.evaluate((el) => { const input = el as HTMLInputElement; return input.selectionStart === 0 && input.selectionEnd === input.value.length; }); if (!selected) throw Error("manual copy text is not selected");
@@ -94,6 +108,94 @@ try {
       return page.rows.filter((v: { category: string; read_at?: string; state: string }) => v.category === "project_assignment" && v.read_at).map((v: { state: string }) => v.state);
     });
     if (!state.length || state.some((v: string) => v !== "unread")) throw Error("reading acknowledged a collaboration event");
+  });
+  await check("batch list pages on the server, keeps filters in the address and drops a lapsed page", async () => {
+    projectID = new URLSearchParams(new URL(page.url()).hash.split("?")[1]).get("sharedProject")!;
+    // Saved through the same preview/confirm actions the batch form uses; the fake Eikona plans and runs them for free.
+    seededBatches = await page.evaluate(async (project) => {
+      const session = await fetch("/api/control-center/v1/session").then((r) => r.json());
+      const post = async (path: string, body: unknown) => {
+        const response = await fetch(`/api/control-center/v1${path}?scope=${encodeURIComponent(project)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify(body) });
+        if (!response.ok) throw Error(`${path} ${response.status} ${(await response.text()).slice(0, 200)}`);
+        return response.json();
+      };
+      const run = async (action: string, input: Record<string, unknown>) => {
+        const shared = await fetch(`/api/control-center/v1/projects/${project}`).then((r) => r.json());
+        const key = crypto.randomUUID();
+        const preview = await post("/actions/preview", { scope_id: project, owner: "control-center", target_kind: "project", target_ref: project, action, expected_revision: String(shared.revision), idempotency_key: key, input });
+        const receipt = await post("/actions/confirm", { scope_id: project, preview_ref: preview.preview_ref, preview_digest: preview.preview_digest, idempotency_key: key });
+        if (receipt.state !== "succeeded") throw Error(`${action} ${receipt.state} ${receipt.error_code}`);
+        return receipt;
+      };
+      await run("project.update", { generation_enabled: true, budget_cap: 5, currency: "USD" });
+      const ids: string[] = [];
+      for (let n = 1; n <= 22; n += 1) {
+        const label = String(n).padStart(2, "0");
+        const prepared = await run("generation.input.prepare", { owner: "eikona", rows: [{ id: "row", prompt: `雨夜站台，第 ${label} 版`, model_ref: "fixture/image", size: "1024x1024", aspect: "1:1", candidate_count: 1, folder_id: null, references: [] }] });
+        const items = prepared.generation_items.map(({ prompt_capture: _capture, ...item }: Record<string, unknown>) => item);
+        ids.push((await run("generation.batch.create", { name: `雨夜站台 · 第 ${label} 批`, items, idempotency_key: crypto.randomUUID() })).result_refs[0]);
+      }
+      // The oldest batch is submitted, so the only live batch sits on the second page.
+      await run("generation.batch.submit", { batch_id: ids[0] });
+      return ids;
+    }, projectID);
+    const batches = page.locator("[data-batch]");
+    await page.goto(`${ui}/#/creation?sharedProject=${projectID}`);
+    await expect(page.getByText("共 22 个", { exact: true })).toBeVisible({ timeout: 20000 });
+    await expect(batches).toHaveCount(20);
+    await expect(batches.first()).toContainText("第 22 批");
+    await page.getByRole("button", { name: "更早的批次", exact: true }).click();
+    await expect(batches).toHaveCount(2);
+    await expect(batches.last()).toContainText("第 01 批");
+    if (!page.url().includes("batchFiltercursor=")) throw Error("the page cursor is not in the address");
+    await page.getByRole("button", { name: "回到最新", exact: true }).click();
+    await expect(batches).toHaveCount(20);
+    // A filter lives in the address, survives a reload and drops the page cursor.
+    await page.getByRole("button", { name: "更早的批次", exact: true }).click(); await expect(batches).toHaveCount(2);
+    await page.getByLabel("搜索批次名称", { exact: true }).fill("第 07 批");
+    await expect(batches).toHaveCount(1);
+    if (page.url().includes("batchFiltercursor=")) throw Error("changing a filter kept the page cursor");
+    await page.reload();
+    await expect(page.getByLabel("搜索批次名称", { exact: true })).toHaveValue("第 07 批");
+    await expect(batches).toHaveCount(1);
+    await page.getByRole("button", { name: "重置", exact: true }).click();
+    await expect(batches).toHaveCount(20);
+    // A sharing change moves every session to a new epoch: the old page cursor is refused and the list returns to the newest page.
+    await page.getByRole("button", { name: "更早的批次", exact: true }).click(); await expect(batches).toHaveCount(2);
+    await page.evaluate(async (project) => {
+      const session = await fetch("/api/control-center/v1/session").then((r) => r.json());
+      const shared = await fetch(`/api/control-center/v1/projects/${project}`).then((r) => r.json());
+      const post = (path: string, body: unknown) => fetch(`/api/control-center/v1${path}?scope=${encodeURIComponent(project)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify(body) }).then((r) => r.json());
+      const key = crypto.randomUUID();
+      const preview = await post("/actions/preview", { scope_id: project, owner: "control-center", target_kind: "project", target_ref: project, action: "project.update", expected_revision: String(shared.revision), idempotency_key: key, input: { budget_cap: 6 } });
+      await post("/actions/confirm", { scope_id: project, preview_ref: preview.preview_ref, preview_digest: preview.preview_digest, idempotency_key: key });
+    }, projectID);
+    await page.reload();
+    await expect(page.getByText("翻页位置已失效，已回到最新的批次。")).toBeVisible();
+    await expect(batches).toHaveCount(20);
+    if (page.url().includes("batchFiltercursor=")) throw Error("a lapsed page cursor stayed in the address");
+  });
+  await check("a batch link switches scope and opens a batch that is not on the first page; its reminder links back", async () => {
+    // A new tab starts in the default scope, as a link opened from chat or mail would.
+    const linked = await context.newPage();
+    try {
+      await linked.goto(`${ui}/#/creation?${new URLSearchParams({ sharedProject: projectID, batch: seededBatches[0] })}`);
+      const opened = linked.getByLabel("打开的批次").locator("[data-batch]");
+      await expect(opened).toContainText("第 01 批", { timeout: 30000 });
+      // Opening it read the owner, which reports the submitted batch finished.
+      await expect(opened).toContainText("已完成");
+      await expect(linked.locator("[data-batch]")).toHaveCount(21);
+      await linked.getByRole("button", { name: "收起", exact: true }).click();
+      await expect(linked.getByLabel("打开的批次")).toHaveCount(0);
+      if (new URL(linked.url()).hash.includes("batch=")) throw Error("closing the batch kept it in the address");
+    } finally { await linked.close(); }
+    await page.getByRole("button", { name: /^需要关注/ }).click();
+    const reminder = page.getByRole("button", { name: /批次「雨夜站台 · 第 01 批」已完成/ });
+    if (!await reminder.count()) await page.getByRole("button", { name: "加载更多", exact: true }).click();
+    await reminder.first().click();
+    await expect(page.getByLabel("打开的批次").locator("[data-batch]")).toContainText("第 01 批");
+    await page.goto(`${ui}/#/projects?shared=1&sharedProject=${projectID}`);
+    await page.getByRole("heading", { name: "共享影像项目 · 更新", exact: true }).waitFor();
   });
   await check("responsive directory sheets and light/dark themes have no horizontal overflow", async () => {
     for (const width of [390, 768, 1440, 1920]) {

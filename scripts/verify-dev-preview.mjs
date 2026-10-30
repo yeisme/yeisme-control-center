@@ -45,9 +45,9 @@ try {
   await page.goto(base + "/#/tasks", { waitUntil: "networkidle" });
   const malformedTaskQuery = requests.some((request) => /\/tasks\?mode=(active|history)\?/.test(request.url));
   results.push({ name: "task_query_scope_contract", status: malformedTaskQuery ? "failed" : "passed" });
-  await page.goto(base + "/#/creation", { waitUntil: "networkidle" });
+  await page.goto(base + "/#/guide", { waitUntil: "networkidle" });
   const mutationSurface = requests.filter((request) => /voice\.audition|createVideoProviderTask|\/provider-runs/.test(request.url));
-  results.push({ name: "creation_submit_remains_closed", status: mutationSurface.length === 0 ? "passed" : "failed", requests: mutationSurface });
+  results.push({ name: "guide_has_no_generation_surface", status: mutationSurface.length === 0 ? "passed" : "failed", requests: mutationSurface });
   await page.screenshot({ path: path.join(run, "artifacts", "real-preview-services.png"), fullPage: true });
   await page.close();
 } catch (error) {

@@ -15,7 +15,7 @@ import { clientOrigin } from "../src/task-links";
 import type { ServerConfig, TaskConnection, ProviderOwner } from "../server/contracts";
 const [command, file, ...args] = process.argv.slice(2);
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|provider|studio|cancel|content|disable|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|studio|cancel|content|disable|status <config-file> [arguments]";
 if (
   !file ||
   ![
@@ -24,6 +24,7 @@ if (
     "password",
     "user",
     "connect",
+    "auctra",
     "provider",
     "studio",
     "cancel",
@@ -223,16 +224,41 @@ if (command === "init") {
       .find((s) => s.id === "personal");
     if (!scope) throw Error("Personal scope missing.");
     scope.connection_ids = [...(scope.connection_ids || []), id];
-    scope.owners[c.owner] = {
-      tenant: project,
-      project,
-      actor: "personal",
-      audience: owner,
-    };
+    // The scope pins one default project per owner (delegated reads). Connecting another project of the same owner
+    // used to replace that pin silently; it now stays unless --default is given. Every connected project can be bound
+    // to shared projects either way.
+    const pinned = scope.owners[c.owner]?.project;
+    if (!pinned || flags.includes("--default"))
+      scope.owners[c.owner] = {
+        tenant: project,
+        project,
+        actor: "personal",
+        audience: owner,
+      };
     save(config);
     console.log(
       "Registered endpoint and credential reference; no network call or permission change.",
     );
+    if (pinned && pinned !== project && !flags.includes("--default"))
+      console.log(`Kept ${c.owner} default project ${pinned}; pass --default to make ${project} the default.`);
+  } else if (command === "auctra") {
+    // Auctra refuses collection.* to every key but a service-collector one, and refuses everything else to that key, so the
+    // stage read (creative.flow.read) needs a second, service-consumer key. One file is accepted for a single-token deployment.
+    const [origin, project, collectorRef, readerRef, ...flags] = args.filter((arg) => arg !== "--replace");
+    const replace = args.includes("--replace");
+    if (!origin || !project || !collectorRef || flags.length)
+      throw Error("auctra requires <https-origin|loopback-origin> <project:id> <collector-key-file> [reader-key-file] [--replace]");
+    const auctraOrigin = clientOrigin(origin);
+    if (!/^project:[^\s\\/\x00-\x1f]{1,256}$/.test(project)) throw Error("Auctra project must be the exact project ref, such as project:my-drama.");
+    const keyFiles = [collectorRef, ...(readerRef ? [readerRef] : [])].map((ref) => resolve(ref));
+    for (const keyFile of keyFiles) if (!existsSync(keyFile) || (statSync(keyFile).mode & 0o077)) throw Error("Auctra key files must exist and be 0600.");
+    if (config.collection?.auctra && !replace) throw Error("Auctra collection already configured; pass --replace to change it.");
+    const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
+    if (!scope) throw Error("Personal scope missing.");
+    config.collection = { ...config.collection, auctra: { origin: auctraOrigin, audience: "auctra", credential_ref: keyFiles[0], ...(keyFiles[1] ? { flow_credential_ref: keyFiles[1] } : {}), enabled: true } };
+    scope.collection = { ...scope.collection, auctra: { tenant: project, project, actor: "personal", audience: "auctra" } };
+    save(config);
+    console.log(JSON.stringify({ origin: auctraOrigin, project, scope: scope.id, collector_key_configured: true, reader_key_configured: !!keyFiles[1], network_called: false, next: "restart the control center, then sync from Services" }, null, 2));
   } else if (command === "provider") {
     const [owner, endpoint, project, credential_ref, model_ref, submit, status, ...rest] = args;
     if (!owner || !["eikona", "scaena", "sonora"].includes(owner) || !endpoint || !project || !credential_ref || !model_ref || !submit || args.length < 7)
@@ -331,6 +357,14 @@ if (command === "init") {
             credential_configured: !!p.credential_ref && existsSync(p.credential_ref),
             action_manifest: p.action_manifest,
           }])),
+          // Like connections, the address stays out of status output; only whether each piece is in place.
+          auctra: config.collection?.auctra ? {
+            origin_configured: !!config.collection.auctra.origin,
+            enabled: config.collection.auctra.enabled !== false,
+            project: config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal")?.collection?.auctra?.project || null,
+            collector_key_configured: !!config.collection.auctra.credential_ref && existsSync(config.collection.auctra.credential_ref),
+            reader_key_configured: !!config.collection.auctra.flow_credential_ref && existsSync(config.collection.auctra.flow_credential_ref),
+          } : null,
         },
         null,
         2,

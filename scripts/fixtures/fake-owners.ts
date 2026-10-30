@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { buildRequests, buildWorld, png, taskRow, type RequestRow, type Scenario, type TaskSpec } from "./world";
 import { eikonaChannels, eikonaModels, eikonaRuntimeCapabilities, providerTools, scaenaGuide, sonoraDiscovery } from "./provider-catalog";
 import { buildDramaWorld, type DramaReply } from "./drama-world";
@@ -33,6 +33,53 @@ export function startFakeOwners(options: FakeOwnerOptions) {
   const origin = `http://127.0.0.1:${options.port}`;
   /** Fixture-only owner catalog drift switch, toggled by GET /__fixture/catalog-revision?value=N. */
   let catalogRevision = 0;
+  // Eikona's fixed-input batch contract. Inputs and plans are previews; a submit starts one operation per idempotency key,
+  // which its members read reports as running once and as succeeded after that. Nothing reaches a Provider.
+  const batchInputs = new Map<string, { digest: string; candidates: number; project: string }>();
+  const batchOperations = new Map<string, { ref: string; input: string; reads: number }>();
+  const sha = (value: string) => "sha256:" + createHash("sha256").update(value).digest("hex");
+  function eikonaBatches(url: URL, path: string, request: Request, bodyText: string) {
+    let body: Record<string, unknown>;
+    try { body = request.method === "POST" ? JSON.parse(bodyText || "{}") : Object.fromEntries(url.searchParams); } catch { return json({ error: { code: "invalid_request" } }, 400); }
+    const project = typeof body.project_ref === "string" ? body.project_ref : "";
+    const key = request.headers.get("idempotency-key") || "";
+    if (!project) return json({ error: { code: "invalid_request" } }, 400);
+    if (path === "/api/v1/owner/batch-inputs" && request.method === "POST") {
+      const items = Array.isArray(body.items) ? body.items as { candidate_count?: number }[] : [];
+      if (items.length !== 1 || !key) return json({ error: { code: "invalid_request" } }, 400);
+      const ref = "eikona-input:" + sha(project + key).slice(7, 23);
+      const input = { digest: sha(ref), candidates: Number(items[0].candidate_count) || 1, project };
+      batchInputs.set(ref, input);
+      return json({ schema_version: "eikona.browser_batch_input.v1", request_batch_ref: ref, request_batch_digest: input.digest, request_count: 1, candidate_count: input.candidates, project_ref: project });
+    }
+    if (path === "/api/v1/owner/batches:reconcile" && request.method === "POST") {
+      const operation = batchOperations.get(key);
+      if (!operation) return json({ error: { code: "not_found" } }, 404);
+      const input = batchInputs.get(operation.input)!;
+      return json({ schema_version: "eikona.batch_operation_preview.v1", operation_ref: operation.ref, request_batch_ref: operation.input, request_batch_digest: input.digest, plan_digest: sha("plan" + operation.input), status: operation.reads > 1 ? "succeeded" : "running", project_ref: project });
+    }
+    if (path === "/api/v1/owner/batch-members" && request.method === "GET") {
+      const operation = [...batchOperations.values()].find((candidate) => candidate.ref === body.operation_ref);
+      const input = operation && batchInputs.get(operation.input);
+      if (!operation || !input || input.project !== project) return json({ error: { code: "not_found" } }, 404);
+      operation.reads += 1;
+      const status = operation.reads > 1 ? "succeeded" : "running";
+      return json({ schema_version: "eikona.batch_member_page.v1", operation_ref: operation.ref, request_batch_ref: operation.input, request_batch_digest: input.digest, plan_digest: sha("plan" + operation.input), status, items: status === "succeeded" ? [{ request_id: "row", run_ref: "run_" + operation.ref.slice(-12) }] : [], project_ref: project });
+    }
+    const ref = String(body.request_batch_ref || "");
+    const input = batchInputs.get(ref);
+    if (!input || input.digest !== body.request_batch_digest || input.project !== project) return json({ error: { code: "not_found" } }, 404);
+    const plan = sha("plan" + ref);
+    if (path === "/api/v1/owner/batch-input" && request.method === "GET") return json({ schema_version: "eikona.batch_input_preview.v1", request_batch_ref: ref, request_batch_digest: input.digest, request_count: 1, candidate_count: input.candidates, execution_authorized: false, project_ref: project });
+    if (path === "/api/v1/owner/batch-input/plan" && request.method === "GET") return json({ schema_version: "eikona.batch_plan_preview.v1", request_batch_ref: ref, request_batch_digest: input.digest, plan_digest: plan, execution_authorized: false, status: "ready", blockers: [], cost_estimate_known: true, estimated_usd_upper: 0.04 * input.candidates, project_ref: project });
+    if (path === "/api/v1/owner/batches:submit" && request.method === "POST") {
+      if (body.plan_digest !== plan || body.confirm !== true || !key) return json({ error: { code: "invalid_request" } }, 400);
+      const operation = batchOperations.get(key) || { ref: "eikona-batch:" + sha(key).slice(7, 23), input: ref, reads: 0 };
+      batchOperations.set(key, operation);
+      return json({ schema_version: "eikona.batch_operation_preview.v1", operation_ref: operation.ref, request_batch_ref: ref, request_batch_digest: input.digest, plan_digest: plan, status: "queued", project_ref: project });
+    }
+    return new Response(null, { status: 404 });
+  }
 
   const lookup = (connection: string, ref: string) => world.tasks[connection]?.find((task) => task.ref === ref);
 
@@ -55,13 +102,19 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     return { id, result };
   }
 
-  async function taskMcp(connection: string, body: any) {
+  async function taskMcp(endpoint: string, body: any) {
     if (body?.method === "initialize") return json({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18" } });
     const action = body?.params?.arguments?.action;
     const raw = body?.params?.arguments?.args || {};
     const owner = String(body?.params?.name || "").split(".")[0];
     // Scaena receives {path, query}; others receive flat args.
     const args = owner === "scaena" ? { ...(raw.query || {}), ...(raw.path || {}), idempotency_key: raw.idempotency_key } : raw;
+    // A connection added from the control center reuses its template's endpoint and names another project; answer
+    // for the projects the template credential covers and refuse the rest, as owners do.
+    const covered = world.projects[endpoint];
+    const requested = typeof args.project_id === "string" ? args.project_id : "";
+    if (covered && requested && !covered[requested]) return json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: { error: { code: "AUTH_ACTION_DENIED" } } } });
+    const connection = covered && requested ? covered[requested] : endpoint;
     const reply = (data: unknown) => json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: owner === "sonora" ? { result: { data: { projection: data } } } : owner === "scaena" ? { data } : { result: { data } } } });
     if (options.scenario === "degraded" && owner === "scaena") return new Response("unavailable", { status: 503 });
     if (action === "control_center.capabilities") {
@@ -335,6 +388,7 @@ export function startFakeOwners(options: FakeOwnerOptions) {
         return json({ tenant: url.searchParams.get("tenant_id"), members: [{ id: "sonora-lin", name: "林舟", type: "human", role: "voice_director", team: "rain-studio", binding: "verified" }, { id: "sonora-bot", name: "tts-worker", type: "service", role: "renderer", team: "", binding: "unlinked" }] });
       }
       if (path.startsWith("/api/v1/control-center/requests")) return requestApi(owner, url, path.replace("/api/v1/control-center", ""), request.method, request.method === "POST" ? await request.text() : "");
+      if (owner === "eikona" && path.startsWith("/api/v1/owner/")) return eikonaBatches(url, path, request, request.method === "POST" ? await request.text() : "");
       return new Response(null, { status: 404 });
     },
   });

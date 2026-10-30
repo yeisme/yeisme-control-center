@@ -31,7 +31,7 @@ def counts(db, names):
 try:
     with tempfile.TemporaryDirectory(prefix='control-scaena-preflight-') as directory:
         private = pathlib.Path(directory)
-        source = sqlite3.connect('file:/home/yeshugen/.config/yeisme-lan/data/scaena-production.db?mode=ro', uri=True)
+        source = sqlite3.connect('file:' + os.path.expanduser('~/.config/yeisme-lan/data/scaena-production.db') + '?mode=ro', uri=True)
         source.execute('PRAGMA query_only=ON')
         backup = sqlite3.connect(private / 'database.sqlite')
         source.backup(backup)

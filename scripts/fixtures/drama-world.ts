@@ -86,7 +86,8 @@ function stageOf(project: string, episode: string, key: StageKey, spec: StageSpe
 function creativeFlow(scenario: Scenario, args: Record<string, unknown>): DramaReply {
   const episode = text(args.episode_ref);
   if (!episode) return failure(400, "INVALID_ARGUMENT", "episode_ref is required");
-  const project = text(args.project_ref) || defaultProject;
+  // Real Auctra serves one project and resolves it from its root; this fake serves several, so the work_ref picks one.
+  const project = text(args.project_ref) || text(args.work_ref) || defaultProject;
   const spec = scenario === "empty" ? undefined : flows[project]?.[episode];
   const now = Date.now();
   const stages = spec ? stageOrder.map((key) => stageOf(project, episode, key, spec[key], now)) : [stageOf(project, episode, "screenplay", undefined, now)];

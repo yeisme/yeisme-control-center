@@ -38,10 +38,13 @@ const release = join(state, "releases", releaseId);
 mkdirSync(join(release, "dist"), { recursive: true, mode: 0o700 });
 // Deploy only application bytes, not source archives, internal docs or test evidence.
 cpSync(join(root, "dist/assets"), join(release, "dist/assets"), { recursive: true });
-for (const entry of ["index.html"]) {
+for (const entry of ["index.html", "guide.html"]) {
   cpSync(join(root, "dist", entry), join(release, "dist", entry));
 }
+if (existsSync(join(root, "dist/guide"))) cpSync(join(root, "dist/guide"), join(release, "dist/guide"), { recursive: true });
 run(bun, ["build", "server/index.ts", "--target=bun", "--outfile=" + join(release, "server.mjs")]);
+// The bundled server migrates its database from ./migrations beside server.mjs on every start.
+cpSync(join(root, "server/db/migrations"), join(release, "migrations"), { recursive: true });
 const dataHome = join(state, "caddy-data");
 const cacheHome = join(state, "caddy-config");
 for (const p of [dataHome, cacheHome]) mkdirSync(p, { recursive: true, mode: 0o700 });

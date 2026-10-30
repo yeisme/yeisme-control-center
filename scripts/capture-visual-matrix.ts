@@ -11,7 +11,7 @@ const label = (process.env.VISUAL_LABEL || "snapshot").replace(/[^a-z0-9-]/gi, "
 const ports = { ui: Number(process.env.VM_UI_PORT || 4630), api: Number(process.env.VM_API_PORT || 4631), owner: Number(process.env.VM_OWNER_PORT || 4632) };
 const password = "vm-fixture-" + Math.random().toString(36).slice(2, 10);
 const run = path.join(root, `temp/integration-test-runs/visual-matrix-${label}-` + new Date().toISOString().replace(/[:.]/g, "-"));
-const routes = ["", "projects", "drama", "creation", "assets", "tasks", "reminders", "requests", "review", "services", "capabilities", "usage", "team"];
+const routes = ["", "projects", "drama", "guide", "assets", "tasks", "reminders", "requests", "review", "services", "capabilities", "usage", "team"];
 await fs.mkdir(path.join(run, "artifacts"), { recursive: true });
 await fs.writeFile(path.join(run, "command.txt"), `VISUAL_LABEL=${label} bun scripts/capture-visual-matrix.ts\n`);
 await fs.writeFile(path.join(run, "env.json"), JSON.stringify({ ports, scenario: "rich", real_owner_calls: false, provider_calls: false, credentials_logged: false }, null, 2) + "\n");

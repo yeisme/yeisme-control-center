@@ -143,14 +143,21 @@ function colorFor(index: number): [[number, number, number], [number, number, nu
 
 export interface World {
   tasks: Record<string, TaskSpec[]>;
+  /**
+   * Projects a connection's credential covers, mapped to the task list that answers for each. A connection added
+   * from the control center reuses its template's endpoint and names another project; anything else is refused.
+   * Connections not listed answer for their own project only, as before.
+   */
+  projects: Record<string, Record<string, string>>;
   events: (spec: TaskSpec) => { id: string; occurred_at: string; stage: string; state: string }[];
   media: Map<string, { mime: string; bytes: Buffer }>;
 }
 
 export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World {
   const media = new Map<string, { mime: string; bytes: Buffer }>();
-  const tasks: Record<string, TaskSpec[]> = { "fx-eikona": [], "fx-sonora": [], "fx-sonora-locked": [], "fx-scaena": [], "fx-eikona-denied": [], "fx-eikona-coast": [], "fx-sonora-coast": [] };
-  if (scenario === "empty") return { tasks, events: () => [], media };
+  const tasks: Record<string, TaskSpec[]> = { "fx-eikona": [], "fx-sonora": [], "fx-sonora-locked": [], "fx-scaena": [], "fx-eikona-denied": [], "fx-eikona-coast": [], "fx-sonora-coast": [], "fx-eikona-teaser": [], "fx-eikona-bts": [] };
+  const projects = { "fx-eikona": { "rain-reunion": "fx-eikona", "rain-bts": "fx-eikona-bts" } };
+  if (scenario === "empty") return { tasks, events: () => [], media, projects };
 
   const image = (key: string, name: string, index: number, width = 320, height = 200): ResultSpec => {
     const [from, to] = colorFor(index);
@@ -210,6 +217,8 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
     { owner: "eikona", connection: "fx-eikona-coast", project: "coast-letters", family: "run", ref: "run-c-12", title: "海岸来信 · 封面候选", state: "succeeded", stage: "completed", createdMinutes: 400, updatedMinutes: 390, results: [image("coast-cover", "海岸来信 封面.png", 3)] },
     { owner: "eikona", connection: "fx-eikona-coast", project: "coast-letters", family: "run", ref: "run-c-13", title: "灯塔 · 夜景", state: "running", stage: "generating", createdMinutes: 12, updatedMinutes: 2, progress: { kind: "percent", percent: 28 } },
   );
+  // Not connected at start: appears once an administrator connects "rain-bts" with the fx-eikona credential.
+  tasks["fx-eikona-bts"].push({ owner: "eikona", connection: "fx-eikona", project: "rain-bts", family: "run", ref: "run-b-01", title: "片场花絮 · 剧照", state: "succeeded", stage: "completed", createdMinutes: 240, updatedMinutes: 230, results: [image("bts-still", "片场花絮 剧照.png", 5)] });
   tasks["fx-sonora-coast"].push({ owner: "sonora", connection: "fx-sonora-coast", project: "coast-letters", family: "voice-render-job", ref: "sonora://voice-render-job/coast-1", title: "海岸来信 · 旁白", state: "succeeded", stage: "completed", createdMinutes: 500, updatedMinutes: 480, results: [audio("coast-narration", "海岸来信 旁白.wav", 2, 196)] });
 
   const events = (spec: TaskSpec) => {
@@ -226,7 +235,7 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
       prompt_capture: stage === "validating" ? { state: "captured", source: "task", capture_ref: `capture-${spec.ref}`, task_ref: spec.ref, version: "prompt-v1", digest: "a".repeat(64), length: 128, locale: "zh-CN", summary: "脱敏业务提示词摘要", readable: true, observed_at: minutes(spec.updatedMinutes) } : undefined,
     })).reverse();
   };
-  return { tasks, events, media };
+  return { tasks, events, media, projects };
 }
 
 // --- Request projections ---

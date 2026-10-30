@@ -51,7 +51,7 @@ if (Bun.which("ffmpeg")) {
 }
 
 const scopes = [
-  { id: "fixture-a", tenant: "rain-studio", project: "rain-reunion", label: "Fixture · 雨夜重逢", connections: ["fx-eikona", "fx-sonora", "fx-sonora-locked", "fx-scaena", "fx-eikona-denied"] },
+  { id: "fixture-a", tenant: "rain-studio", project: "rain-reunion", label: "Fixture · 雨夜重逢", connections: ["fx-eikona", "fx-sonora", "fx-sonora-locked", "fx-scaena", "fx-eikona-denied", "fx-eikona-teaser"] },
   { id: "fixture-b", tenant: "rain-studio", project: "coast-letters", label: "Fixture · 海岸来信", connections: ["fx-eikona-coast", "fx-sonora-coast"] },
 ];
 const owners = startFakeOwners({ port: ownerPort, requestPorts: { eikona: ownerPort + 1, sonora: ownerPort + 2 }, scenario, latencyMs, videoBytes, scopes });
@@ -99,6 +99,8 @@ const config: ServerConfig = {
     connection("fx-scaena", "scaena", "rain-reunion", "Scaena · 片场委托", { studio_origin: "http://127.0.0.1:16920" }),
     connection("fx-eikona-denied", "eikona", "rain-reunion-legacy", "Eikona · 旧项目（未授权）"),
     connection("fx-eikona-coast", "eikona", "coast-letters", "Eikona · 海岸来信"),
+    // A second readable Eikona project in fixture-a that is not the scope's default project.
+    connection("fx-eikona-teaser", "eikona", "rain-teaser", "Eikona · 预告片"),
     connection("fx-sonora-coast", "sonora", "coast-letters", "Sonora · 海岸来信"),
   ],
   providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
@@ -141,7 +143,7 @@ const api = createHttpServer(async (req, res) => {
     let bytes = 0;
     for await (const chunk of req) {
       bytes += chunk.length;
-      const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 262144 : 16384;
+      const limit = url.pathname.includes("/actions/preview") ? 524288 : url.pathname.includes("/notifications/") ? 524288 : 16384;
       if (bytes > limit) { res.writeHead(413).end(); return; }
       chunks.push(chunk);
     }

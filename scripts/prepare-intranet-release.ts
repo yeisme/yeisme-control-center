@@ -39,9 +39,16 @@ const checksums: Record<string, string> = {};
 let failed = false;
 try {
   await access(join(root, 'dist/index.html'));
-  for (const entry of ['index.html']) {
+  // guide.html is the public guide (no login); it shares the hashed assets below.
+  for (const entry of ['index.html', 'guide.html']) {
     await access(join(root, 'dist', entry));
     await cp(join(root, 'dist', entry), join(run, 'artifacts/control-center/dist', entry));
+  }
+  try {
+    await access(join(root, 'dist/guide'));
+    await cp(join(root, 'dist/guide'), join(run, 'artifacts/control-center/dist/guide'), { recursive: true });
+  } catch {
+    // The guide's recorded examples are optional media; the guide reads fine without them.
   }
   await cp(join(root, 'dist/assets'), join(run, 'artifacts/control-center/dist/assets'), { recursive: true });
   try {

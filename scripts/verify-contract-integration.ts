@@ -27,7 +27,7 @@ import type { ServerConfig, TaskConnection } from "../server/contracts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const ownerPort = Number(process.env.CONTRACT_OWNER_PORT || 4330);
-const apiPort = 4331;
+const apiPort = Number(process.env.CONTRACT_API_PORT || 4331);
 const origin = `http://127.0.0.1:${apiPort}`;
 const username = "contract-admin";
 const password = "contract-integration-local-only";
@@ -88,7 +88,8 @@ const audience = (owner: string) => `fixture-${owner}`;
 const config: ServerConfig = {
   origin, port: apiPort, bind: "127.0.0.1",
   auth_mode: "personal",
-  personal: { name: "Contract Admin", username, role: "admin", password_hash_ref: passwordRef, scope_ids: scopeIds, users: [] },
+  // A second personal login, shared into one project and then suspended, proves a revoked reader is cut off mid-paging.
+  personal: { name: "Contract Admin", username, role: "admin", password_hash_ref: passwordRef, scope_ids: scopeIds, users: [{ username: "contract-viewer", name: "Contract Viewer", role: "viewer", key_hash_ref: passwordRef, scope_ids: scopeIds }] },
   principals: [{
     issuer: "fixture", subject: username, name: "Contract Admin",
     scopes: scopeIds.map((id) => ({
@@ -369,9 +370,13 @@ try {
   });
 
   await check("episode board: explicit Auctra sync, then rails built from live Auctra + Scaena reads", async () => {
-    const sync = await call(`/api/control-center/v1/auctra/collection/sync?scope=${scopeIds[0]}`, "POST", {});
+    // A two-record page size forces several pages; Auctra sorts oldest first, so a one-page sync would drop the newest episodes.
+    const sync = await call(`/api/control-center/v1/auctra/collection/sync?scope=${scopeIds[0]}`, "POST", { limit: 2 });
     assert.equal(sync.response.status, 200);
     assert.equal(sync.json.coverage, "complete");
+    assert.equal(sync.json.complete, true);
+    assert.ok(sync.json.pages >= 2, `pages=${sync.json.pages}`);
+    assert.equal(sync.json.cursor, null);
     const { response, json } = await call(`/api/control-center/v1/drama/episodes?scope=${scopeIds[0]}&read=all`);
     assert.equal(response.status, 200);
     assert.equal(json.schema_version, "yeisme.drama_episodes.v1");
@@ -382,6 +387,11 @@ try {
     assert.equal(state("ep-02", "production_breakdown"), "not_started", "Scaena has nothing for ep-02 yet");
     assert.equal(state("ep-03", "production_handoff"), "stale");
     assert.equal(json.universe.bound, true);
+    assert.equal(json.universe.complete, true);
+    assert.equal(json.universe.can_sync, true);
+    const page = await call(`/api/control-center/v1/auctra/collection?scope=${scopeIds[0]}`);
+    assert.equal(page.json.connection.state, "connected");
+    assert.equal(page.json.last_sync.complete, true);
   });
 
   await check("episode detail: head breakdown outline is structure only, and Scaena's own episode ref can be named", async () => {
@@ -430,6 +440,136 @@ try {
     }
     const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=active&scope=${scopeIds[0]}`);
     assert.equal(tasks.epoch, 2);
+  });
+
+  // Tool projects (T2). After the epoch check: connecting and disconnecting bump the session epoch.
+  let connected = "", twoProjects = "", twoProjectsOrg = "";
+  const act = async (action: string, kind: string, target: string, input: Record<string, unknown>, scope = scopeIds[0], expected = "0") => {
+    const key = `contract_${action.replaceAll(".", "_")}_${Math.random().toString(36).slice(2, 12)}`;
+    const preview = await call(`/api/control-center/v1/actions/preview?scope=${scope}`, "POST", { scope_id: scope, owner: "control-center", target_kind: kind, target_ref: target, action, expected_revision: expected, idempotency_key: key, input });
+    if (preview.response.status !== 200) return preview;
+    return call(`/api/control-center/v1/actions/confirm?scope=${scope}`, "POST", { scope_id: scope, preview_ref: preview.json.preview_ref, preview_digest: preview.json.preview_digest, idempotency_key: key });
+  };
+  await check("a refused tool project is reported in the preview and leaves the template connection readable", async () => {
+    const refused = await act("owner_project.connect", "owner_project", "eikona:rain-private", { template_connection_id: "fx-eikona", project_ref: "rain-private" });
+    assert.equal(refused.response.status, 403);
+    assert.equal(refused.json.error, "owner_project_not_accessible");
+    const { json } = await call(`/api/control-center/v1/connections?scope=${scopeIds[0]}`);
+    assert.equal(json.connections.find((c: { id: string }) => c.id === "fx-eikona")?.state, "ready");
+  });
+  await check("a covered tool project connects through preview and confirm and is read without a restart", async () => {
+    const result = await act("owner_project.connect", "owner_project", "eikona:rain-bts", { template_connection_id: "fx-eikona", project_ref: "rain-bts", label: "片场花絮" });
+    assert.equal(result.response.status, 202);
+    assert.equal(result.json.owner_state, "connected");
+    connected = result.json.result_refs[0];
+    const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=history&scope=${scopeIds[0]}`);
+    const row = tasks.rows.find((t: { locator: { task_ref: string } }) => t.locator.task_ref === "run-b-01");
+    assert.ok(row, "connected project task missing");
+    assert.equal(row.locator.project, "rain-bts");
+    const { json: listed } = await call(`/api/control-center/v1/owner-projects?scope=${scopeIds[0]}`);
+    const entry = listed.rows.find((r: { project_ref: string }) => r.project_ref === "rain-bts");
+    assert.equal(entry?.registered, true);
+    assert.equal(entry?.registrations[0]?.id, connected);
+    const serialized = JSON.stringify(listed);
+    for (const secret of [observerRef, observerToken, "credential_ref", "endpoint"]) assert.ok(!serialized.includes(secret), `owner projects leak ${secret}`);
+  });
+  await check("a shared project binds two Eikona projects of one scope and reads both", async () => {
+    const org = await act("organization.create", "organization", "new", { name: "Contract Studio", source_scope: scopeIds[0] });
+    assert.equal(org.response.status, 202);
+    const orgID = org.json.result_refs[0];
+    twoProjectsOrg = orgID;
+    const { json: options } = await call(`/api/control-center/v1/organizations/${orgID}/binding-options?scope=${scopeIds[0]}`);
+    const eikona = options.rows.filter((o: { owner: string }) => o.owner === "eikona").map(({ owner, project_ref, source_scope, connection_ids }: Record<string, unknown>) => ({ owner, project_ref, source_scope, connection_ids }));
+    assert.deepEqual(eikona.map((o: { project_ref: string }) => o.project_ref).sort(), ["rain-bts", "rain-reunion"]);
+    const project = await act("project.create", "organization", orgID, { name: "两个图像项目", bindings: eikona });
+    assert.equal(project.response.status, 202);
+    const projectID = project.json.result_refs[0];
+    twoProjects = projectID;
+    const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=history&scope=${projectID}`);
+    const projects = new Set(tasks.rows.filter((t: { locator: { owner: string } }) => t.locator.owner === "eikona").map((t: { locator: { project: string } }) => t.locator.project));
+    assert.deepEqual([...projects].sort(), ["rain-bts", "rain-reunion"]);
+  });
+  await check("batches of two bound Eikona projects page on the server and are each observed in their own project", async () => {
+    const base = `/api/control-center/v1/projects/${twoProjects}`;
+    const run = async (action: string, input: Record<string, unknown>) => {
+      const { json: shared } = await call(`${base}?scope=${twoProjects}`);
+      const key = `contract_${action.replaceAll(".", "_")}_${Math.random().toString(36).slice(2, 12)}`;
+      const preview = await call(`/api/control-center/v1/actions/preview?scope=${twoProjects}`, "POST", { scope_id: twoProjects, owner: "control-center", target_kind: "project", target_ref: twoProjects, action, expected_revision: String(shared.revision), idempotency_key: key, input });
+      assert.equal(preview.response.status, 200, `${action} preview ${JSON.stringify(preview.json)}`);
+      const receipt = await call(`/api/control-center/v1/actions/confirm?scope=${twoProjects}`, "POST", { scope_id: twoProjects, preview_ref: preview.json.preview_ref, preview_digest: preview.json.preview_digest, idempotency_key: key });
+      assert.equal(receipt.json.state, "succeeded", `${action} ${JSON.stringify(receipt.json)}`);
+      return receipt.json;
+    };
+    await run("project.update", { generation_enabled: true, budget_cap: 5, currency: "USD" });
+    const batches: Record<string, string> = {};
+    for (const [name, target] of [["花絮 A", "rain-bts"], ["正片 A", "rain-reunion"], ["花絮 B", "rain-bts"]]) {
+      const prepared = await run("generation.input.prepare", { owner: "eikona", rows: [{ id: "row", prompt: `${name} 定妆`, model_ref: "fixture/image", size: "1024x1024", aspect: "1:1", candidate_count: 1, folder_id: null, references: [], project_ref: target }] });
+      assert.equal(prepared.generation_items[0].project_ref, target);
+      batches[name] = (await run("generation.batch.create", { name, items: prepared.generation_items, idempotency_key: `contract_batch_${Math.random().toString(36).slice(2, 12)}` })).result_refs[0];
+    }
+    for (const name of ["花絮 A", "正片 A"]) await run("generation.batch.submit", { batch_id: batches[name] });
+    // Newest first, two to a page, with a signed cursor that only works under the filters it was issued for.
+    const first = await call(`${base}/generation-batches?scope=${twoProjects}&limit=2`);
+    assert.deepEqual(first.json.rows.map((b: { name: string }) => b.name), ["花絮 B", "正片 A"]);
+    assert.equal(first.json.total, 3);
+    const second = await call(`${base}/generation-batches?scope=${twoProjects}&limit=2&cursor=${encodeURIComponent(first.json.next_cursor)}`);
+    assert.deepEqual(second.json.rows.map((b: { name: string }) => b.name), ["花絮 A"]);
+    assert.equal(second.json.next_cursor, null);
+    assert.equal((await call(`${base}/generation-batches?scope=${twoProjects}&limit=2&q=${encodeURIComponent("花絮")}&cursor=${encodeURIComponent(first.json.next_cursor)}`)).response.status, 409);
+    assert.deepEqual((await call(`${base}/generation-batches?scope=${twoProjects}&q=${encodeURIComponent("花絮")}`)).json.rows.map((b: { name: string }) => b.name), ["花絮 B", "花絮 A"]);
+    // Each page read Eikona only for its own live batch, in that batch's project, and both finished.
+    const sources = (page: { sources: { project_ref: string; state: string }[] }) => page.sources.map((s) => `${s.project_ref}:${s.state}`);
+    assert.deepEqual(sources(first.json), ["rain-reunion:ready"]);
+    assert.deepEqual(sources(second.json), ["rain-bts:ready"]);
+    assert.deepEqual([first.json.rows[1].state, second.json.rows[0].state], ["succeeded", "succeeded"]);
+    // A finished batch needs no owner read when opened directly.
+    const detail = await call(`${base}/generation-batches/${batches["花絮 A"]}?scope=${twoProjects}`);
+    assert.deepEqual([detail.json.batch.state, detail.json.coverage, detail.json.sources.length], ["succeeded", "complete", 0]);
+    // Each finished batch is announced once, with a link that opens it in its project.
+    await call(`${base}/generation-batches?scope=${twoProjects}`);
+    const { json: reminders } = await call(`/api/control-center/v1/notifications?scope=${twoProjects}`);
+    const finished = reminders.rows.filter((r: { category: string }) => r.category === "generation_batch");
+    assert.deepEqual(finished.map((r: { title: string }) => r.title).sort(), ["批次「正片 A」已完成", "批次「花絮 A」已完成"]);
+    for (const reminder of finished) assert.match(reminder.target_path, new RegExp(`^/creation\\?sharedProject=${twoProjects}&batch=batch_`));
+    assert.equal((await call(`${base}/generation-batches/batch_missing?scope=${twoProjects}`)).response.status, 404);
+  });
+  await check("a reader suspended while paging batches gets the same 404 as someone never shared in", async () => {
+    const viewer = async (pathname: string) => {
+      const response = await app(new Request(origin + pathname, { headers: { Origin: origin, ...(viewerCookie ? { Cookie: viewerCookie } : {}) } }));
+      return { status: response.status, json: await response.json().catch(() => null) };
+    };
+    let viewerCookie = "";
+    const login = await app(new Request(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: "contract-viewer", password }) }));
+    assert.equal(login.status, 200);
+    viewerCookie = "yeisme_session=" + login.headers.getSetCookie().map((entry) => entry.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const base = `/api/control-center/v1/projects/${twoProjects}`;
+    assert.equal((await viewer(`${base}/generation-batches?scope=${twoProjects}&limit=2`)).status, 404);
+    const member = await act("organization.member.set", "organization", twoProjectsOrg, { identity: "yeisme:personal|contract-viewer", role: "member", status: "active" });
+    assert.equal(member.response.status, 202, JSON.stringify(member.json));
+    const { json: shared } = await call(`${base}?scope=${twoProjects}`);
+    const key = `contract_grant_${Math.random().toString(36).slice(2, 12)}`;
+    const preview = await call(`/api/control-center/v1/actions/preview?scope=${twoProjects}`, "POST", { scope_id: twoProjects, owner: "control-center", target_kind: "project", target_ref: twoProjects, action: "project.members.set", expected_revision: String(shared.revision), idempotency_key: key, input: { grants: [...shared.grants, { subject_type: "member", subject_id: member.json.result_refs[0], role: "viewer" }] } });
+    assert.equal((await call(`/api/control-center/v1/actions/confirm?scope=${twoProjects}`, "POST", { scope_id: twoProjects, preview_ref: preview.json.preview_ref, preview_digest: preview.json.preview_digest, idempotency_key: key })).json.state, "succeeded");
+    const page = await viewer(`${base}/generation-batches?scope=${twoProjects}&limit=2`);
+    assert.equal(page.status, 200);
+    assert.ok(page.json.next_cursor);
+    const { json: members } = await call(`/api/control-center/v1/organizations/${twoProjectsOrg}/members?scope=${scopeIds[0]}`);
+    const row = members.rows.find((m: { identity: string }) => m.identity === "yeisme:personal|contract-viewer");
+    const suspend = await act("organization.member.set", "organization", twoProjectsOrg, { identity: row.identity, role: "member", status: "suspended" }, scopeIds[0], String(row.revision));
+    assert.equal(suspend.response.status, 202, JSON.stringify(suspend.json));
+    const revoked = await viewer(`${base}/generation-batches?scope=${twoProjects}&limit=2&cursor=${encodeURIComponent(page.json.next_cursor)}`);
+    const opened = await viewer(`${base}/generation-batches/${page.json.rows[0].id}?scope=${twoProjects}`);
+    assert.deepEqual([revoked.status, opened.status], [404, 404]);
+    assert.deepEqual([revoked.json, opened.json].map((body) => JSON.stringify(body).includes(page.json.rows[0].name)), [false, false]);
+  });
+  await check("only connected tool projects can be disconnected, and the template keeps working", async () => {
+    const configured = await act("owner_project.disconnect", "owner_project", "fx-eikona", { connection_id: "fx-eikona" });
+    assert.equal(configured.response.status, 404);
+    const removed = await act("owner_project.disconnect", "owner_project", connected, { connection_id: connected });
+    assert.equal(removed.response.status, 202);
+    const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=history&scope=${scopeIds[0]}`);
+    assert.ok(!tasks.rows.some((t: { locator: { project: string } }) => t.locator.project === "rain-bts"), "disconnected project still read");
+    assert.ok(tasks.rows.some((t: { locator: { project: string } }) => t.locator.project === "rain-reunion"), "template connection stopped reading");
   });
 } finally {
   owners.stop();
