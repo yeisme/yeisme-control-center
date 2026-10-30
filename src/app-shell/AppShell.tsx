@@ -1,25 +1,33 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Bell, BellRing, Building2, Check, ChevronsUpDown, Clapperboard, ClipboardCheck, Cpu, FolderKanban, Images, LayoutDashboard, ListTodo, LogOut, Menu, Monitor, Moon,
-  PanelLeftClose, PanelLeftOpen, RefreshCw, ScrollText, Search, ServerCog, ShieldCheck, Sparkles, Sun, UsersRound, Wallet, X, ArrowRight,
+  Archive, Bell, BellOff, BellRing, BookOpen, Building2, Check, ChevronsUpDown, Clapperboard, ClipboardCheck, Cpu, FolderKanban, Images, LayoutDashboard, ListTodo, LogOut, Menu, Monitor, Moon,
+  PanelLeftClose, PanelLeftOpen, RefreshCw, ScrollText, Search, ServerCog, ShieldCheck, Sparkles, Sun, UsersRound, Wallet, X, ArrowRight, History, Zap,
 } from "../icons";
 import { navItems, navItem, pageFromPath, type WorkspacePage } from "./navigation";
 import { useWorkspace } from "../app/workspace";
 import { useTasks } from "../app/tasks-context";
 import { useNotifications } from "../app/notifications-context";
-import { api, errorCode } from "../shared/api/control-center-client";
-import { Button, DetailSheet, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSeparator, MenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger, TaskStatePill, cx, ownerLabel, type Tone } from "../components/ui";
-import { formatRelative, initials } from "../shared/read-model/format";
-import { reminderStateLabels } from "../notifications";
+import { api, errorCode, type TaskNotification } from "../shared/api/control-center-client";
+import { ActionsContextMenu, Button, DetailSheet, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSeparator, MenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger, TaskStatePill, cx, ownerLabel, type ItemAction } from "../components/ui";
+import { linkActions, useCopy } from "../app/item-actions";
+import { cjkSpaced, formatRelative, initials } from "../shared/read-model/format";
+import { countsAsUnread, reminderStateLabels } from "../notifications";
 import { useTheme, type ThemePreference } from "./theme";
 import { useObservationCache } from "../app/observation-cache";
 import { toolCatalogCacheKey, type ToolCatalog } from "../shared/tool-catalog";
+import { AudioDock } from "../components/AudioDock";
+import { useRecentItems } from "../app/recent";
+import { shellShortcut } from "../shared/keyboard";
+import { sourceStatus } from "../shared/source-status";
+import { connectionTone } from "../shared/read-model/tasks";
+import { ShortcutSheet } from "./ShortcutSheet";
 
 const icons: Record<WorkspacePage, typeof LayoutDashboard> = {
   home: LayoutDashboard,
   projects: FolderKanban,
   drama: Clapperboard,
+  guide: BookOpen,
   creation: Sparkles,
   assets: Images,
   tasks: ListTodo,
@@ -34,6 +42,15 @@ const icons: Record<WorkspacePage, typeof LayoutDashboard> = {
 
 const collapsedKey = "yeisme.control.sidebar";
 
+/** Focus <main> for the skip link. It is focusable only while focused: a permanent tabindex would make every click on page text focus it. */
+function focusMain() {
+  const main = document.getElementById("main");
+  if (!main) return;
+  main.tabIndex = -1;
+  main.addEventListener("blur", () => main.removeAttribute("tabindex"), { once: true });
+  main.focus();
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -41,15 +58,25 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(collapsedKey) === "1");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   useEffect(() => { localStorage.setItem(collapsedKey, collapsed ? "1" : "0"); }, [collapsed]);
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
-      if ((event.metaKey || event.ctrlKey) && key === "k") {
+      if (typeof event.key !== "string") return;
+      // Dialogs and open menus own the keyboard; page shortcuts wait until they close.
+      const shortcut = shellShortcut(event, document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]') !== null);
+      if (shortcut === "search") {
         event.preventDefault();
         setSearchOpen(true);
+      } else if (shortcut === "page-search") {
+        event.preventDefault();
+        const field = [...document.querySelectorAll<HTMLInputElement>("#main [data-page-search]")].find((element) => element.getClientRects().length > 0);
+        if (field) { field.focus(); field.select(); } else setSearchOpen(true);
+      } else if (shortcut === "shortcuts") {
+        event.preventDefault();
+        setShortcutsOpen(true);
       }
       if (event.key === "Escape") setMobileOpen(false);
     };
@@ -63,7 +90,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     className="flex min-h-dvh bg-canvas"
     style={{ "--workspace-left": collapsed ? "var(--sidebar-collapsed)" : "var(--sidebar-width)" } as React.CSSProperties}
   >
-    <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-control focus:bg-panel focus:px-3 focus:py-2 focus:shadow-float">跳到主要内容</a>
+    {/* With hash routing `#main` is a route, so the skip link moves focus itself instead of following the href. */}
+    <a href="#main" onClick={(event) => { event.preventDefault(); focusMain(); }} className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-control focus:bg-panel focus:px-3 focus:py-2 focus:shadow-float">跳到主要内容</a>
     <Sidebar page={page} collapsed={collapsed} mobileOpen={mobileOpen} onNavigate={go} />
     {mobileOpen && <button aria-label="关闭导航" className="fade-in fixed inset-0 z-30 lg:hidden" style={{ background: "var(--scrim)" }} onClick={() => setMobileOpen(false)} />}
     <div className="flex min-w-0 flex-1 flex-col">
@@ -75,11 +103,13 @@ export function AppShell({ children }: { children: ReactNode }) {
         onOpenSearch={() => setSearchOpen(true)}
         onNavigate={go}
       />
-      <main id="main" className="w-full flex-1 px-[var(--content-gutter)] pb-16 pt-6 lg:pt-7">
+      <main id="main" className="w-full flex-1 px-[var(--content-gutter)] pb-16 pt-6 outline-none lg:pt-7">
         {children}
       </main>
     </div>
-    {searchOpen && <CommandSearch onClose={() => setSearchOpen(false)} onNavigate={(target) => { setSearchOpen(false); navigate(target); }} />}
+    <AudioDock />
+    {searchOpen && <CommandSearch onClose={() => setSearchOpen(false)} onNavigate={(target) => { setSearchOpen(false); navigate(target); }} onShowShortcuts={() => { setSearchOpen(false); setShortcutsOpen(true); }} />}
+    <ShortcutSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
   </div>;
 }
 
@@ -87,6 +117,7 @@ function Sidebar({ page, collapsed, mobileOpen, onNavigate }: { page: WorkspaceP
   const groups = [...new Set(navItems.map((item) => item.group))];
   const tasks = useTasks();
   const reminders = useNotifications();
+  const copy = useCopy();
   const review = tasks.rows.filter((task) => task.state === "waiting_review").length;
   return <aside
     aria-label="主导航"
@@ -113,10 +144,11 @@ function Sidebar({ page, collapsed, mobileOpen, onNavigate }: { page: WorkspaceP
             const Icon = icons[item.id];
             const active = page === item.id;
             const badge = item.id === "reminders" ? reminders.unread : item.id === "review" ? review : 0;
-            return <li key={item.id}>
+            return <ActionsContextMenu key={item.id} actions={linkActions(`/${item.id}`, copy)}><li>
               <button
                 type="button"
                 data-nav={item.id}
+                data-badge={badge || undefined}
                 aria-current={active ? "page" : undefined}
                 title={collapsed ? item.label : undefined}
                 onClick={() => onNavigate(item.id)}
@@ -131,7 +163,7 @@ function Sidebar({ page, collapsed, mobileOpen, onNavigate }: { page: WorkspaceP
                 <span className={cx("truncate", collapsed && "lg:sr-only")}>{item.label}</span>
                 {badge > 0 && <span className={cx("ml-auto rounded-full bg-accent px-1.5 text-2xs font-semibold leading-[18px] text-accent-ink tabular", collapsed && "lg:absolute lg:right-1 lg:top-0.5 lg:ml-0 lg:px-1 lg:leading-4")}>{badge > 99 ? "99+" : badge}</span>}
               </button>
-            </li>;
+            </li></ActionsContextMenu>;
           })}
         </ul>
       </div>)}
@@ -147,11 +179,14 @@ function ScopeSwitcher({ collapsed }: { collapsed: boolean }) {
   return <div className={cx("px-3", collapsed && "lg:px-2")}>
     <MenuRoot>
       <MenuTrigger asChild>
-        <button type="button" aria-label={`当前授权范围：${label}，切换范围`} className={cx("flex w-full items-center gap-2.5 rounded-[11px] border border-sidebar-line bg-white/[0.04] p-2 text-left transition-colors hover:bg-sidebar-hover", collapsed && "lg:justify-center lg:p-1.5")}>
-          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-white/10 text-[13px] font-semibold text-white dark:text-sidebar-ink">{initials(label.replace(/^Fixture\s*·\s*/, ""))}</span>
-          <span className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}>
+        {/* Named by its own text (the scope and its project), so the name always contains what the button shows. */}
+        <button type="button" className={cx("flex w-full items-center gap-2.5 rounded-[11px] border border-sidebar-line bg-white/[0.04] p-2 text-left transition-colors hover:bg-sidebar-hover", collapsed && "lg:justify-center lg:p-1.5")}>
+          <span aria-hidden="true" className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-white/10 text-[13px] font-semibold text-white dark:text-sidebar-ink">{initials(label.replace(/^Fixture\s*·\s*/, ""))}</span>
+          <span className={cx("min-w-0 flex-1", collapsed && "lg:sr-only")}>
+            <span className="sr-only">当前授权范围：</span>
             <span className="block truncate text-[13px] font-semibold text-white dark:text-sidebar-ink">{label}</span>
             <span className="block truncate text-2xs text-sidebar-muted">{scope?.project ? `项目 ${scope.project}` : "授权范围"} · 已授权</span>
+            <span className="sr-only">，切换范围</span>
           </span>
           <ChevronsUpDown className={cx("size-4 shrink-0 text-sidebar-muted", collapsed && "lg:hidden")} />
         </button>
@@ -225,43 +260,44 @@ function Topbar({ page, collapsed, onToggleCollapsed, onOpenMobile, onOpenSearch
   </header>;
 }
 
+/** The scope's task source status: one place for every page, on every width. Pages add at most one line about what they lack. */
 function SourceHealth({ onNavigate }: { onNavigate: (page: WorkspacePage) => void }) {
   const tasks = useTasks();
   const { refresh } = useWorkspace();
-  const total = tasks.connections.length;
-  const ready = tasks.connections.filter((connection) => connection.state === "ready").length;
-  const tone: Tone = tasks.status === "loading" ? "neutral" : total === 0 ? "neutral" : ready === total ? "success" : ready === 0 ? "danger" : "warning";
-  const label = tasks.status === "loading" ? "读取连接…" : total === 0 ? "无任务连接" : `${ready}/${total} 连接可读`;
-  return <PopoverRoot>
+  const [open, setOpen] = useState(false);
+  const status = sourceStatus(tasks);
+  const reasons = new Map(status.gaps.map((gap) => [gap.id, gap.reason]));
+  return <PopoverRoot open={open} onOpenChange={setOpen}>
     <PopoverTrigger asChild>
-      <button type="button" aria-label={`来源状态：${label}`} className="hidden h-9 items-center gap-2 rounded-control px-2.5 text-[13px] text-ink-soft hover:bg-panel-sunken sm:flex">
-        <Dot tone={tone} />
-        <span className="hidden tabular xl:inline">{label}</span>
+      <button type="button" aria-label={`来源状态：${status.label}`} className="flex h-9 items-center gap-2 rounded-control px-2.5 text-[13px] text-ink-soft hover:bg-panel-sunken" data-source-status={status.kind}>
+        <Dot tone={status.tone} />
+        <span className="hidden tabular xl:inline">{status.label}</span>
       </button>
     </PopoverTrigger>
-    <PopoverContent className="w-80 p-0">
+    <PopoverContent label="来源状态" className="w-80 p-0">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div>
           <p className="text-[13px] font-semibold">任务连接</p>
-          <p className="text-2xs text-muted">{tasks.observedAt ? `观察于 ${formatRelative(tasks.observedAt)}` : "尚未完成观察"}</p>
+          <p className="text-2xs text-muted">{status.kind === "stale" ? `最近一次读取失败，显示的是${cjkSpaced(tasks.observedAt ? formatRelative(tasks.observedAt) : "较早")}的结果` : tasks.observedAt ? `观察于 ${formatRelative(tasks.observedAt)}` : "尚未完成观察"}</p>
         </div>
         <Button size="icon-sm" variant="ghost" aria-label="重新观察" onClick={() => { tasks.refresh(); refresh(); }}><RefreshCw className={cx("size-4", tasks.refreshing && "motion-safe:animate-spin")} /></Button>
       </div>
-      <ul className="max-h-72 divide-y divide-line overflow-y-auto">
+      {/* Scrolls once a scope reads more than a handful of connections; focusable so keyboards can scroll it too. */}
+      <ul tabIndex={0} aria-label="任务连接列表" className="max-h-72 divide-y divide-line overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus">
         {tasks.connections.length ? tasks.connections.map((connection) => {
-          const ok = connection.state === "ready";
+          const reason = reasons.get(connection.id);
           return <li key={connection.id} className="flex items-center gap-3 px-4 py-2.5">
-            <Dot tone={ok ? "success" : connection.state === "needs_authorization" ? "danger" : "warning"} />
+            <Dot tone={reason ? connectionTone(connection.state) : "success"} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px] font-medium">{connection.label}</span>
               <span className="block truncate text-2xs text-muted">{ownerLabel(connection.owner)} · {connection.environment} · {connection.project}</span>
             </span>
-            <span className={cx("shrink-0 text-2xs", ok ? "text-success" : "text-warning")}>{ok ? "可读" : connection.state}</span>
+            <span className={cx("shrink-0 text-2xs", reason ? "text-warning" : "text-success")}>{reason || "可读"}</span>
           </li>;
         }) : <li className="px-4 py-6 text-center text-[13px] text-muted">当前范围没有配置任务连接</li>}
       </ul>
       <div className="border-t border-line p-2">
-        <Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => onNavigate("services")}>查看服务与连接<ArrowRight className="size-4" /></Button>
+        <Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => { setOpen(false); onNavigate("services"); }}>查看服务与连接<ArrowRight className="size-4" /></Button>
       </div>
     </PopoverContent>
   </PopoverRoot>;
@@ -277,20 +313,39 @@ function AttentionPopover({ onNavigate }: { onNavigate: (page: WorkspacePage) =>
   const [failure, setFailure] = useState("");
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => { const query = matchMedia("(max-width: 639px)"); const update = () => setMobile(query.matches); query.addEventListener("change", update); return () => query.removeEventListener("change", update); }, []);
-  const filtered = reminders.rows.filter((item) => all || !item.read_at);
+  const filtered = reminders.rows.filter((item) => all || countsAsUnread(item));
+  const openItem = (item: TaskNotification) => {
+    if (!session) return;
+    void api.readNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => { reminders.update(notification); setOpen(false); navigate(item.target_path || `/tasks?task=${encodeURIComponent(item.task_key)}`); }).catch((error) => setFailure(errorCode(error)));
+  };
+  // The same handling as on the reminders page, without leaving the popover.
+  const handle = (item: TaskNotification, action: "acknowledge" | "mute" | "archive") => {
+    if (!session) return;
+    setFailure("");
+    const done = action === "acknowledge" ? api.acknowledgeNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => reminders.update(notification))
+      : action === "archive" ? api.archiveNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => reminders.update(notification))
+        : api.muteNotification(item.scope_id, item.id, session.csrf, "fingerprint").then(() => reminders.refresh());
+    void done.catch((error) => setFailure(errorCode(error)));
+  };
+  const itemActions = (item: TaskNotification): ItemAction[] => [
+    { id: "open", label: "打开任务", icon: <ArrowRight />, group: "open", run: () => openItem(item) },
+    ...(item.category === "failure" ? [
+      { id: "acknowledge", label: "确认", icon: <Check />, group: "resolve", disabled: item.state === "acknowledged", run: () => handle(item, "acknowledge") },
+      { id: "mute", label: "仅对这次失败免提醒", icon: <BellOff />, group: "resolve", disabled: item.state === "muted", run: () => handle(item, "mute") },
+      { id: "archive", label: "归档", icon: <Archive />, group: "resolve", disabled: item.state === "archived", run: () => handle(item, "archive") },
+    ] : []),
+    { id: "reminders", label: "在提醒中心查看", icon: <BellRing />, group: "more", run: () => { setOpen(false); navigate(`/reminders?focus=${encodeURIComponent(item.id)}`); } },
+  ];
   const content = <div className="min-w-0">
     <div className="border-b border-line px-4 py-3"><p className="text-[13px] font-semibold">通知 · {reminders.unread} 条未读</p><p className="text-2xs text-muted">{reminders.error ? "部分来源暂不可用" : reminders.syncing ? "正在核验来源" : "阅读通知不会确认处理提醒"}</p></div>
     <div className="flex gap-2 p-2"><Button size="sm" variant={!all ? "secondary" : "ghost"} onClick={() => { setAll(false); setLimit(10); }}>未读</Button><Button size="sm" variant={all ? "secondary" : "ghost"} onClick={() => { setAll(true); setLimit(10); }}>全部</Button></div>
     {failure && <p role="alert" className="px-4 text-xs text-danger">{failure}</p>}
-    {filtered.length ? <ul className="max-h-[60dvh] divide-y divide-line overflow-y-auto">{filtered.slice(0, limit).map((item) => <li key={item.id}><button className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => {
-      if (!session) return;
-      void api.readNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => { reminders.apply(reminders.rows.map((row) => row.id === item.id ? notification : row)); setOpen(false); navigate(item.target_path || `/tasks?task=${encodeURIComponent(item.task_key)}`); }).catch((error) => setFailure(errorCode(error)));
-    }}><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span><span className="block text-2xs text-muted">{item.category === "failure" ? `${ownerLabel(item.owner)} · ${reminderStateLabels[item.state]}` : "项目协作"} · {item.read_at ? "已读" : "未读"}</span></span>{!item.read_at && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />}</button></li>)}</ul> : <p className="p-8 text-center text-sm text-muted">{all ? "暂无通知" : "没有未读通知"}</p>}
+    {filtered.length ? <ul className="max-h-[60dvh] divide-y divide-line overflow-y-auto">{filtered.slice(0, limit).map((item) => <ActionsContextMenu key={item.id} actions={itemActions(item)}><li data-notification={item.id}><button className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => openItem(item)}><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span><span className="block text-2xs text-muted">{item.category === "failure" ? `${ownerLabel(item.owner)} · ${reminderStateLabels[item.state]}` : "项目协作"} · {countsAsUnread(item) ? "未读" : item.recovered_at ? "已恢复" : "已读"}</span></span>{countsAsUnread(item) && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />}</button></li></ActionsContextMenu>)}</ul> : <p className="p-8 text-center text-sm text-muted">{all ? "暂无通知" : "没有未读通知"}</p>}
     {(filtered.length > limit || reminders.hasMore) && <Button size="sm" variant="ghost" className="w-full" onClick={() => { setLimit((n) => n + 10); if (filtered.length <= limit) reminders.loadMore(); }}>加载更多</Button>}
     <div className="border-t border-line p-2"><Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => { setOpen(false); onNavigate("reminders"); }}>打开提醒中心<ArrowRight className="size-4" /></Button></div>
   </div>;
   const trigger = <Button variant="ghost" size="icon-sm" aria-label={reminders.unread ? `需要关注 ${reminders.unread} 项` : "需要关注"} className="relative" data-attention-count={reminders.unread} onClick={() => setOpen(true)}><Bell className="size-[18px]" />{reminders.unread > 0 && <span className="absolute right-1 top-1 size-2 rounded-full bg-danger ring-2 ring-canvas" />}</Button>;
-  return mobile ? <>{trigger}<DetailSheet open={open} onOpenChange={setOpen} title="通知">{content}</DetailSheet></> : <PopoverRoot open={open} onOpenChange={setOpen}><PopoverTrigger asChild>{trigger}</PopoverTrigger><PopoverContent className="w-[min(360px,calc(100vw-24px))] p-0">{content}</PopoverContent></PopoverRoot>;
+  return mobile ? <>{trigger}<DetailSheet open={open} onOpenChange={setOpen} title="通知">{content}</DetailSheet></> : <PopoverRoot open={open} onOpenChange={setOpen}><PopoverTrigger asChild>{trigger}</PopoverTrigger><PopoverContent label="通知" className="w-[min(360px,calc(100vw-24px))] p-0">{content}</PopoverContent></PopoverRoot>;
 }
 
 function IdentityMenu({ onNavigate }: { onNavigate: (page: WorkspacePage) => void }) {
@@ -317,18 +372,24 @@ function IdentityMenu({ onNavigate }: { onNavigate: (page: WorkspacePage) => voi
   </MenuRoot>;
 }
 
-type PaletteGroup = "task" | "catalog" | "page";
-interface PaletteResult { key: string; group: PaletteGroup; label: string; meta: string; target: string }
+type PaletteGroup = "recent" | "task" | "catalog" | "action" | "page";
+/** A palette entry either navigates to `target` or runs an action in place. */
+interface PaletteResult { key: string; group: PaletteGroup; label: string; meta: string; target?: string; run?: () => void }
 const paletteGroups: { id: PaletteGroup; label: string; icon: ReactNode }[] = [
+  { id: "recent", label: "最近打开", icon: <History className="size-3.5" /> },
   { id: "task", label: "任务", icon: <ListTodo className="size-3.5" /> },
   { id: "catalog", label: "模型与工具", icon: <Cpu className="size-3.5" /> },
+  { id: "action", label: "操作", icon: <Zap className="size-3.5" /> },
   { id: "page", label: "页面", icon: <LayoutDashboard className="size-3.5" /> },
 ];
 const catalogKindLabel = { model: "模型", tool: "工具", action: "动作" } as const;
 
-function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigate: (target: string) => void }) {
+function CommandSearch({ onClose, onNavigate, onShowShortcuts }: { onClose: () => void; onNavigate: (target: string) => void; onShowShortcuts: () => void }) {
   const tasks = useTasks();
   const cache = useObservationCache();
+  const recent = useRecentItems().items;
+  const { preference, dark, setPreference } = useTheme();
+  const { session, scopeId, setScope } = useWorkspace();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -360,8 +421,24 @@ function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigat
       meta: `${ownerLabel(entry.owner)} · ${catalogKindLabel[entry.kind]}`,
       target: `/capabilities?${new URLSearchParams({ tab: entry.tab, entry: `${entry.kind}:${entry.owner}:${entry.id}` })}`,
     })) : [];
-    return [...taskResults, ...catalogResults, ...pages].slice(0, 12);
-  }, [cache, query, tasks.rows]);
+    const matches = (text: string) => !needle || text.toLocaleLowerCase().includes(needle);
+    const recentResults: PaletteResult[] = recent
+      .filter((item) => matches(`${item.label} ${item.meta}`) && !taskResults.some((task) => task.key === item.key))
+      .slice(0, 5)
+      .map((item) => ({ key: "recent:" + item.key, group: "recent", label: item.label, meta: item.meta, target: item.target }));
+    const actionList: PaletteResult[] = [
+      { key: "action:theme", group: "action", label: dark ? "切换到浅色主题" : "切换到深色主题", meta: "外观", run: () => setPreference(dark ? "light" : "dark") },
+      ...(preference === "system" ? [] : [{ key: "action:theme-system", group: "action" as const, label: "主题跟随系统", meta: "外观", run: () => setPreference("system") }]),
+      ...(session?.scopes || []).filter((scope) => scope.id !== scopeId).map((scope) => ({ key: "action:scope:" + scope.id, group: "action" as const, label: `切换到 ${scope.label}`, meta: "范围", run: () => setScope(scope.id) })),
+      { key: "action:shortcuts", group: "action", label: "查看键盘快捷键", meta: "帮助 · 在页面上按 ?", run: onShowShortcuts },
+    ];
+    const actions = actionList.filter((action) => matches(`${action.label} ${action.meta}`));
+    return (needle ? [...taskResults, ...recentResults, ...catalogResults, ...actions, ...pages] : [...recentResults, ...actions, ...pages]).slice(0, 24);
+  }, [cache, dark, onShowShortcuts, preference, query, recent, scopeId, session?.scopes, setPreference, setScope, tasks.rows]);
+  const choose = (result: PaletteResult) => {
+    if (result.run) { onClose(); result.run(); }
+    else if (result.target) onNavigate(result.target);
+  };
   useEffect(() => setActive(0), [query]);
   const optionId = (index: number) => `command-option-${index}`;
   const trapFocus = (event: React.KeyboardEvent) => {
@@ -391,9 +468,9 @@ function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigat
             if (event.key === "Escape") onClose();
             if (event.key === "ArrowDown") { event.preventDefault(); setActive((value) => Math.min(value + 1, results.length - 1)); }
             if (event.key === "ArrowUp") { event.preventDefault(); setActive((value) => Math.max(value - 1, 0)); }
-            if (event.key === "Enter" && results[active]) onNavigate(results[active].target);
+            if (event.key === "Enter" && results[active]) choose(results[active]);
           }}
-          placeholder="搜索任务、模型与工具，或跳转页面"
+          placeholder="搜索任务、模型与工具，跳转页面或执行操作"
           aria-label="搜索任务或页面"
           className="h-12 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
         />
@@ -403,7 +480,7 @@ function CommandSearch({ onClose, onNavigate }: { onClose: () => void; onNavigat
         {results.length ? results.map((result, index) => {
           const group = paletteGroups.find((item) => item.id === result.group)!;
           const firstOfGroup = index === 0 || results[index - 1].group !== result.group;
-          return <li key={result.key} id={optionId(index)} role="option" aria-selected={index === active} onMouseEnter={() => setActive(index)} onClick={() => onNavigate(result.target)} className={cx("cursor-pointer", firstOfGroup && index > 0 && "mt-1.5 border-t border-line pt-1.5")}>
+          return <li key={result.key} id={optionId(index)} role="option" aria-selected={index === active} onMouseEnter={() => setActive(index)} onClick={() => choose(result)} className={cx("cursor-pointer", firstOfGroup && index > 0 && "mt-1.5 border-t border-line pt-1.5")}>
             {firstOfGroup && <span aria-hidden="true" className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-2xs font-medium text-muted">{group.icon}{group.label}</span>}
             <span className={cx("flex w-full items-center gap-3 rounded-[9px] px-3 py-2.5", index === active && "bg-panel-sunken")}>
               <span className="min-w-0 flex-1">

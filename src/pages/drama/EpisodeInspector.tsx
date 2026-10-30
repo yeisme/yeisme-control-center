@@ -1,13 +1,13 @@
 import { useRef, useState } from "react";
-import { ArrowRight, Clapperboard, Columns3, Copy, RefreshCw } from "../../icons";
+import { ArrowRight, Clapperboard, Columns3, Copy, Plug, RefreshCw } from "../../icons";
 import { useScopedRead } from "../../app/workspace";
 import { InspectorShell } from "../../components/InspectorShell";
 import { OwnerLinkRow } from "../../components/OwnerLinkRow";
 import { Button, CopyRef, CoverageChip, EmptyState, Facts, InlineNotice, Input, Pill, ReadStateView, SkeletonRows, ownerLabel } from "../../components/ui";
 import { api, isRouteUnavailable } from "../../shared/api/control-center-client";
-import type { DramaEpisodeDetail } from "../../shared/drama";
+import { unconnectedReasons, type DramaEpisodeDetail } from "../../shared/drama";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
-import { blockerLabel, currentStage, dramaOwnerNames, dramaStageLabels, nextStepText, railNodeInfo, tasksForEpisode } from "../../shared/read-model/drama";
+import { blockerLabel, currentStage, dramaOwnerNames, dramaStageLabels, isUnconnectedNode, nextStepText, railNodeInfo, tasksForEpisode, type EpisodeOrigin } from "../../shared/read-model/drama";
 import type { TaskSnapshot } from "../../task-observation";
 import { OutlineSection, TaskSection } from "./OutlineSection";
 import { StageRail, railShapeIcons } from "./StageRail";
@@ -15,7 +15,7 @@ import { StageRail, railShapeIcons } from "./StageRail";
 type DetailRead = DramaEpisodeDetail | { route_unavailable: true };
 const sections = [{ id: "overview", label: "概况" }, { id: "chain", label: "阶段链" }, { id: "outline", label: "分镜结构" }, { id: "tasks", label: "生产任务" }, { id: "handoff", label: "交接" }];
 const cacheLabels = { hit: "缓存（最多 45 秒）", miss: "刚读取", refresh_limited: "10 秒内已刷新，沿用结果" } as const;
-const originLabels = { collection: "Auctra 收集库", task: "任务里的剧集引用", manual: "手动指定" } as const;
+const originLabels: Record<EpisodeOrigin, string> = { collection: "Auctra 收集库", task: "任务里的剧集引用", recent: "最近打开过", manual: "按引用打开" };
 const pending = ["生成", "审阅", "交付"];
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
@@ -25,10 +25,16 @@ function Section({ id, title, children }: { id: string; title: string; children:
   </section>;
 }
 
+/** An owner nobody connected reads "not connected"; the coverage words would suggest the owner lacks a contract. */
+function SourceChip({ source }: { source?: { state: string; reason?: string } }) {
+  if (source?.reason && unconnectedReasons.has(source.reason)) return <Pill tone="neutral" icon={<Plug />} title={blockerLabel(source.reason)}>未连接</Pill>;
+  return <CoverageChip state={source?.state || "unknown"} reason={source?.reason && blockerLabel(source.reason)} />;
+}
+
 export function EpisodeInspector({ episode, title, origin, scaenaOverride, onScaenaOverride, tasks, mode, maximized, onModeChange, onMaximize, onClose, onNavigate }: {
   episode: string;
   title: string;
-  origin: "collection" | "task" | "manual";
+  origin: EpisodeOrigin;
   scaenaOverride?: string;
   onScaenaOverride: (value: string) => void;
   scopeLabel: string;
@@ -103,8 +109,8 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
             { label: "Scaena 剧集引用", value: <span className="inline-flex items-center gap-2"><CopyRef value={detail.scaena_episode_ref} label="Scaena 剧集引用" />{detail.scaena_episode_overridden && <Pill size="sm" tone="info">已指定</Pill>}</span> },
             { label: "读取方式", value: cacheLabels[detail.cache] },
             { label: "观察时间", value: <span title={formatFullTime(detail.observed_at)}>{formatRelative(detail.observed_at)}</span> },
-            { label: "Auctra 读取", value: <CoverageChip state={coverage("auctra")?.state || "unknown"} reason={coverage("auctra")?.reason && blockerLabel(coverage("auctra")?.reason)} /> },
-            { label: "Scaena 读取", value: <CoverageChip state={coverage("scaena")?.state || "unknown"} reason={coverage("scaena")?.reason && blockerLabel(coverage("scaena")?.reason)} /> },
+            { label: "Auctra 读取", value: <SourceChip source={coverage("auctra")} /> },
+            { label: "Scaena 读取", value: <SourceChip source={coverage("scaena")} /> },
           ]} />
           {joinHint && <InlineNotice tone="info">Scaena 中没有引用为「{detail.scaena_episode_ref}」的拆解。Scaena 可能用不同的集引用保存这一集（例如 <code>episode:03</code>）；在下面指定后重新读取。这只改变读取，不会写入任何 owner。</InlineNotice>}
           <form className="space-y-1" onSubmit={(event) => { event.preventDefault(); onScaenaOverride(draft.trim()); }}>
@@ -128,7 +134,7 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
                   <Pill tone={info.tone} icon={railShapeIcons[info.shape]}>{info.label}</Pill>
                   <span className="text-body-sm font-medium text-ink">{dramaStageLabels[node.stage]}</span>
                   <span className="text-2xs text-muted">{dramaOwnerNames[node.owner]}</span>
-                  {node.coverage !== "complete" && <CoverageChip state={node.coverage} />}
+                  {node.coverage !== "complete" && !isUnconnectedNode(node) && <CoverageChip state={node.coverage} />}
                 </div>
                 {node.blocker && <p className="mt-1.5 text-2xs text-muted">{blockerLabel(node.blocker)}</p>}
                 {stage && <Facts columns={2} className="mt-2" items={[

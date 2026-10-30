@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { LockKeyhole, Maximize2, Minimize2, Pin, PinOff, X } from "../icons";
-import { cx } from "./ui";
+import { cx, rowButton } from "./ui";
 
 export type InspectorMode = "fixed" | "floating";
 
@@ -27,6 +27,11 @@ interface InspectorShellProps {
   sections: InspectorSection[];
   footer: ReactNode;
   children: ReactNode;
+  /**
+   * Selector of the shown item's list entry. Closing returns focus to the opener while it sits in that entry,
+   * otherwise to the entry's row button, so focus never falls to the page body.
+   */
+  returnFocus?: string;
 }
 
 export function InspectorShell({
@@ -46,11 +51,14 @@ export function InspectorShell({
   sections,
   footer,
   children,
+  returnFocus,
 }: InspectorShellProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const [desktopDock, setDesktopDock] = useState(false);
+  const returnRowRef = useRef<string | undefined>(undefined);
+  // Read synchronously: starting undocked on a wide screen would render one modal frame that steals focus and locks scrolling.
+  const [desktopDock, setDesktopDock] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(min-width: 1280px)").matches === true);
   const floating = mode === "floating";
   const docked = desktopDock && !floating && !maximized;
   const modal = maximized || (!docked && !floating);
@@ -63,9 +71,24 @@ export function InspectorShell({
     return () => media.removeEventListener("change", update);
   }, []);
 
+  useEffect(() => { if (open) returnRowRef.current = returnFocus; }, [open, returnFocus]);
+
   useEffect(() => {
     if (!open) return;
-    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // A click on a row's plain text leaves focus on the body, which is no place to return to.
+    const active = document.activeElement;
+    returnFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    return () => {
+      // However the panel closed (close button, Escape, URL change), focus that fell to the body goes back to the row.
+      requestAnimationFrame(() => {
+        const current = document.activeElement;
+        if (current && current !== document.body && current.isConnected) return;
+        const item = returnRowRef.current ? document.querySelector<HTMLElement>(returnRowRef.current) : null;
+        const opener = returnFocusRef.current?.isConnected ? returnFocusRef.current : null;
+        const target = opener && (!item || item.contains(opener)) ? opener : item?.querySelector<HTMLElement>(rowButton) || opener;
+        target?.focus({ preventScroll: true });
+      });
+    };
   }, [open]);
 
   useEffect(() => {
@@ -94,15 +117,13 @@ export function InspectorShell({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [modal, open]);
 
-  const close = useCallback(() => {
-    onClose();
-    requestAnimationFrame(() => returnFocusRef.current?.focus());
-  }, [onClose]);
+  const close = useCallback(() => onClose(), [onClose]);
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      // A layer above (viewer, menu, sheet) already consumed this Escape; only the topmost surface closes.
+      if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
       if (maximized) onMaximize();
       else close();

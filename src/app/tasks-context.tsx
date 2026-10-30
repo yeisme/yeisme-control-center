@@ -15,6 +15,8 @@ export interface TaskObservation {
   refreshing: boolean;
   /** True when the history lane was not fully paged (page cap); rows are a bounded batch. */
   truncated: boolean;
+  /** True when the latest observation cycle failed as a whole, so the rows come from an earlier cycle. */
+  readFailed: boolean;
   lanes: {
     active: TaskLaneObservation;
     history: TaskLaneObservation;
@@ -28,6 +30,8 @@ export interface TaskLaneObservation {
   status: ReadStatus;
   error: string | null;
   observedAt: string | null;
+  /** The lane's own read failed, so none of its tasks are in the batch (rather than one connection reporting a state). */
+  failed?: boolean;
 }
 
 const TaskContext = createContext<TaskObservation | null>(null);
@@ -63,9 +67,16 @@ async function readLane(scope: string, mode: "active" | "history", signal: Abort
       page: null,
       epoch,
       truncated: false,
-      lane: { status: statusForFailure(errorClass, code, false), error: code, observedAt: null } satisfies TaskLaneObservation,
+      lane: { status: statusForFailure(errorClass, code, false), error: code, observedAt: null, failed: true } satisfies TaskLaneObservation,
     };
   }
+}
+
+type LaneRead = Awaited<ReturnType<typeof readLane>>;
+
+/** Carries a failed lane read out of the observation cache, which stores only reads that returned a page. */
+class LaneFailure {
+  constructor(readonly read: LaneRead) {}
 }
 
 /** One observation cycle for the whole scope; shared by every page so the owner sees one consistent batch. */
@@ -80,6 +91,7 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
     observedAt: null,
     refreshing: false,
     truncated: false,
+    readFailed: false,
     lanes: {
       active: { status: "loading", error: null, observedAt: null },
       history: { status: "loading", error: null, observedAt: null },
@@ -102,6 +114,7 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
       observedAt: null,
       refreshing: false,
       truncated: false,
+      readFailed: false,
       lanes: {
         active: { status: "loading", error: null, observedAt: null },
         history: { status: "loading", error: null, observedAt: null },
@@ -117,17 +130,24 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
     const cycle = async () => {
       setState((current) => ({ ...current, refreshing: true }));
       try {
-        const [activeRead, historyRead, observed] = await Promise.all([
-          cache.read(`tasks:${scopeId}:active`, () => readLane(scopeId, "active", controller.signal, 20), 3_000, 15_000),
-          cache.read(`tasks:${scopeId}:history`, () => readLane(scopeId, "history", controller.signal, 8), 30_000, 300_000),
+        // A failed lane read is not cached, so the next cycle or 重新读取 asks again instead of reusing the failure.
+        const lane = (mode: "active" | "history", maxPages: number, freshMs: number, staleMs: number) => cache.read(`tasks:${scopeId}:${mode}`, async () => {
+          const read = await readLane(scopeId, mode, controller.signal, maxPages);
+          if (!read.page) throw new LaneFailure(read);
+          return read;
+        }, freshMs, staleMs).then((cached) => cached.data, (error: unknown) => {
+          if (error instanceof LaneFailure) return error.read;
+          throw error;
+        });
+        const [active, history, observed] = await Promise.all([
+          lane("active", 20, 3_000, 15_000),
+          lane("history", 8, 30_000, 300_000),
           cache.read(`connections:${scopeId}`, () => api.connections(scopeId, controller.signal), 15_000, 60_000).then((v) => v.data).catch((error: unknown) => {
             if (isAbort(error)) throw error;
             return null;
           }),
         ]);
         if (controller.signal.aborted || identityRef.current !== requested) return;
-        const active = activeRead.data;
-        const history = historyRead.data;
         if (active.lane.status === "login_required" || history.lane.status === "login_required") {
           expire();
           return;
@@ -145,7 +165,10 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
             : active.lane.status === "empty" && history.lane.status === "empty"
               ? "empty"
               : (active.lane.status !== "empty" ? active.lane.status : history.lane.status);
-        setState({
+        // Both lane reads failed in transit (not refused): keep the last batch and mark it stale instead of emptying the
+        // list. Refusals (forbidden, missing contract) still clear it, so revoked access never keeps showing old tasks.
+        const transportFailed = !active.page && !history.page && active.lane.status === "unavailable" && history.lane.status === "unavailable";
+        setState((current) => transportFailed && current.rows.length ? { ...current, status: "stale", error: laneError, refreshing: false, readFailed: true } : {
           status,
           error: laneError,
           rows: combined.rows.sort(byRecency),
@@ -153,6 +176,7 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
           observedAt: new Date().toISOString(),
           refreshing: false,
           truncated: active.truncated || history.truncated,
+          readFailed: false,
           lanes: {
             active: { ...active.lane, observedAt: active.lane.observedAt || new Date().toISOString() },
             history: { ...history.lane, observedAt: history.lane.observedAt || new Date().toISOString() },
@@ -169,6 +193,7 @@ export function TaskObservationProvider({ children }: { children: ReactNode }) {
           status: statusForFailure(errorClass, errorCode(error), current.rows.length > 0 || current.observedAt !== null),
           error: errorCode(error),
           refreshing: false,
+          readFailed: true,
         }));
         schedule(false);
       }

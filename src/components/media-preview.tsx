@@ -1,15 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  LoaderCircle,
-  Maximize2,
-  Minimize2,
-  X,
-} from "../icons";
 import { api, errorCode, type ArtifactGrant } from "../shared/api/control-center-client";
 import { useWorkspace } from "../app/workspace";
-import { Button, KindBadge, useToast } from "./ui";
+import { useToast } from "./ui";
 import type { MediaKind } from "./ui/Kind";
-import { resultAction, resultMeta } from "../shared/read-model/tasks";
+import { resultAction } from "../shared/read-model/tasks";
 import type { TaskArtifact, TaskSnapshot } from "../task-observation";
 import { mediaCacheKey, mediaSessionCache } from "../app/media-cache";
 import { mediaFilename } from "../shared/media-filename";
@@ -30,6 +24,8 @@ export interface PreviewOptions {
 
 export type PreviewStatus = "closed" | "requesting" | "ready" | "blocked" | "error";
 export type MediaTransport = "streaming" | "cached" | "blob";
+
+const closedPreview: MediaPreviewState = { status: "closed", target: null, grant: null, sourceUrl: null, transport: null, error: null, autoplay: false, pendingDownload: false };
 
 export interface MediaPreviewState {
   status: PreviewStatus;
@@ -82,10 +78,12 @@ export function formatSeconds(value: number) {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
+export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlParam }: {
   previewKey: string | null;
   resolve: (key: string) => PreviewTarget | null;
   onPreviewKeyChange: (key: string | null, history: "push" | "replace") => void;
+  /** The query parameter that carries the preview in the URL; browser Back and Forward then close the viewer at once. */
+  urlParam?: string;
 }): MediaPreviewController {
   const { scopeId, session, generation } = useWorkspace();
   const notify = useToast();
@@ -196,13 +194,33 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
   }, [cacheIdentity, fetchBlob, identity, previewKey, target, scopeId, session, generation, retryNonce]);
 
   const open = useCallback((next: PreviewTarget, options: PreviewOptions) => {
-    setState((current) => ({ ...current, target: next, autoplay: options.autoplay === true, error: null }));
+    // Switching to another result drops the previous source at once, so no surface paints old media under the new name.
+    setState((current) => current.target?.key === next.key
+      ? { ...current, target: next, autoplay: options.autoplay === true, error: null }
+      : { status: "requesting", target: next, grant: null, sourceUrl: null, transport: null, error: null, autoplay: options.autoplay === true, pendingDownload: false });
     if (options.syncQuery !== false) onPreviewKeyChange(next.key, options.history || "push");
   }, [onPreviewKeyChange]);
 
   const close = useCallback(() => {
+    // Close at once, as `open` opens at once: the URL change is a transition that may commit later, and if the opening
+    // URL never committed, the closing one would not read as a change at all.
+    setState((current) => current.status === "closed" ? current : closedPreview);
     onPreviewKeyChange(null, "replace");
   }, [onPreviewKeyChange]);
+
+  // For the same reason a Back that returns to the last committed URL leaves `previewKey` unchanged, so the browser's
+  // own history event decides: once the URL no longer carries the preview, the viewer closes.
+  useEffect(() => {
+    if (!urlParam) return;
+    const follow = () => {
+      const hash = window.location.hash;
+      const index = hash.indexOf("?");
+      if (new URLSearchParams(index >= 0 ? hash.slice(index + 1) : "").get(urlParam)) return;
+      setState((current) => current.status === "closed" ? current : closedPreview);
+    };
+    window.addEventListener("popstate", follow);
+    return () => window.removeEventListener("popstate", follow);
+  }, [urlParam]);
 
   const retry = useCallback(() => {
     if (previewKey) setRetryNonce((value) => value + 1);
@@ -228,11 +246,15 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
       const grant = await api.artifactAccess(scopeId, next.task.task_key, next.result.ref, "download", session.csrf);
       const key = mediaCacheKey(scopeId, session.epoch, next.task.task_key || next.task.locator.task_ref, next.result.ref + "|" + (next.result.version || next.task.revision), grant.mime || next.result.mime);
       const cached = mediaSessionCache.get(key);
+      const url = cached?.url || grant.url;
+      if (!url) throw new Error("media_address_denied");
       const anchor = document.createElement("a");
-      anchor.href = cached?.url || grant.url;
+      anchor.href = url;
       anchor.download = grant.filename || mediaFilename(next.result.name, grant.mime || next.result.mime);
       anchor.rel = "noopener";
+      document.body.appendChild(anchor);
       anchor.click();
+      anchor.remove();
       notify("下载已开始；结果状态不会因此改变。", "success");
     } catch (failure) {
       const code = errorCode(failure);
@@ -253,45 +275,4 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange }: {
     reportError,
     isActive: (key: string) => state.target?.key === key && state.status === "ready",
   };
-}
-
-export function InlineMediaPreview({ controller, className = "" }: { controller: MediaPreviewController; className?: string }) {
-  const { status, target, grant, sourceUrl, autoplay } = controller;
-  const { fallback, reportError } = controller;
-  const [imageExpanded, setImageExpanded] = useState(false);
-  const [zoom, setZoom] = useState(1);
-  useEffect(() => { setImageExpanded(false); setZoom(1); }, [target?.key]);
-  if (!target || status === "closed") return null;
-
-  const mime = grant?.mime || target.result.mime || "";
-  const isImage = target.kind === "image" || mime.startsWith("image/");
-  const isVideo = target.kind === "video" || mime.startsWith("video/");
-  const isAudio = target.kind === "audio" || mime.startsWith("audio/");
-  const stageClass = `inline-media-preview ${className}`.trim();
-  const close = <button type="button" aria-label="关闭预览" title="关闭预览" onClick={controller.close} className="absolute right-2 top-2 z-10 grid size-7 place-items-center rounded-[7px] bg-panel/90 text-muted shadow-panel hover:text-ink"><X className="size-3.5" /></button>;
-  const imageClose = <button type="button" aria-label="关闭预览" title="关闭预览" onClick={controller.close} className="grid size-7 place-items-center rounded-[7px] bg-panel/90 text-muted shadow-panel hover:text-ink"><X className="size-3.5" /></button>;
-  const retry = <Button size="sm" variant="ghost" className="mt-3" onClick={controller.retry}>重新申请</Button>;
-
-  if (status === "requesting") return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken`} data-inline-media-preview="requesting">{close}<div className="space-y-2 text-center"><LoaderCircle className="mx-auto size-5 motion-safe:animate-spin text-muted" /><p className="text-2xs text-muted">正在申请预览句柄</p></div></div>;
-  if (status === "blocked" || status === "error") return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken p-5 text-center`} data-inline-media-preview={status}>{close}<div><KindBadge kind={target.kind} size="lg" className="mx-auto opacity-70" /><p className="mt-3 text-[13px] font-medium text-ink">内容暂不可预览</p><p className="mt-1 text-2xs text-muted">{grantErrorLabel(controller.error || "media_unavailable")}</p>{retry}</div></div>;
-  if (status !== "ready" || !sourceUrl) return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken`} data-inline-media-preview="empty">{close}<KindBadge kind={target.kind} size="lg" /></div>;
-
-  if (isImage) return <div className={`${stageClass} relative grid place-items-center overflow-auto rounded-[12px] border border-line bg-sidebar ${imageExpanded ? "min-h-[280px] max-h-[min(68dvh,560px)]" : "aspect-[16/10] max-h-[260px]"}`} data-inline-media-preview="image" data-inline-media-expanded={imageExpanded ? "true" : undefined}>
-    <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
-      <Button size="sm" variant="secondary" aria-label="缩小图片" disabled={zoom <= .5} onClick={() => setZoom((z) => Math.max(.5, z / 1.25))}>−</Button>
-      <Button size="sm" variant="secondary" aria-label="适应窗口" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</Button>
-      <Button size="sm" variant="secondary" aria-label="放大图片" disabled={zoom >= 4} onClick={() => setZoom((z) => Math.min(4, z * 1.25))}>＋</Button>
-      <button type="button" aria-label={imageExpanded ? "收起全图" : "查看全图"} title={imageExpanded ? "收起全图" : "查看全图"} onClick={() => setImageExpanded((value) => !value)} className="grid size-7 place-items-center rounded-[7px] bg-panel/90 text-muted shadow-panel hover:text-ink">{imageExpanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}</button>
-      {imageClose}
-    </div>
-    <img style={{ transform: `scale(${zoom})`, transformOrigin: "center" }} src={sourceUrl} alt={target.result.name || "结果预览"} className={imageExpanded ? "max-h-[min(64dvh,520px)] max-w-full object-contain" : "h-full w-full object-contain"} onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} />
-  </div>;
-  if (isVideo) return <div className={`${stageClass} relative flex max-h-[260px] items-center justify-center overflow-hidden rounded-[12px] border border-line bg-black`} data-inline-media-preview="video">{close}<video src={sourceUrl} controls playsInline preload="metadata" autoPlay={autoplay} className="max-h-[260px] w-full object-contain" onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} /></div>;
-  if (isAudio) return <div className={`${stageClass} relative rounded-[12px] border border-line bg-kind-audio-soft p-3`} data-inline-media-preview="audio">{close}<div className="mb-2 flex items-center gap-2"><KindBadge kind="audio" size="sm" /><div className="min-w-0"><p className="truncate text-[13px] font-medium text-ink">{target.result.name || "未命名音频"}</p><p className="truncate text-2xs text-muted">{resultMeta(target.result).join(" · ") || "音频预览"}{controller.transport === "cached" ? " · 会话缓存" : controller.transport === "blob" ? " · 已下载" : " · 动态流"}</p></div></div><audio src={sourceUrl} controls preload="metadata" className="w-full" onError={() => void fallback().catch((error) => reportError(error instanceof Error ? error.message : "media_unavailable"))} /></div>;
-  return <div className={`${stageClass} relative grid aspect-[16/10] max-h-[260px] place-items-center rounded-[12px] border border-line bg-panel-sunken`} data-inline-media-preview="unsupported">{close}<KindBadge kind={target.kind} size="lg" /></div>;
-}
-
-/** Compatibility wrapper; media is now rendered by the active Inspector surface. */
-export function MediaPreviewLayer({ controller }: { controller: MediaPreviewController; mode?: "overlay" | "inline" }) {
-  return <InlineMediaPreview controller={controller} />;
 }

@@ -2,6 +2,9 @@
 @source "../";
 @import "./tokens.css";
 @import "./folder-art.css";
+@import "./audio.css";
+@import "./guide.css";
+@import "./viewer.css";
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
@@ -158,3 +161,23 @@
   *, *::before, *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 
+
+/* A notice stack is one line tall on every width: the first rendered notice folds to one clipped line, its actions
+   ([data-notice-actions]) stay on that line, and the toggle sits at the line's end. The notice keeps its own text, so
+   nothing is duplicated for assistive tech or text lookups. These rules live in the utilities layer because the
+   notice's own utility classes would beat the components layer. */
+@layer components {
+  .notice-stack-toggle { font-size: var(--text-2xs); font-weight: 500; color: var(--ink-soft); white-space: nowrap; }
+  .notice-stack-toggle:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+}
+@layer utilities {
+  .notice-stack { position: relative; }
+  .notice-stack[data-folded] > [data-notice] { flex-wrap: nowrap; align-items: center; margin-block: 0; }
+  .notice-stack[data-folded] > [data-notice] ~ [data-notice] { display: none; }
+  .notice-stack[data-folded][data-toggle] > [data-notice] { padding-right: 72px; }
+  .notice-stack[data-folded] > [data-notice] > * { margin-block: 0; }
+  .notice-stack[data-folded] > [data-notice] > :not(:first-child, [data-notice-actions]) { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .notice-stack[data-folded] > [data-notice] > :not(:first-child, [data-notice-actions]) :not(button, a) { display: inline; }
+  .notice-stack[data-folded] > [data-notice] > :not(:first-child, [data-notice-actions]) :is(button, a) { display: none; }
+  .notice-stack[data-folded] > .notice-stack-toggle { position: absolute; inset-block: 0; right: 0; margin: 0; padding: 0 12px; }
+}

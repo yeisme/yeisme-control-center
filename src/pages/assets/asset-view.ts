@@ -11,6 +11,47 @@ export function parseAssetInspectorMode(value: string | null | undefined): Asset
   return value === "floating" ? "floating" : "fixed";
 }
 
+export type AssetCatalog = "owner" | "shared";
+
+export function parseAssetCatalog(value: string | null | undefined): AssetCatalog {
+  return value === "shared" ? "shared" : "owner";
+}
+
+/** Inclusive local-day window over an ISO timestamp. Missing time never matches a bounded window. */
+export function matchesAssetDate(value: string | null | undefined, from: string, to: string) {
+  if (!from && !to) return true;
+  if (!value || !Number.isFinite(Date.parse(value))) return false;
+  const date = new Date(value);
+  const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return (!from || day >= from) && (!to || day <= to);
+}
+
+export interface AssetListFilters {
+  kind: string;
+  owner: string;
+  project: string;
+  access: string;
+  result: string;
+  task: string;
+  from: string;
+  to: string;
+  text: string;
+}
+
+/** Loaded-batch filter only. A missing timestamp does not match a date bound. */
+export function matchesAssetFilters(entry: { kind: string; result: { name?: string | null; state?: string | null }; task: { title: string; state: string; updated_at?: string | null; created_at?: string | null; locator: { owner: string; project: string; task_ref: string } } }, filters: AssetListFilters, canPreview: boolean) {
+  if (filters.kind && filters.kind !== "all" && entry.kind !== filters.kind) return false;
+  if (filters.owner && entry.task.locator.owner !== filters.owner) return false;
+  if (filters.project && entry.task.locator.project !== filters.project) return false;
+  if (filters.access === "available" && !canPreview) return false;
+  if (filters.access === "locked" && canPreview) return false;
+  if (filters.result && (entry.result.state || "") !== filters.result) return false;
+  if (filters.task && entry.task.state !== filters.task) return false;
+  if (!matchesAssetDate(entry.task.updated_at || entry.task.created_at, filters.from, filters.to)) return false;
+  const needle = filters.text.trim().toLocaleLowerCase();
+  return !needle || `${entry.result.name || ""} ${entry.task.title} ${entry.task.locator.task_ref} ${entry.task.locator.project}`.toLocaleLowerCase().includes(needle);
+}
+
 export function assetViewLabel(value: AssetViewMode) {
   if (value === "list") return "详情列表";
   if (value === "compact") return "紧凑列表";

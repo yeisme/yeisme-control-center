@@ -69,7 +69,7 @@ export function CoverageChip({ state, owner, reason, className }: { state: Cover
   const label = coverageLabels[state as CoverageState] || state;
   const icon = state === "forbidden" ? <LockKeyhole /> : state === "needs_contract" ? <Plug /> : state === "unavailable" ? <CircleSlash /> : state === "complete" ? <CheckCircle2 /> : <CircleDashed />;
   return <Pill tone={coverageTone(state)} icon={icon} className={className} title={reason ? `${owner ? ownerLabel(owner) + " · " : ""}${reason}` : undefined}>
-    {owner ? <><span className="font-semibold">{ownerLabel(owner)}</span><span className="opacity-80"> · {label}</span></> : label}
+    {owner ? <><span className="font-semibold">{ownerLabel(owner)}</span><span className="font-normal"> · {label}</span></> : label}
   </Pill>;
 }
 

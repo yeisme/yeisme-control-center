@@ -5,27 +5,41 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Copy,
   Eye,
+  FolderKanban,
   Images,
   Info,
   LayoutGrid,
   List,
+  ListTodo,
+  LoaderCircle,
   LockKeyhole,
+  Maximize2,
+  PanelRightOpen,
+  Pause,
+  Play,
+  SlidersHorizontal,
   Table2,
 } from "../../icons";
 import { useTasks } from "../../app/tasks-context";
+import { recentTarget, useRememberRecent } from "../../app/recent";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
 import {
+  ActionsContextMenu,
   Button,
-  Field,
   DataTable,
+  DetailSheet,
   Dot,
   EmptyState,
   Facts,
+  Field,
+  Input,
   IconButton,
   InlineNotice,
   KindBadge,
   MetricStrip,
+  NoticeStack,
   PageToolbar,
   Panel,
   Pill,
@@ -33,20 +47,27 @@ import {
   SearchField,
   Select,
   SkeletonBlock,
-  StaleNotice,
   TaskStatePill,
   ToggleGroup,
   Tooltip,
   Unknown,
   cx,
   kindLabel,
+  mainColumn,
+  itemSelector,
+  moveBetweenRows,
+  narrowMainColumn,
   ownerLabel,
   type Column,
+  type ItemAction,
   type MediaKind,
   type Metric,
 } from "../../components/ui";
+import { linkActions, useCopy } from "../../app/item-actions";
+import { SourceStatusLine } from "../../components/SourceStatusLine";
 import { ResultViewer } from "../../components/ResultViewer";
-import { InlineMediaPreview, grantErrorLabel, useMediaPreview, type MediaPreviewController } from "../../components/media-preview";
+import { useMediaPreview, type MediaPreviewController } from "../../components/media-preview";
+import { MediaViewer, viewerOpenLabel, visualSlides } from "../../components/MediaViewer";
 import { collectResults, resultAction, type ResultEntry } from "../../shared/read-model/tasks";
 import { formatRelative } from "../../shared/read-model/format";
 import { ProcessTimeline } from "../../components/ProcessTimeline";
@@ -54,6 +75,9 @@ import {
   assetSpec,
   assetViewLabel,
   exportStatusLabel,
+  matchesAssetDate,
+  matchesAssetFilters,
+  parseAssetCatalog,
   parseAssetInspectorMode,
   parseAssetViewMode,
   resultStateLabel,
@@ -66,6 +90,10 @@ import { InspectorShell } from "../../components/InspectorShell";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { api } from "../../shared/api/control-center-client";
 import { ProjectFiles } from "./ProjectFiles";
+import { AudioQueue, audioTrackFrom, useAudioPlayer, useAudioQueue, useAudioState, useTrackPhase } from "../../app/audio-player";
+import { AudioPlayButton, AudioStage } from "../../components/AudioDock";
+import { taskStateLabels } from "../../task-observation";
+import { useOverlayParams } from "../../app/overlay-history";
 
 type KindFilter = "all" | MediaKind;
 type AccessFilter = "all" | "available" | "locked";
@@ -73,6 +101,7 @@ type PreviewAction = ReturnType<typeof resultAction>;
 
 const viewPreferenceKey = "yeisme.control.assets.view";
 const inspectorPreferenceKey = "yeisme.control.assets.inspector-mode";
+const assetOverlays = ["result", "preview"] as const;
 const mediaKinds: MediaKind[] = ["image", "video", "audio", "text"];
 const kindOptions: { id: KindFilter; label: string }[] = [
   { id: "all", label: "全部" },
@@ -89,6 +118,8 @@ const viewOptions: { id: AssetViewMode; label: ReactNode }[] = [
   { id: "compact", label: <ViewLabel icon={<Table2 className="size-3.5" />} text={assetViewLabel("compact")} /> },
 ];
 
+const assetHref = (entry: ResultEntry) => `/assets?result=${encodeURIComponent(entry.key)}`;
+
 function readPreference<T>(key: string, fallback: T, parse: (value: string | null) => T) {
   if (typeof window === "undefined") return fallback;
   return parse(window.localStorage.getItem(key));
@@ -96,12 +127,26 @@ function readPreference<T>(key: string, fallback: T, parse: (value: string | nul
 
 export default function AssetsPage() {
   const { scopeId, setScope } = useWorkspace();
+  const [params, setParams] = useSearchParams();
   const projects = useScopedRead((_s, signal) => api.sharedProjects({}, signal));
-  if (projects.data?.rows.length) {
-    const project = projects.data.rows.find((p) => p.id === scopeId);
-    return <div className="page-enter space-y-4" data-page="assets"><PageToolbar summary="共享项目成果 · 自动归组与文件夹整理" /><Field label="项目"><Select value={project?.id || ""} onChange={(e) => setScope(e.target.value)}><option value="" disabled>选择项目</option>{projects.data.rows.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>{project && <ProjectFiles project={project} />}</div>;
-  }
-  return <OwnerAssetsPage />;
+  const catalog = parseAssetCatalog(params.get("catalog"));
+  const shared = projects.data?.rows.find((project) => project.id === (params.get("sharedProject") || scopeId));
+  const selectCatalog = (next: "owner" | "shared") => setParams((current) => {
+    const query = new URLSearchParams(current);
+    for (const key of ["kind", "owner", "project", "resultState", "taskState", "access", "from", "to", "q", "state", "folder", "batch", "cursor", "source_cursor"]) query.delete(key);
+    if (next === "owner") query.delete("catalog");
+    else query.set("catalog", "shared");
+    return query;
+  }, { replace: true });
+  return <div className="space-y-4">
+    {!!projects.data?.rows.length && <ToggleGroup label="资源目录" value={catalog} onChange={selectCatalog} options={[{ id: "owner", label: "owner 资源" }, { id: "shared", label: "共享项目成果" }]} />}
+    {catalog === "shared" ? <ReadStateView status={projects.status} error={projects.error} onRetry={projects.reload} skeleton={<SkeletonBlock className="h-24 rounded-card" />}>
+      {shared ? <section className="page-enter space-y-4" data-page="shared-assets" aria-label="共享项目成果">
+      <PageToolbar summary="共享项目成果 · 按当前项目授权查看，不会替换 owner 资源" actions={<Select aria-label="共享项目" value={shared.id} onChange={(event) => { setScope(event.target.value); setParams((current) => { const query = new URLSearchParams(current); query.set("sharedProject", event.target.value); return query; }, { replace: true }); }}>{projects.data?.rows.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</Select>} />
+      <ProjectFiles project={shared} />
+    </section> : <EmptyState icon={<Images />} title="共享项目不可用" body="当前链接没有对应的共享项目，未回退到其他项目。" />}
+    </ReadStateView> : <OwnerAssetsPage />}
+  </div>;
 }
 function OwnerAssetsPage() {
   const tasks = useTasks();
@@ -109,6 +154,11 @@ function OwnerAssetsPage() {
   const [params, setParams] = useSearchParams();
   const kind = (mediaKinds.includes((params.get("kind") || "") as MediaKind) ? params.get("kind") : "all") as KindFilter;
   const owner = params.get("owner") || "";
+  const project = params.get("project") || "";
+  const resultState = params.get("resultState") || "";
+  const taskState = params.get("taskState") || "";
+  const from = params.get("from") || "";
+  const to = params.get("to") || "";
   const access = (["available", "locked"].includes(params.get("access") || "") ? params.get("access") : "all") as AccessFilter;
   const [query, setQuery] = useState("");
   const [storedView, setStoredView] = useState<AssetViewMode>(() => readPreference(viewPreferenceKey, "gallery", parseAssetViewMode));
@@ -117,29 +167,37 @@ function OwnerAssetsPage() {
   const [maximized, setMaximized] = useState(false);
   const selectedKey = params.get("result");
 
+  const [, writeOverlay] = useOverlayParams(assetOverlays);
   const update = useCallback((patch: Record<string, string | null>, history: "push" | "replace" = "replace") => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(patch)) {
       if (value && value !== "all") next.set(key, value);
       else next.delete(key);
     }
-    setParams(next, { replace: history === "replace" });
-  }, [params, setParams]);
+    writeOverlay(next, history);
+  }, [params, writeOverlay]);
 
   const all = useMemo(() => collectResults(tasks.rows), [tasks.rows]);
   const resolvePreview = useCallback((key: string) => all.find((entry) => entry.key === key) || null, [all]);
-  const previewKey = params.get("preview");
+  // Audio never previews in the Inspector; it plays in the global player, so an audio preview key is ignored here.
+  const requestedPreview = params.get("preview");
+  const previewKey = requestedPreview && resolvePreview(requestedPreview)?.kind === "audio" ? null : requestedPreview;
+  const player = useAudioPlayer();
   const setPreviewKey = useCallback((key: string | null, history: "push" | "replace") => update({ preview: key }, history), [update]);
-  const preview = useMediaPreview({ previewKey, resolve: resolvePreview, onPreviewKeyChange: setPreviewKey });
+  const preview = useMediaPreview({ previewKey, resolve: resolvePreview, onPreviewKeyChange: setPreviewKey, urlParam: "preview" });
   const visible = useMemo(() => all.filter((entry) => {
     if (kind !== "all" && entry.kind !== kind) return false;
     if (owner && entry.task.locator.owner !== owner) return false;
+    if (project && entry.task.locator.project !== project) return false;
+    if (resultState && entry.result.state !== resultState) return false;
+    if (taskState && entry.task.state !== taskState) return false;
+    if (!matchesAssetDate(entry.task.updated_at || entry.task.created_at, from, to)) return false;
     const canPreview = resultAction(entry.task, "preview").enabled;
     if (access === "available" && !canPreview) return false;
     if (access === "locked" && canPreview) return false;
     const needle = query.trim().toLocaleLowerCase();
     return !needle || `${entry.result.name} ${entry.task.title} ${entry.task.locator.task_ref} ${entry.task.locator.project}`.toLocaleLowerCase().includes(needle);
-  }), [access, all, kind, owner, query]);
+  }), [access, all, from, kind, owner, project, query, resultState, taskState, to]);
   const counts = useMemo(() => ({
     all: all.length,
     image: all.filter((entry) => entry.kind === "image").length,
@@ -148,9 +206,13 @@ function OwnerAssetsPage() {
     text: all.filter((entry) => entry.kind === "text").length,
   }), [all]);
   const owners = [...new Set(all.map((entry) => entry.task.locator.owner))];
+  const projects = [...new Set(all.map((entry) => entry.task.locator.project))];
+  const resultStates = [...new Set(all.map((entry) => entry.result.state).filter(Boolean))];
+  const taskStates = [...new Set(all.map((entry) => entry.task.state))];
   const previewable = useMemo(() => all.filter((entry) => resultAction(entry.task, "preview").enabled).length, [all]);
   const locked = all.length - previewable;
   const selected = all.find((entry) => entry.key === selectedKey) || null;
+  useRememberRecent(selected ? { key: `result:${selected.key}`, kind: "result", label: selected.result.name || "未命名结果", meta: `${ownerLabel(selected.task.locator.owner)} · ${kindLabel(selected.kind)}`, target: recentTarget("/assets", params) } : null);
   const selectedIndex = selected ? visible.findIndex((entry) => entry.key === selected.key) : -1;
 
   const setView = (next: AssetViewMode) => {
@@ -163,14 +225,41 @@ function OwnerAssetsPage() {
     update({ result: entry.key, preview: null }, history);
   }, [update]);
 
+  // Playing from the library queues every playable audio result in the current filter order.
+  const audioQueue = useMemo(() => visible.filter((entry) => entry.kind === "audio" && resultAction(entry.task, "preview").enabled).map((entry) => audioTrackFrom(entry, assetHref(entry))), [visible]);
   const openPreview = useCallback((entry: ResultEntry) => {
     if (!resultAction(entry.task, "preview").enabled) {
       openDetails(entry);
       return;
     }
-    update({ result: entry.key }, "push");
-    preview.open(entry, { source: "detail-sheet", autoplay: entry.kind === "video", history: "push" });
-  }, [openDetails, preview, update]);
+    if (entry.kind === "audio") {
+      player.play(audioTrackFrom(entry, assetHref(entry)), audioQueue);
+      return;
+    }
+    // One URL write: the viewer opens on `preview` alone, so the inspector is not forced open behind it.
+    preview.open(entry, { source: "asset-card", autoplay: true, history: "push" });
+  }, [audioQueue, openDetails, player, preview]);
+
+  const copy = useCopy();
+  // One list for the card's and the row's context menu.
+  const assetActions = useCallback((entry: ResultEntry): ItemAction[] => [
+    { id: "details", label: "查看详情", icon: <PanelRightOpen />, group: "open", run: () => openDetails(entry) },
+    ...(resultAction(entry.task, "preview").enabled ? [{ id: "preview", label: entry.kind === "audio" ? "播放" : "预览", icon: entry.kind === "audio" ? <Play /> : <Eye />, group: "open", run: () => openPreview(entry) }] : []),
+    { id: "task", label: "查看来源任务", icon: <ListTodo />, group: "open", run: () => navigate(`/tasks?task=${encodeURIComponent(entry.task.task_key || "")}`) },
+    { id: "project", label: "查看所属项目", icon: <FolderKanban />, group: "open", run: () => navigate(`/projects?catalog=owner&project=${encodeURIComponent(`${entry.task.locator.owner}:${entry.task.locator.project}`)}`) },
+    ...linkActions(assetHref(entry), copy),
+    { id: "copy-ref", label: "复制资源引用", icon: <Copy />, group: "link", run: () => void copy(entry.result.ref, "资源引用") },
+  ], [copy, navigate, openDetails, openPreview]);
+
+  const slides = useMemo(() => visualSlides(visible), [visible]);
+  const navigateViewer = useCallback((key: string) => {
+    const entry = resolvePreview(key);
+    if (!entry) return;
+    preview.open(entry, { source: "asset-card", autoplay: true, syncQuery: false });
+    // An open inspector follows the viewer, so closing the viewer shows the last item looked at.
+    update({ preview: key, ...(selectedKey ? { result: key } : {}) }, "replace");
+  }, [preview, resolvePreview, selectedKey, update]);
+  const showViewerDetails = useCallback((key: string) => update({ result: key, preview: null }, "replace"), [update]);
 
   const closeInspector = useCallback(() => {
     update({ result: null, preview: null }, "replace");
@@ -202,9 +291,46 @@ function OwnerAssetsPage() {
     { label: "未授权", value: locked, tone: locked > 0 ? "warning" as const : "neutral" as const },
   ];
 
-  return <div className={cx("page-enter space-y-5", selected && inspectorMode === "fixed" && !maximized && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="assets">
+  const [filterDrawer, setFilterDrawer] = useState(false);
+  const activeConditions = [owner, project, resultState, taskState, access !== "all" ? access : "", from, to].filter(Boolean).length;
+  // One set of conditions, inline on wide screens and stacked with labels in the phone drawer.
+  const conditionFields = (stacked: boolean) => {
+    const field = (label: string, control: ReactNode) => stacked ? <Field label={label}>{control}</Field> : control;
+    return <>
+      {field("来源", <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value || null })} className={stacked ? undefined : "w-32"}>
+        <option value="">全部来源</option>
+        {owners.map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
+      </Select>)}
+      {field("项目", <Select aria-label="项目" value={project} onChange={(event) => update({ project: event.target.value || null })} className={stacked ? undefined : "w-40"}>
+        <option value="">全部项目</option>
+        {projects.map((item) => <option key={item} value={item}>{item}</option>)}
+      </Select>)}
+      {field("结果状态", <Select aria-label="结果状态" value={resultState} onChange={(event) => update({ resultState: event.target.value || null })} className={stacked ? undefined : "w-32"}>
+        <option value="">全部结果</option>
+        {resultStates.map((item) => <option key={item} value={item}>{resultStateLabel(item)?.label || item}</option>)}
+      </Select>)}
+      {field("任务状态", <Select aria-label="任务状态" value={taskState} onChange={(event) => update({ taskState: event.target.value || null })} className={stacked ? undefined : "w-32"}>
+        <option value="">全部任务</option>
+        {taskStates.map((item) => <option key={item} value={item}>{taskStateLabels[item] || item}</option>)}
+      </Select>)}
+      {field("内容权限", <Select aria-label="内容权限" value={access} onChange={(event) => update({ access: event.target.value })} className={stacked ? undefined : "w-36"}>
+        <option value="all">全部权限</option>
+        <option value="available">可预览</option>
+        <option value="locked">未授权</option>
+      </Select>)}
+      {stacked ? <div className="grid grid-cols-2 gap-3">
+        <Field label="开始日期"><Input type="date" value={from} onChange={(event) => update({ from: event.target.value || null })} /></Field>
+        <Field label="结束日期"><Input type="date" min={from} value={to} onChange={(event) => update({ to: event.target.value || null })} /></Field>
+      </div> : <>
+        <label className="text-2xs text-muted">从<input aria-label="开始日期" type="date" value={from} onChange={(event) => update({ from: event.target.value || null })} className="ml-1 rounded-control border border-line bg-panel px-2 py-1 text-body-sm" /></label>
+        <label className="text-2xs text-muted">到<input aria-label="结束日期" type="date" min={from} value={to} onChange={(event) => update({ to: event.target.value || null })} className="ml-1 rounded-control border border-line bg-panel px-2 py-1 text-body-sm" /></label>
+      </>}
+    </>;
+  };
+  return <AudioQueue tracks={audioQueue}><div className={cx("page-enter space-y-5", selected && inspectorMode === "fixed" && !maximized && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="assets">
     <h1 className="sr-only">资源库</h1>
     <PageToolbar
+      foldMetrics
       summary="浏览 owner 任务产出的结果；选择资源查看来源、权限与生产过程。预览和播放只在点击后才读取内容。"
       metrics={loading ? <SkeletonBlock className="h-[50px] w-80 max-w-full rounded-control" /> : all.length > 0 ? <MetricStrip label="资源概况" items={metrics} /> : undefined}
       meta={!loading && (tasks.observedAt || tasks.truncated) ? <>
@@ -213,26 +339,20 @@ function OwnerAssetsPage() {
       </> : undefined}
       actions={<ToggleGroup<AssetViewMode> label="资源视图" value={view} onChange={setView} options={viewOptions} />}
     />
-    <StaleNotice status={tasks.status} error={tasks.error} observedAt={tasks.observedAt} onRetry={tasks.refresh} />
+    <NoticeStack notices={[<SourceStatusLine key="source" noun="资源库" />]} />
 
     <Panel bodyClassName="p-0">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
         <ToggleGroup<KindFilter> label="类型" value={kind} onChange={(value) => update({ kind: value })} options={kindOptions} />
-        <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value || null })} className="w-32">
-          <option value="">全部来源</option>
-          {owners.map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
-        </Select>
-        <Select aria-label="内容权限" value={access} onChange={(event) => update({ access: event.target.value })} className="w-36">
-          <option value="all">全部权限</option>
-          <option value="available">可预览</option>
-          <option value="locked">未授权</option>
-        </Select>
-        <SearchField value={query} onChange={setQuery} placeholder="文件、结果或任务名称" label="搜索资源" className="ml-auto w-full sm:w-64" />
+        {/* Phones keep the type switch and the search; the other conditions live in a drawer with the same URL parameters. */}
+        <Button variant="secondary" size="sm" className="sm:hidden max-sm:order-2" icon={<SlidersHorizontal className="size-3.5" />} aria-label={activeConditions ? `筛选，已选 ${activeConditions} 项` : "筛选"} onClick={() => setFilterDrawer(true)}>筛选{activeConditions > 0 && ` · ${activeConditions}`}</Button>
+        <div className="contents max-sm:hidden">{conditionFields(false)}</div>
+        <SearchField value={query} onChange={setQuery} placeholder="文件、结果或任务名称" label="搜索资源" className="ml-auto max-sm:order-1 max-sm:min-w-40 max-sm:flex-1 sm:w-64" />
       </div>
       <ReadStateView status={tasks.status === "empty" ? "ready" : tasks.status} error={tasks.error} onRetry={tasks.refresh} skeleton={<AssetSkeleton view={view} />}>
         {visible.length === 0 ? <EmptyState icon={<Images />} title={all.length ? "没有符合条件的资源" : "当前批次没有任务结果"} body={all.length ? "试试切换类型、权限或视图筛选。" : "结果来自 owner 任务投影；没有结果不代表生成失败。"} /> : <>
-          <AssetBrowser view={view} entries={visible} selectedKey={selected?.key || null} onDetails={openDetails} onPreview={openPreview} />
-          <div className="border-t border-line px-4 py-3 text-2xs text-muted tabular">显示 {visible.length} / {all.length} 个资源</div>
+          <AssetBrowser view={view} entries={visible} selectedKey={selected?.key || null} onDetails={openDetails} onPreview={openPreview} actionsFor={assetActions} />
+          <div className="border-t border-line px-4 py-3 text-2xs text-muted tabular">当前结果 {visible.length} / 已加载 {all.length} 个资源{tasks.truncated ? " · 历史未读全" : ""}</div>
         </>}
       </ReadStateView>
     </Panel>
@@ -251,12 +371,19 @@ function OwnerAssetsPage() {
       hasNext={selectedIndex >= 0 && selectedIndex < visible.length - 1}
       onOpenTask={() => navigate(`/tasks?task=${encodeURIComponent(selected.task.task_key || "")}`)}
     />}
-  </div>;
+    <DetailSheet open={filterDrawer} onOpenChange={setFilterDrawer} title="筛选资源" footer={<div className="flex items-center justify-between gap-2">
+      <Button variant="ghost" disabled={!activeConditions} onClick={() => update({ owner: null, project: null, resultState: null, taskState: null, access: null, from: null, to: null })}>清除条件</Button>
+      <Button variant="primary" onClick={() => setFilterDrawer(false)}>完成</Button>
+    </div>}>
+      <div className="space-y-4">{conditionFields(true)}</div>
+    </DetailSheet>
+    <MediaViewer controller={preview} slides={slides} onNavigate={navigateViewer} onDetails={showViewerDetails} />
+  </div></AudioQueue>;
 }
 
-function AssetBrowser({ view, entries, selectedKey, onDetails, onPreview }: { view: AssetViewMode; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void }) {
-  if (view !== "gallery") return <AssetTable compact={view === "compact"} entries={entries} selectedKey={selectedKey} onDetails={onDetails} onPreview={onPreview} />;
-  return <ul className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-4 p-4" aria-label="资源大图网格">{entries.map((entry, index) => <AssetGalleryCard key={entry.key} entry={entry} index={index} selected={entry.key === selectedKey} onDetails={() => onDetails(entry)} onPreview={() => onPreview(entry)} />)}</ul>;
+function AssetBrowser({ view, entries, selectedKey, onDetails, onPreview, actionsFor }: { view: AssetViewMode; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void; actionsFor: (entry: ResultEntry) => ItemAction[] }) {
+  if (view !== "gallery") return <AssetTable compact={view === "compact"} entries={entries} selectedKey={selectedKey} onDetails={onDetails} onPreview={onPreview} actionsFor={actionsFor} />;
+  return <ul className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-4 p-4" aria-label="资源大图网格" onKeyDown={(event) => moveBetweenRows(event, "grid")}>{entries.map((entry, index) => <AssetGalleryCard key={entry.key} entry={entry} index={index} selected={entry.key === selectedKey} onDetails={() => onDetails(entry)} onPreview={() => onPreview(entry)} actions={actionsFor(entry)} />)}</ul>;
 }
 
 function AccessState({ action }: { action: PreviewAction }) {
@@ -266,6 +393,7 @@ function AccessState({ action }: { action: PreviewAction }) {
 }
 
 function PreviewButton({ entry, action, onPreview, iconOnly = false, variant = "ghost", className, stop = false }: { entry: ResultEntry; action: PreviewAction; onPreview: () => void; iconOnly?: boolean; variant?: "secondary" | "ghost"; className?: string; stop?: boolean }) {
+  if (entry.kind === "audio" && action.enabled) return <AudioPlayButton track={audioTrackFrom(entry, assetHref(entry))} variant={variant} iconOnly={iconOnly} stop={stop} className={className} />;
   const verb = entry.kind === "audio" ? "播放" : "预览";
   const label = `${verb} ${entry.result.name || "未命名结果"}`;
   const title = action.reason || "申请短期预览句柄";
@@ -294,6 +422,7 @@ const posterTone: Record<MediaKind, string> = {
 };
 
 function AssetPoster({ entry, action }: { entry: ResultEntry; action: PreviewAction }) {
+  const phase = useTrackPhase(entry.key);
   const spec = assetSpec(entry.result);
   const thumbnail = entry.kind === "image" && action.enabled && entry.result.thumbnail?.state === "ready";
   const chip = [kindLabel(entry.kind), spec.format, entry.kind === "image" ? null : spec.duration].filter(Boolean).join(" · ");
@@ -303,34 +432,49 @@ function AssetPoster({ entry, action }: { entry: ResultEntry; action: PreviewAct
       : entry.kind === "image"
         ? <><span aria-hidden="true" className="media-checker absolute inset-0 opacity-45" /><span className="absolute inset-0 grid place-items-center"><KindBadge kind="image" size="lg" /></span></>
         : <span className="absolute inset-0 grid place-items-center"><KindBadge kind={entry.kind} size="lg" /></span>}
-    <span className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-20px)] truncate rounded-chip bg-panel/90 px-2 py-0.5 text-2xs font-medium text-ink-soft shadow-panel">{chip}</span>
+    <span className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-20px)] truncate rounded-chip bg-panel/90 px-2 py-0.5 text-2xs font-medium text-ink-soft shadow-panel">{phase === "playing" ? "正在播放" : phase === "pending" ? "正在载入" : phase === "paused" ? "已暂停" : chip}</span>
   </span>;
 }
 
-function AssetGalleryCard({ entry, index, selected, onDetails, onPreview }: { entry: ResultEntry; index: number; selected: boolean; onDetails: () => void; onPreview: () => void }) {
+function AssetGalleryCard({ entry, index, selected, onDetails, onPreview, actions }: { entry: ResultEntry; index: number; selected: boolean; onDetails: () => void; onPreview: () => void; actions: ItemAction[] }) {
   const action = resultAction(entry.task, "preview");
   const spec = assetSpec(entry.result);
   const name = entry.result.name || "未命名结果";
   const specLine = [spec.dimensions, spec.size].filter(Boolean).join(" · ");
-  return <li className="relative min-w-0 stagger-in" style={{ "--i": index } as CSSProperties}>
+  return <ActionsContextMenu actions={actions}><li className="relative min-w-0 stagger-in" style={{ "--i": index } as CSSProperties}>
     <article className={cx("group relative overflow-hidden rounded-card border bg-panel transition-[border-color,box-shadow] duration-150", selected ? "border-primary shadow-selected" : "border-line hover:border-line-strong hover:shadow-raised")} data-result={entry.key}>
-      <button type="button" onClick={onDetails} aria-label={`选择 ${name} 资源`} aria-current={selected || undefined} className="block w-full text-left focus-visible:outline-offset-[-3px]">
-        <AssetPoster entry={entry} action={action} />
-        <span className="block px-3.5 pb-3 pt-3">
-          <span className="block truncate text-body-sm font-semibold text-ink">{name}</span>
-          <span className="mt-0.5 block truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {entry.task.title}</span>
-          <span className="mt-2 flex items-center justify-between gap-2">
-            <span className="min-w-0 truncate text-2xs text-faint tabular">{specLine || "规格未提供"}</span>
-            <AccessState action={action} />
-          </span>
-        </span>
-      </button>
-      <div className="absolute right-2 top-2 flex items-center gap-1 transition-opacity duration-150 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-        <PreviewButton entry={entry} action={action} onPreview={onPreview} variant="secondary" className="shadow-raised" />
+      {/* The card's button lies over the card rather than wrapping it, so its short name never omits text it visibly contains. */}
+      <button type="button" data-row-button onClick={onDetails} aria-label={`选择 ${name} 资源`} aria-current={selected || undefined} className="absolute inset-0 z-[1] rounded-card focus-visible:outline-offset-[-3px]" />
+      <AssetPoster entry={entry} action={action} />
+      <div className="px-3.5 pb-3 pt-3">
+        <p className="truncate text-body-sm font-semibold text-ink">{name}</p>
+        <p className="mt-0.5 truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {entry.task.title}</p>
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate text-2xs text-faint tabular">{specLine || "规格未提供"}</span>
+          <AccessState action={action} />
+        </div>
+      </div>
+      {entry.kind === "audio" && action.enabled && <span className="pointer-events-none absolute inset-x-0 top-0 z-[2] grid aspect-[16/10] place-items-center"><AudioPosterPlay entry={entry} /></span>}
+      <div className="absolute right-2 top-2 z-[2] flex items-center gap-1 transition-opacity duration-150 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+        {!(entry.kind === "audio" && action.enabled) && <PreviewButton entry={entry} action={action} onPreview={onPreview} variant="secondary" className="shadow-raised" />}
         <DetailsButton name={name} onDetails={onDetails} variant="secondary" className="shadow-raised" />
       </div>
     </article>
-  </li>;
+  </li></ActionsContextMenu>;
+}
+
+/** Round play target centred on an audio poster; one click starts the global player. */
+function AudioPosterPlay({ entry }: { entry: ResultEntry }) {
+  const player = useAudioPlayer();
+  const phase = useTrackPhase(entry.key);
+  const activeStatus = useAudioState((state) => state.track?.key === entry.key ? state.status : null);
+  const name = entry.result.name || "未命名结果";
+  const verb = phase === "playing" ? "暂停" : phase === "pending" ? "载入中" : phase === "paused" ? "继续" : "播放";
+  const queue = useAudioQueue();
+  const toggle = () => { if (activeStatus === "playing") player.toggle(); else player.play(audioTrackFrom(entry, assetHref(entry)), queue); };
+  return <button type="button" aria-label={`${verb} ${name}`} title={verb} data-audio-phase={phase} onClick={toggle} className="audio-poster-play pointer-events-auto">
+    {phase === "playing" ? <Pause className="size-5" fill="currentColor" /> : phase === "pending" ? <LoaderCircle className="size-5 motion-safe:animate-spin" /> : <Play className="ml-0.5 size-5" fill="currentColor" />}
+  </button>;
 }
 
 function CodeText({ value }: { value: CodeLabel | null }) {
@@ -341,7 +485,10 @@ function AssetNameCell({ entry, compact }: { entry: ResultEntry; compact: boolea
   const spec = assetSpec(entry.result);
   const specLine = [spec.format, spec.dimensions, spec.duration, spec.size].filter(Boolean).join(" · ") || "规格未提供";
   return <span className="flex min-w-0 items-center gap-3">
-    {entry.kind === "image" ? <TaskThumbnail task={entry.task} result={entry.result} size={compact ? "sm" : "md"} /> : <KindBadge kind={entry.kind} size={compact ? "sm" : "lg"} />}
+    {entry.kind === "image"
+      ? <TaskThumbnail task={entry.task} result={entry.result} size={compact ? "sm" : "md"} />
+      // Other kinds keep their badge in a slot as wide as the thumbnail, so names line up and rows keep one height.
+      : <span className={cx("grid shrink-0 place-items-center", compact ? "size-10" : "size-16")}><KindBadge kind={entry.kind} size={compact ? "sm" : "lg"} /></span>}
     <span className="min-w-0 flex-1">
       <span className="block truncate text-body-sm font-semibold text-ink">{entry.result.name || "未命名结果"}</span>
       <span className="block truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {entry.task.title}</span>
@@ -350,7 +497,7 @@ function AssetNameCell({ entry, compact }: { entry: ResultEntry; compact: boolea
   </span>;
 }
 
-function AssetTable({ compact, entries, selectedKey, onDetails, onPreview }: { compact: boolean; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void }) {
+function AssetTable({ compact, entries, selectedKey, onDetails, onPreview, actionsFor }: { compact: boolean; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void; actionsFor: (entry: ResultEntry) => ItemAction[] }) {
   const detailColumns: Column<ResultEntry>[] = compact ? [] : [
     { id: "project", header: "项目", priority: 3, cell: (entry) => <span className="block min-w-0"><span className="block truncate text-body-sm text-ink-soft">{entry.task.locator.project}</span><span className="block truncate text-2xs text-faint">{entry.task.locator.task_ref}</span></span> },
     { id: "result", header: "结果状态", priority: 3, cell: (entry) => {
@@ -360,7 +507,7 @@ function AssetTable({ compact, entries, selectedKey, onDetails, onPreview }: { c
     { id: "task", header: "任务状态", priority: 3, cell: (entry) => <span className="block min-w-0"><TaskStatePill state={entry.task.state} /><span className="mt-1 block truncate text-2xs text-faint">更新于 {formatRelative(entry.task.updated_at || entry.task.created_at)}</span></span> },
   ];
   const columns: Column<ResultEntry>[] = [
-    { id: "name", header: "资源", cell: (entry) => <AssetNameCell entry={entry} compact={compact} /> },
+    { id: "name", header: "资源", className: compact ? mainColumn : narrowMainColumn, cell: (entry) => <AssetNameCell entry={entry} compact={compact} /> },
     { id: "kind", header: "类型", priority: 2, cell: (entry) => {
       const spec = assetSpec(entry.result);
       return <span className="block min-w-0">
@@ -387,6 +534,7 @@ function AssetTable({ compact, entries, selectedKey, onDetails, onPreview }: { c
     rowLabel={(entry) => `选择 ${entry.result.name || "未命名结果"} 资源`}
     selectedKey={selectedKey}
     onRowClick={onDetails}
+    rowActions={actionsFor}
     density={compact ? "compact" : "comfortable"}
     className="rounded-b-card"
   />;
@@ -411,6 +559,7 @@ function AssetInspector({ entry, preview, mode, maximized, onModeChange, onMaxim
     closeAriaLabel="关闭资源详情"
     ariaLabel="资源详情"
     dataAttribute="data-asset-inspector"
+    returnFocus={itemSelector("data-result", entry.key)}
     header={header}
     headerActions={<><button type="button" disabled={!hasPrevious} onClick={onPrevious} aria-label="上一个资源" title="上一个资源" className={stepButton}><ChevronLeft className="size-4" /></button><button type="button" disabled={!hasNext} onClick={onNext} aria-label="下一个资源" title="下一个资源" className={stepButton}><ChevronRight className="size-4" /></button></>}
     meta={meta}
@@ -426,41 +575,20 @@ function AssetInspector({ entry, preview, mode, maximized, onModeChange, onMaxim
 
 const stageBase = "asset-preview-stage grid aspect-[16/10] place-items-center rounded-card border border-line bg-panel-sunken";
 
-function AssetPreviewStage({ entry, preview }: { entry: ResultEntry; preview: MediaPreviewController }) {
-  const active = preview.target?.key === entry.key;
-  const mime = preview.grant?.mime || entry.result.mime;
-  const isImage = entry.kind === "image" || mime.startsWith("image/");
-  const isVideo = entry.kind === "video" || mime.startsWith("video/");
-  const { reportError } = preview;
-  const [text, setText] = useState<string | null>(null);
-  const [textError, setTextError] = useState(false);
+export function AssetPreviewStage({ entry, preview }: { entry: ResultEntry; preview: MediaPreviewController }) {
+  if (entry.kind === "audio") return <AudioStage track={audioTrackFrom(entry, assetHref(entry))} className="asset-preview-stage" />;
+  return <VisualPreviewStage entry={entry} preview={preview} />;
+}
 
-  useEffect(() => {
-    if (!active || preview.status !== "ready" || entry.kind !== "text" || !preview.sourceUrl) {
-      setText(null);
-      setTextError(false);
-      return;
-    }
-    const controller = new AbortController();
-    void fetch(preview.sourceUrl, { credentials: "same-origin", cache: "no-store", signal: controller.signal }).then((response) => {
-      if (!response.ok) throw new Error("text_preview_unavailable");
-      return response.text();
-    }).then((value) => setText(value.slice(0, 16000))).catch((error) => {
-      if (!controller.signal.aborted) {
-        setTextError(true);
-        reportError(error instanceof Error ? error.message : "text_preview_unavailable");
-      }
-    });
-    return () => controller.abort();
-  }, [active, entry.kind, preview.sourceUrl, preview.status, reportError]);
-
-  if (!active) return <div className={cx(stageBase, "p-6 text-center")}><div><KindBadge kind={entry.kind} size="lg" className="mx-auto" /><p className="mt-3 text-body-sm font-medium text-ink">选择“预览”后在这里查看内容</p><p className="mt-1 text-2xs text-muted">当前只展示文件级信息，不会自动读取媒体。</p></div></div>;
-  if (preview.status === "requesting") return <div className={stageBase}><div className="space-y-2 text-center"><SkeletonBlock className="mx-auto h-10 w-32" /><p className="text-2xs text-muted">正在申请预览句柄</p></div></div>;
-  if (preview.status === "blocked" || preview.status === "error") return <div className={cx(stageBase, "p-6 text-center")}><div><KindBadge kind={entry.kind} size="lg" className="mx-auto opacity-70" /><p className="mt-3 text-body-sm font-medium text-ink">内容暂不可预览</p><p className="mt-1 text-2xs text-muted">{preview.error ? grantErrorLabel(preview.error) : "来源未提供可用媒体句柄。"}</p><Button size="sm" variant="ghost" className="mt-3" onClick={preview.retry}>重新申请</Button></div></div>;
-  if (preview.status !== "ready" || !preview.sourceUrl) return <div className={stageBase}><KindBadge kind={entry.kind} size="lg" /></div>;
-  if (isImage || isVideo || entry.kind === "audio") return <InlineMediaPreview controller={preview} className="asset-preview-stage" />;
-  if (entry.kind === "text") return <div className="asset-preview-stage max-h-[420px] overflow-auto rounded-card border border-line bg-panel-sunken p-4 text-meta leading-6 text-ink-soft">{textError ? <p className="text-muted">内容读取失败，仍可查看文件元数据。</p> : text === null ? <p className="text-muted">正在读取文本内容…</p> : <pre className="whitespace-pre-wrap break-words font-sans">{text}</pre>}</div>;
-  return <div className={cx(stageBase, "p-6 text-center")}><KindBadge kind={entry.kind} size="lg" /></div>;
+/** Poster for a visual result: the owner thumbnail when ready, and one button that opens the full-screen viewer. */
+function VisualPreviewStage({ entry, preview }: { entry: ResultEntry; preview: MediaPreviewController }) {
+  const action = resultAction(entry.task, "preview");
+  const showing = preview.target?.key === entry.key && preview.status !== "closed";
+  const thumbnail = entry.kind === "image" && action.enabled && entry.result.thumbnail?.state === "ready";
+  return <div className={cx(stageBase, "relative overflow-hidden")} data-asset-stage={entry.kind}>
+    {thumbnail ? <TaskThumbnail task={entry.task} result={entry.result} size="lg" className="absolute inset-0 border-0! rounded-none! bg-transparent!" /> : <div className="p-6 text-center"><KindBadge kind={entry.kind} size="lg" className="mx-auto" /><p className="mt-3 text-2xs text-muted">{action.enabled ? "在查看器中打开后才读取内容。" : action.reason || "内容读取未授权"}</p></div>}
+    {action.enabled && <Button size="sm" variant={thumbnail ? "secondary" : "primary"} className="absolute bottom-3 right-3 shadow-raised" icon={<Maximize2 className="size-3.5" />} onClick={() => preview.open(entry, { source: "detail-sheet", autoplay: true, history: "push" })}>{showing ? "查看器中" : viewerOpenLabel(entry.kind)}</Button>}
+  </div>;
 }
 
 function AssetSkeleton({ view }: { view: AssetViewMode }) {

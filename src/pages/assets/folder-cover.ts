@@ -11,9 +11,9 @@ export function folderTone(name: string): number {
 
 /**
  * Count line under a folder tile.
- * The local directory page is exact for its own rows, so a finished page may
- * state "N 项成果". A page that still has a source cursor, or coverage that is
- * not complete, only says how many rows were read.
+ * A finished local page may state "N 项成果". A truncated page, a page that still
+ * has a source cursor, or any coverage other than complete only says how many rows
+ * were returned.
  */
 export function folderMeta(
   page: Pick<DirectoryPage<unknown>, "total" | "coverage"> & { next_source_cursor?: string | null } | null | undefined,

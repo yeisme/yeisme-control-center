@@ -29,6 +29,9 @@ export function formatRelative(value: string | null | undefined, now = Date.now(
   return timeFormatter.format(time);
 }
 
+/** Pads text set between Chinese words with a space on each side that starts or ends with digits or Latin: 是 3 分钟前的, 是刚刚的. */
+export const cjkSpaced = (text: string) => `${/^[\x21-\x7e]/.test(text) ? " " : ""}${text}${/[\x21-\x7e]$/.test(text) ? " " : ""}`;
+
 export function formatBytes(value: number | null | undefined) {
   if (value === null || value === undefined) return null;
   if (value >= 1073741824) return (value / 1073741824).toFixed(1) + " GB";

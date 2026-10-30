@@ -51,6 +51,7 @@ export {
   Images,
   Inbox,
   Info,
+  Keyboard,
   Layers,
   LayoutDashboard,
   LayoutGrid,
@@ -102,6 +103,7 @@ export {
   Pencil,
   ZoomIn,
   ZoomOut,
+  PanelRightOpen,
 } from "lucide-react";
 export { FolderClosed } from "lucide-react";
 
@@ -127,6 +129,7 @@ export {
   KeyRound,
   Hourglass,
   RotateCcw,
+  RotateCw,
   Receipt,
   Route,
   Ban,
@@ -144,5 +147,11 @@ export {
   Boxes,
   ListTree,
   ShieldAlert,
+  SkipBack,
+  SkipForward,
+  Columns2,
   Zap,
+  Bot,
+  Music,
+  MoveHorizontal,
 } from "lucide-react";

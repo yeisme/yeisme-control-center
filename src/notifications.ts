@@ -7,22 +7,25 @@ export function isReminderState(state: string) {
   return reminderStates.has(state);
 }
 
-export function failureFingerprint(scopeId: string, task: Pick<TaskSnapshot, "task_key" | "state" | "revision" | "native_state" | "provider_recovery">) {
-  return [
-    scopeId,
-    task.task_key || "",
-    task.state,
-    task.revision || "",
-    task.native_state || "",
-    task.provider_recovery?.error_code || "",
-  ].join("\u001f");
+/** The unsigned half of a task key: the same task even when a server restart re-signed its key. */
+export function taskIdentityOf(taskKey: string) {
+  return taskKey.split(".")[0] || "";
+}
+
+/**
+ * The one definition of an unread reminder, shared with the server: not read, not handled (acknowledged, muted,
+ * archived), not snoozed and not recovered. The sidebar badge, the bell and the reminders page all count this.
+ */
+export function countsAsUnread(item: { state: string; read_at?: string | null; snoozed_until?: string | null; recovered_at?: string | null }, now = Date.now()) {
+  if (item.read_at || item.recovered_at || item.state !== "unread") return false;
+  return !(item.snoozed_until && Date.parse(item.snoozed_until) > now);
 }
 
 export type ReminderGroup = "new" | "open" | "quiet" | "archived";
 
-export function reminderGroup(item: { state: string; priority: string }): ReminderGroup {
+export function reminderGroup(item: { state: string; priority: string; recovered_at?: string | null }): ReminderGroup {
   if (item.state === "archived") return "archived";
-  if (item.state === "muted" || item.state === "snoozed" || item.priority === "history" || item.priority === "low") return "quiet";
+  if (item.state === "muted" || item.state === "snoozed" || item.recovered_at || item.priority === "history" || item.priority === "low") return "quiet";
   if (item.state === "unread" && item.priority === "normal") return "new";
   return "open";
 }
@@ -53,9 +56,9 @@ export function failureVersionLabel(item: { task_revision?: string; last_error_c
 }
 
 /** Home attention counts only fresh unread reminders, not every historical failure. */
-export function countsAsHomeAttention(item: { category?: string; state: string; priority: string; presence?: string; snoozed_until?: string | null }, now = Date.now()) {
+export function countsAsHomeAttention(item: { category?: string; state: string; priority: string; presence?: string; snoozed_until?: string | null; recovered_at?: string | null }, now = Date.now()) {
   if (item.category && item.category !== "failure") return false;
-  if (item.state !== "unread" || item.priority !== "normal" || item.presence === "stale") return false;
+  if (item.state !== "unread" || item.priority !== "normal" || item.presence === "stale" || item.recovered_at) return false;
   if (item.snoozed_until && Date.parse(item.snoozed_until) > now) return false;
   return true;
 }

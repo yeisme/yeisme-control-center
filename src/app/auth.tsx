@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
-import { ArrowRight, CircleAlert, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Unplug } from "../icons";
+import { useEffect, useState, type FormEvent } from "react";
+import { ArrowRight, BookOpen, CircleAlert, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Unplug } from "../icons";
 import { useWorkspace } from "./workspace";
 import { errorCode } from "../shared/api/control-center-client";
+import { BootSplash, hasBootSplash } from "./boot-splash";
 import { Button, Input, cx } from "../components/ui";
 
 const loginErrors: Record<string, string> = {
@@ -82,16 +83,20 @@ export function LoginScreen() {
       </a>}
     </div>
     <p className="mt-5 flex items-center justify-center gap-1.5 text-2xs text-muted"><LockKeyhole className="size-3" />会话 Cookie 为 HttpOnly；页面只读取已授权范围</p>
+    <p className="mt-3 text-center text-[13px]"><a href="guide.html" className="inline-flex items-center gap-1.5 font-medium text-ink-soft underline-offset-4 hover:text-ink hover:underline"><BookOpen className="size-3.5" />使用指南（无需登录）</a></p>
   </AuthFrame>;
 }
 
+/** The guide is public: a signed-out visit to its in-app address goes to the public page with the same choices. */
+export function PublicGuideRedirect({ search }: { search: string }) {
+  useEffect(() => { window.location.replace(`guide.html${search}`); }, [search]);
+  return <AuthLoading />;
+}
+
+/** While the session is checked the HTML boot splash stays on top; without it, render the same splash. */
 export function AuthLoading() {
-  return <AuthFrame>
-    <div className="flex flex-col items-center gap-3 text-center">
-      <LoaderCircle className="size-6 text-muted motion-safe:animate-spin" />
-      <p className="text-sm text-muted">正在检查登录状态…</p>
-    </div>
-  </AuthFrame>;
+  const [splash] = useState(hasBootSplash);
+  return splash ? <div className="min-h-dvh bg-canvas" aria-hidden="true" /> : <BootSplash />;
 }
 
 export function AuthProblem({ kind }: { kind: "forbidden" | "offline" }) {

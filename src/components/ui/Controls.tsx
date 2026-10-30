@@ -15,7 +15,7 @@ const track = "inline-flex max-w-full items-center gap-0.5 overflow-x-auto round
 
 function Count({ value }: { value?: number | null }) {
   if (value === undefined || value === null) return null;
-  return <span className="tabular rounded px-1 text-2xs text-faint">{value}</span>;
+  return <span className="tabular rounded px-1 text-2xs text-muted">{value}</span>;
 }
 
 /** Real tabs: arrow keys move between triggers and each trigger controls a `TabPanel`. */

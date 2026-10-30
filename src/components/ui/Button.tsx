@@ -24,7 +24,11 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
   icon?: ReactNode;
-  /** Why the action is unavailable; shown on hover and keyboard focus. Defaults to `title` when disabled. */
+  /**
+   * Why the action is unavailable; shown on hover and keyboard focus. Defaults to `title` when disabled. A button that is
+   * only briefly unavailable (a request in flight) should stay enabled and ignore clicks instead: turning `disabled` on
+   * with a reason wraps the button for the tooltip, which remounts it and drops its focus.
+   */
   disabledReason?: ReactNode;
 }
 

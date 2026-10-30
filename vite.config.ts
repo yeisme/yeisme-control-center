@@ -34,11 +34,12 @@ export default defineConfig(() => ({
       name: "control-center-docs",
       apply: "build",
       writeBundle(options) {
+        // Review notes stay in the repository; they are working records, not part of the built docs.
         if (options.dir)
           cpSync(
             fileURLToPath(new URL("./docs", import.meta.url)),
             join(options.dir, "docs"),
-            { recursive: true },
+            { recursive: true, filter: (source) => !/[\\/]docs[\\/]reviews(?:[\\/]|$)/.test(source) },
           );
       },
     },
@@ -52,11 +53,16 @@ export default defineConfig(() => ({
     rollupOptions: {
       input: {
         controlCenter: resolve("app/index.html"),
+        // The public guide: same styles and guide components, no session and no API.
+        guide: resolve("app/guide.html"),
       },
       output: {
-        manualChunks: {
-          react: ["react", "react-dom", "react-dom/client"],
-          controls: ["radix-ui"],
+        // By module path, so React's CommonJS wrappers stay with React. Listed by package name they landed in the
+        // Radix chunk, and every page (the public guide too) had to load all of Radix to render anything.
+        manualChunks(id: string) {
+          if (/node_modules[\\/](?:react|react-dom|scheduler)[\\/]/.test(id)) return "react";
+          if (/node_modules[\\/](?:radix-ui|@radix-ui)[\\/]/.test(id)) return "controls";
+          return undefined;
         },
       },
     },

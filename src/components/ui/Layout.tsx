@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from "react";
-import { CircleAlert, Clock3, LockKeyhole, Plug, RefreshCw, ShieldQuestion, Unplug, Inbox, LogIn } from "../../icons";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type AriaRole, type CSSProperties, type ReactNode } from "react";
+import { ChevronDown, CircleAlert, Clock3, LockKeyhole, Plug, RefreshCw, ShieldQuestion, Unplug, Inbox, LogIn } from "../../icons";
 import { cx } from "./cx";
 import { Button } from "./Button";
 import { readErrorMessage, readStatusLabels, type ReadStatus } from "../../shared/read-model/read-state";
-import { formatRelative } from "../../shared/read-model/format";
+import { cjkSpaced, formatRelative } from "../../shared/read-model/format";
 
 export function Panel({ title, eyebrow, actions, children, className, bodyClassName, id }: { title?: ReactNode; eyebrow?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string; bodyClassName?: string; id?: string }) {
   return <section id={id} className={cx("min-w-0 rounded-card border border-line bg-panel shadow-panel", className)}>
@@ -22,31 +22,86 @@ export function Panel({ title, eyebrow, actions, children, className, bodyClassN
  * Page-level toolbar that replaces the empty band above each page: purpose and actions on the first
  * line, key metrics and freshness/coverage meta on the second. Pages keep their `h1.sr-only`.
  */
-export function PageToolbar({ summary, metrics, meta, actions, children, className }: { summary?: ReactNode; metrics?: ReactNode; meta?: ReactNode; actions?: ReactNode; children?: ReactNode; className?: string }) {
+/**
+ * Page header. On phones the description, the sources (children), the observation time and counts marked
+ * `foldMetrics` fold into one status line, so the first result reaches the first screen; desktops see everything.
+ */
+export function PageToolbar({ summary, metrics, meta, actions, children, className, foldMetrics = false }: {
+  summary?: ReactNode;
+  metrics?: ReactNode;
+  meta?: ReactNode;
+  actions?: ReactNode;
+  children?: ReactNode;
+  className?: string;
+  /** The metrics are counts rather than navigation, so phones may fold them into the status line. */
+  foldMetrics?: boolean;
+}) {
+  const [unfolded, setUnfolded] = useState(false);
+  const foldable = Boolean(summary || children || meta || (foldMetrics && metrics));
+  const fold = foldable && !unfolded ? "max-sm:hidden" : undefined;
   return <div className={cx("flex flex-col gap-3", className)} data-page-toolbar>
-    {(summary || actions) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-      {summary ? <p className="min-w-0 max-w-3xl text-body-sm text-muted text-pretty">{summary}</p> : <span />}
+    {(summary || actions || foldable) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      {foldable && <button type="button" aria-expanded={unfolded} onClick={() => setUnfolded((value) => !value)} className="flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-control text-left text-2xs text-muted hover:text-ink sm:hidden" data-page-status>
+        <span className="min-w-0 flex-1 truncate">{meta || "页面说明"}</span>
+        <span className="inline-flex shrink-0 items-center gap-0.5 font-medium text-ink-soft">{unfolded ? "收起" : "说明与来源"}<ChevronDown className={cx("size-3.5 transition-transform", unfolded && "rotate-180")} /></span>
+      </button>}
+      {summary ? <p className={cx("min-w-0 max-w-3xl text-body-sm text-muted text-pretty max-sm:order-last max-sm:w-full", fold)}>{summary}</p> : <span className="max-sm:hidden" />}
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>}
-    {(metrics || meta) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+    {(metrics || meta) && <div className={cx("flex flex-wrap items-center justify-between gap-x-4 gap-y-2", !metrics ? "max-sm:hidden" : foldMetrics && fold)}>
       <div className="min-w-0">{metrics}</div>
-      {meta && <div className="flex flex-wrap items-center gap-2">{meta}</div>}
+      {meta && <div className="flex flex-wrap items-center gap-2 max-sm:hidden">{meta}</div>}
     </div>}
-    {children}
+    {children && <div className={fold}>{children}</div>}
   </div>;
 }
 
-/** Collapses stacked page notices into the most important one plus an expandable remainder. */
+type NoticeTone = "neutral" | "warning" | "info" | "danger" | "review";
+const noticeTones: Record<NoticeTone, string> = {
+  neutral: "border-line bg-panel-soft text-ink-soft",
+  warning: "border-warning/25 bg-warning-soft text-warning",
+  info: "border-info/25 bg-info-soft text-info",
+  danger: "border-danger/25 bg-danger-soft text-danger",
+  review: "border-review/25 bg-review-soft text-review",
+};
+
+/**
+ * A page's notice region, one line tall on every width: the first notice that actually rendered (an element may render
+ * nothing) folds to one clipped line, its `actions` stay visible, and the toggle at the end of the line shows the full
+ * text and the other notices. Nothing is duplicated, so assistive tech and text lookups find each notice once.
+ */
 export function NoticeStack({ notices, className }: { notices: ReactNode[]; className?: string }) {
   const [open, setOpen] = useState(false);
+  const [count, setCount] = useState(0);
+  const [clipped, setClipped] = useState(false);
+  const body = useRef<HTMLDivElement>(null);
   const visible = notices.filter(Boolean);
-  if (!visible.length) return null;
-  const rest = visible.length - 1;
-  return <div className={cx("space-y-2", className)}>
-    {visible[0]}
-    {rest > 0 && open && visible.slice(1)}
-    {rest > 0 && <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="text-2xs font-medium text-muted underline-offset-2 hover:text-ink hover:underline">
-      {open ? "收起提示" : `另有 ${rest} 条提示`}
+  const measure = useCallback(() => {
+    const rendered = body.current ? [...body.current.querySelectorAll<HTMLElement>(":scope > [data-notice]")] : [];
+    const text = rendered[0] ? [...rendered[0].children].slice(1).filter((part) => !part.hasAttribute("data-notice-actions")) : [];
+    setCount(rendered.length);
+    setClipped(text.some((part) => part.scrollWidth > part.clientWidth + 1));
+  }, []);
+  useLayoutEffect(measure);
+  const present = visible.length > 0;
+  // A notice may change on its own (its own context) or with the width, without this stack rendering again.
+  useEffect(() => {
+    const root = body.current;
+    if (!present || !root || typeof ResizeObserver === "undefined") return;
+    const resize = new ResizeObserver(measure);
+    const mutation = new MutationObserver(measure);
+    resize.observe(root);
+    mutation.observe(root, { childList: true, subtree: true, characterData: true });
+    return () => { resize.disconnect(); mutation.disconnect(); };
+  }, [present, measure]);
+  if (!present) return null;
+  const more = count - 1;
+  const toggle = count > 0 && (open || more > 0 || clipped);
+  // Hidden until a notice renders, so an all-empty stack takes no gap in the page layout.
+  return <div ref={body} hidden={count === 0} className={cx("notice-stack space-y-2", className)} data-folded={count > 0 && !open ? "true" : undefined} data-toggle={toggle ? "true" : undefined}>
+    {visible}
+    {toggle && <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="notice-stack-toggle">
+      {open ? "收起提示" : more > 0 ? `另有 ${more} 条` : "展开"}
     </button>}
   </div>;
 }
@@ -114,25 +169,26 @@ export function ReadStateView({ status, error, onRetry, skeleton, empty, childre
 
 export function StaleNotice({ status, error, observedAt, onRetry }: { status: ReadStatus; error?: string | null; observedAt?: string | null; onRetry?: () => void }) {
   if (status !== "stale") return null;
-  return <div role="status" className="flex flex-wrap items-center gap-2 rounded-[10px] border border-warning/30 bg-warning-soft px-3 py-2 text-[13px] text-warning">
-    <Clock3 className="size-4 shrink-0" />
-    <span className="min-w-0 flex-1">{readStatusLabels.stale}：{error ? readErrorMessage(error) : "最近一次读取失败"} 显示的是 {observedAt ? formatRelative(observedAt) : "较早"} 的结果。</span>
-    {onRetry && <Button size="sm" variant="ghost" className="text-warning hover:bg-warning/10" onClick={onRetry}>重新读取</Button>}
+  return <InlineNotice tone="warning" role="status" icon={<Clock3 />} actions={onRetry && <NoticeAction onClick={onRetry}>重新读取</NoticeAction>}>
+    {readStatusLabels.stale}：{error ? readErrorMessage(error) : "最近一次读取失败。"}显示的是{cjkSpaced(observedAt ? formatRelative(observedAt) : "较早")}的结果。
+  </InlineNotice>;
+}
+
+/**
+ * A notice. `actions` sit at the end of the first line and stay visible when a `NoticeStack` folds the notice to one
+ * line; links and buttons inside `children` only show once the notice is unfolded.
+ */
+export function InlineNotice({ tone = "neutral", icon, children, actions, role, className }: { tone?: NoticeTone; icon?: ReactNode; children: ReactNode; actions?: ReactNode; role?: AriaRole; className?: string }) {
+  return <div role={role} data-notice={tone} className={cx("flex items-start gap-2 rounded-[10px] border px-3 text-[13px] leading-5", actions ? "py-1.5" : "py-2.5", noticeTones[tone], className)}>
+    <span className={cx("shrink-0 [&>svg]:size-4", actions ? "mt-1.5" : "mt-0.5")}>{icon || <CircleAlert />}</span>
+    <div className={cx("min-w-0 flex-1 text-pretty", actions ? "py-1" : undefined)}>{children}</div>
+    {actions && <div data-notice-actions className="flex shrink-0 items-center gap-0.5">{actions}</div>}
   </div>;
 }
 
-export function InlineNotice({ tone = "neutral", icon, children, className }: { tone?: "neutral" | "warning" | "info" | "danger" | "review"; icon?: ReactNode; children: ReactNode; className?: string }) {
-  const tones = {
-    neutral: "border-line bg-panel-soft text-ink-soft",
-    warning: "border-warning/25 bg-warning-soft text-warning",
-    info: "border-info/25 bg-info-soft text-info",
-    danger: "border-danger/25 bg-danger-soft text-danger",
-    review: "border-review/25 bg-review-soft text-review",
-  };
-  return <div className={cx("flex items-start gap-2 rounded-[10px] border px-3 py-2.5 text-[13px] leading-5", tones[tone], className)}>
-    <span className="mt-0.5 shrink-0 [&>svg]:size-4">{icon || <CircleAlert />}</span>
-    <div className="min-w-0 flex-1 text-pretty">{children}</div>
-  </div>;
+/** A text button inside a notice: it takes the notice's tone and stays on the notice's single line. */
+export function NoticeAction({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return <button type="button" onClick={onClick} className="inline-flex h-7 shrink-0 items-center whitespace-nowrap rounded-control px-2 text-[13px] font-medium hover:bg-current/10">{children}</button>;
 }
 
 export function SkeletonRows({ rows = 5, className }: { rows?: number; className?: string }) {
@@ -148,8 +204,8 @@ export function SkeletonRows({ rows = 5, className }: { rows?: number; className
   </div>;
 }
 
-export function SkeletonBlock({ className }: { className?: string }) {
-  return <div aria-hidden="true" className={cx("skeleton", className)} />;
+export function SkeletonBlock({ className, style }: { className?: string; style?: CSSProperties }) {
+  return <div aria-hidden="true" className={cx("skeleton", className)} style={style} />;
 }
 
 export function Kbd({ children }: { children: ReactNode }) {

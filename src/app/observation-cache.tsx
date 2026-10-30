@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 import { useWorkspace } from "./workspace";
+import { isAbort } from "../shared/api/control-center-client";
 
 interface CacheEntry<T> {
   data: T;
@@ -25,11 +26,20 @@ export class ObservationCacheStore implements ObservationCache {
     return { data: entry.data, stale: entry.expiresAt <= Date.now() };
   }
 
-  async read<T>(key: string, loader: () => Promise<T>, freshMs: number, staleMs: number) {
+  async read<T>(key: string, loader: () => Promise<T>, freshMs: number, staleMs: number): Promise<{ data: T; stale: boolean }> {
     const now = Date.now();
     const existing = this.entries.get(key) as CacheEntry<T> | undefined;
     if (existing && existing.expiresAt > now) return { data: existing.data, stale: false };
-    if (existing?.promise) return { data: await existing.promise, stale: false };
+    if (existing?.promise) {
+      try {
+        return { data: await existing.promise, stale: false };
+      } catch (error) {
+        // The reader that started this read went away (its page or cycle was replaced); this caller still wants
+        // the value, so it reads again with its own loader instead of inheriting someone else's cancellation.
+        if (!isAbort(error)) throw error;
+        return this.read(key, loader, freshMs, staleMs);
+      }
+    }
     const promise = loader().then((data) => {
       this.entries.set(key, { data, expiresAt: Date.now() + freshMs, staleUntil: Date.now() + staleMs });
       return data;

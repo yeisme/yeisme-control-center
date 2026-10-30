@@ -1,6 +1,6 @@
 import type { CreativeFlowStage } from "../creative-flow";
 import { creativeFlowStages } from "../creative-flow";
-import { dramaNextStep, isNeutralNode, isProblemNode, neutralBlockers, validDramaRef, type DramaEpisodeRow, type DramaFlowSummary, type DramaRailStage, type DramaRailState } from "../drama";
+import { dramaNextStep, isNeutralNode, isProblemNode, neutralBlockers, unconnectedReasons, validDramaRef, type DramaEpisodeRow, type DramaFlowSummary, type DramaRailStage, type DramaRailState, type DramaSource, type DramaSourceState } from "../drama";
 import type { TaskSnapshot } from "../../task-observation";
 
 export const dramaStageLabels: Record<CreativeFlowStage, string> = {
@@ -52,15 +52,27 @@ const blockerLabels: Record<string, string> = {
   upstream_not_allowed: "来源地址未获授权",
   response_limit_exceeded: "owner 返回内容过大",
   invalid_response: "owner 返回的格式不符合合同",
-  collection_binding_missing: "当前范围没有连接 Auctra 收集库",
+  collection_target_missing: "控制中心服务端还没有配置 Auctra 收集来源",
+  collection_binding_missing: "这个范围还没有绑定 Auctra 项目",
   collection_not_synced: "收集库还没有同步",
+  collection_partial: "上次同步没有读完全部记录",
+  collection_page_limit: "记录太多，一次同步没有读完",
+  collection_time_budget: "同步超时，没有读完",
+  sources_not_connected: "Auctra 与 Scaena 都还没有连接",
   episode_not_in_collection: "收集库里没有这一集（这个引用可能是 Scaena 的）",
   episodes_sampled: "只检查了最近更新的几集",
+  collection_metadata_conflict: "这条记录刚被改过",
+  admin_required: "需要管理员",
+  forbidden: "没有权限",
 };
+
+/** Unread because nobody connected the owner for this scope: configuration to do, not a missing owner contract. */
+export const isUnconnectedNode = (node: Pick<DramaRailStage, "state" | "blocker">) => node.state === "needs_contract" && !!node.blocker && unconnectedReasons.has(node.blocker);
 
 /** Shown as red it would read as a fault when it is only waiting on a person to accept the screenplay. */
 export function railNodeInfo(node: Pick<DramaRailStage, "state" | "blocker">) {
   if (isNeutralNode(node)) return { label: "待采纳", tone: "neutral", shape: "dashed" } as const;
+  if (isUnconnectedNode(node)) return { label: "未连接", tone: "neutral", shape: "plug" } as const;
   return railStateInfo[node.state];
 }
 
@@ -70,6 +82,28 @@ export const currentStage = (flow: Pick<DramaFlowSummary, "rail" | "next_attenti
 export function blockerLabel(code: string | undefined) {
   if (!code) return "";
   return blockerLabels[code] || code.replace(/[_-]+/g, " ");
+}
+
+/** Why a source cannot be read, from the server's configuration-only answer; "connected" has nothing to explain. */
+const sourceStateText: Record<DramaSource["owner"], Partial<Record<DramaSourceState, string>>> = {
+  auctra: { target_missing: blockerLabels.collection_target_missing, binding_missing: blockerLabels.collection_binding_missing, no_credential: "已绑定 Auctra 项目，但缺少可用的访问密钥" },
+  scaena: { target_missing: "控制中心服务端还没有配置 Scaena 拆解读取", binding_missing: "这个范围还没有绑定 Scaena 项目", no_credential: "缺少 Scaena 拆解读取的访问凭据" },
+};
+export const sourceText = (source: DramaSource) => sourceStateText[source.owner][source.state] || "";
+
+/** One clause for why the board cannot list every episode; older servers only say `source_not_configured`. */
+export function universeGapText(reason: string | undefined) {
+  if (reason === "delegation_unavailable") return sourceStateText.auctra.no_credential!;
+  if (!reason || reason === "source_not_configured") return "这个范围没有连接 Auctra 收集库";
+  return blockerLabel(reason);
+}
+
+/** A sync receipt in one sentence: what was stored, or why nothing changed. A partial sync never reads as done. */
+export function collectionSyncMessage(receipt: { coverage: string; counts: { inserted: number; returned: number; total: number }; blocker: string | null; complete?: boolean }): { message: string; tone: "success" | "warning" } {
+  const { counts } = receipt;
+  if (receipt.complete === false && counts.returned > 0) return { message: `只同步了 ${counts.returned}/${counts.total} 条记录：${blockerLabel(receipt.blocker || "collection_partial")}。剧集列表可能不全，稍后再同步一次。`, tone: "warning" };
+  if (receipt.complete || (receipt.complete === undefined && receipt.coverage === "complete")) return { message: `已同步 Auctra 收集库，共 ${counts.total} 条记录${counts.inserted ? `，新增 ${counts.inserted} 条` : ""}。`, tone: "success" };
+  return { message: `同步没有完成：${blockerLabel(receipt.blocker || "owner_unavailable")}。列表保持上次同步的结果。`, tone: "warning" };
 }
 
 export interface NextStepText { text: string; tone: RailTone }
@@ -94,34 +128,78 @@ export function nextStepText(rail: DramaRailStage[], attention: Parameters<typeo
   return { text: `${verb}：${stage}（${owner}）${reason}`, tone };
 }
 
+export type EpisodeOrigin = "collection" | "task" | "recent" | "manual";
+
 export interface EpisodeEntry {
   episode_ref: string;
   title: string;
-  origin: "collection" | "task" | "manual";
+  origin: EpisodeOrigin;
   row?: DramaEpisodeRow;
 }
 
+/** An episode opened earlier in this tab; the title is what the page showed then. */
+export interface RecentEpisode { episode_ref: string; title: string }
+
 const collator = new Intl.Collator("en", { numeric: true });
 
-/** Server rows first (already in natural order); episodes only seen on tasks or typed by hand follow, never replacing a known one. */
-export function mergeEpisodeEntries(rows: DramaEpisodeRow[], taskRefs: string[], manualRef?: string | null): EpisodeEntry[] {
+/** The same test the server applies to its rows, so a search never shows an episode only because the client added it. */
+export const matchesEpisode = (needle: string, ref: string, title: string) => !needle || `${ref} ${title}`.toLowerCase().includes(needle.trim().toLowerCase());
+
+/**
+ * Server rows first (already in natural order); episodes only seen on tasks, opened earlier or typed by hand follow, never
+ * replacing a known one. The open episode always stays visible, even when the search would hide it.
+ */
+export function mergeEpisodeEntries(rows: DramaEpisodeRow[], refs: { task: string[]; recent?: RecentEpisode[]; manual?: string | null; q?: string }): EpisodeEntry[] {
+  const recent = refs.recent || [];
+  const recentRefs = new Set(recent.map((item) => item.episode_ref));
   const entries: EpisodeEntry[] = rows.map((row) => ({
     episode_ref: row.episode_ref,
     title: row.title,
-    origin: row.origin === "collection" ? "collection" : taskRefs.includes(row.episode_ref) ? "task" : "manual",
+    origin: row.origin === "collection" ? "collection" : refs.task.includes(row.episode_ref) ? "task" : recentRefs.has(row.episode_ref) ? "recent" : "manual",
     row,
   }));
   const seen = new Set(entries.map((entry) => entry.episode_ref));
-  for (const ref of [...taskRefs].sort(collator.compare)) if (!seen.has(ref)) { seen.add(ref); entries.push({ episode_ref: ref, title: ref, origin: "task" }); }
-  if (manualRef && !seen.has(manualRef)) entries.push({ episode_ref: manualRef, title: manualRef, origin: "manual" });
+  const add = (entry: EpisodeEntry) => {
+    if (seen.has(entry.episode_ref) || !matchesEpisode(refs.q || "", entry.episode_ref, entry.title)) return;
+    seen.add(entry.episode_ref);
+    entries.push(entry);
+  };
+  for (const ref of [...refs.task].sort(collator.compare)) add({ episode_ref: ref, title: ref, origin: "task" });
+  for (const item of recent) add({ episode_ref: item.episode_ref, title: item.title || item.episode_ref, origin: "recent" });
+  if (refs.manual && !seen.has(refs.manual)) entries.push({ episode_ref: refs.manual, title: refs.manual, origin: "manual" });
   return entries;
 }
 
-export function taskEpisodeRefs(tasks: TaskSnapshot[], limit = 12) {
-  const refs = new Set<string>();
-  // Task refs are owner-supplied text; one malformed ref must not stop the board from loading.
-  for (const task of tasks) if (task.episode_ref && validDramaRef(task.episode_ref)) refs.add(task.episode_ref);
-  return [...refs].sort(collator.compare).slice(0, limit);
+/**
+ * The episodes the newest tasks mention, in natural order for display. With more than `limit`, the episodes only older tasks
+ * mention are the ones left out, not whichever sort last; `total` says how many there were.
+ */
+export function taskEpisodeRefs(tasks: TaskSnapshot[], limit = 12): { refs: string[]; total: number } {
+  const latest = new Map<string, string>();
+  for (const task of tasks) {
+    // Task refs are owner-supplied text; one malformed ref must not stop the board from loading.
+    if (!task.episode_ref || !validDramaRef(task.episode_ref)) continue;
+    const at = task.updated_at || task.created_at || "";
+    if (!latest.has(task.episode_ref) || at > latest.get(task.episode_ref)!) latest.set(task.episode_ref, at);
+  }
+  const refs = [...latest].sort((a, b) => b[1].localeCompare(a[1]) || collator.compare(a[0], b[0])).slice(0, limit).map(([ref]) => ref);
+  return { refs: refs.sort(collator.compare), total: latest.size };
+}
+
+const recentEpisodePrefix = "episode:";
+export const recentEpisodeKey = (ref: string) => recentEpisodePrefix + ref;
+
+/** Episodes among the tab's recently opened items, newest first; anything not a well-formed episode entry is skipped. */
+export function recentEpisodes(items: { key: string; kind: string; label: string }[]): RecentEpisode[] {
+  return items
+    .filter((item) => item.kind === "episode" && item.key.startsWith(recentEpisodePrefix))
+    .map((item) => ({ episode_ref: item.key.slice(recentEpisodePrefix.length), title: item.label }))
+    .filter((item) => validDramaRef(item.episode_ref));
+}
+
+/** Refs the page asks the server to include: task episodes first, then ones opened earlier, within the server's limit. */
+export function requestedEpisodeRefs(taskRefs: string[], recent: RecentEpisode[], limit = 20) {
+  return [...new Set([...taskRefs, ...recent.map((item) => item.episode_ref)])].slice(0, limit);
 }
 
 export interface EpisodeTaskSummary {

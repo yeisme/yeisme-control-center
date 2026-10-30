@@ -193,20 +193,20 @@ export default function UsageAnalytics() {
   </div>;
 }
 
-function BudgetCard({ budget }: { budget?: { total: number; reserved: number; remaining: number; per_owner: Record<string, number> } }) {
+function BudgetCard({ budget }: { budget?: { total: number; reserved: number; remaining: number; per_owner: Record<string, number>; currency: string } }) {
   if (!budget) return <StatCard label="内部预算观察" icon={<Wallet />} value={<span className="text-faint">未提供</span>} hint="服务端未返回预算观察" />;
   const ratio = Math.min(1, budget.reserved / Math.max(budget.total, 0.01));
-  const caps = Object.entries(budget.per_owner).map(([id, cap]) => `${ownerLabel(id)} ${formatMoney(cap, "CNY")}`).join(" · ");
+  const caps = Object.entries(budget.per_owner).map(([id, cap]) => `${ownerLabel(id)} ${formatMoney(cap, budget.currency)}`).join(" · ");
   return <div className="min-w-0 rounded-card border border-line bg-panel px-4 py-3 shadow-panel">
     <div className="flex items-center justify-between gap-3">
       <span className="truncate text-meta text-muted">内部预算观察</span>
       <span aria-hidden="true" className="grid size-7 shrink-0 place-items-center rounded-[8px] bg-panel-sunken text-ink-soft [&>svg]:size-3.5"><Wallet /></span>
     </div>
-    <span className="tabular mt-1 block truncate text-metric font-semibold tracking-tight text-ink">{formatMoney(budget.remaining, "CNY")}<span className="ml-1.5 text-meta font-normal text-muted">剩余</span></span>
+    <span className="tabular mt-1 block truncate text-metric font-semibold tracking-tight text-ink">{formatMoney(budget.remaining, budget.currency)}<span className="ml-1.5 text-meta font-normal text-muted">剩余</span></span>
     <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-panel-sunken" role="meter" aria-label="预算已预留比例" aria-valuemin={0} aria-valuemax={budget.total} aria-valuenow={budget.reserved}>
       <div className={cx("h-full rounded-full", ratio > 0.85 ? "bg-danger" : ratio > 0.6 ? "bg-warning" : "bg-primary")} style={{ width: `${ratio * 100}%` }} />
     </div>
-    <span className="mt-1 block truncate text-2xs text-muted tabular" title={caps || undefined}>已预留 {formatMoney(budget.reserved, "CNY")} / {formatMoney(budget.total, "CNY")}{caps ? ` · ${caps}` : ""}</span>
+    <span className="mt-1 block truncate text-2xs text-muted tabular" title={caps || undefined}>已预留 {formatMoney(budget.reserved, budget.currency)} / {formatMoney(budget.total, budget.currency)}{caps ? ` · ${caps}` : ""}</span>
   </div>;
 }
 
@@ -224,8 +224,8 @@ function CostChart({ data, currency, owners }: { data: TrendPoint[]; currency: s
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0" style={{ height: chartHeight }}>
           {ticks.map((tick) => <div key={tick} className="absolute inset-x-0 border-t border-chart-grid" style={{ bottom: `${(tick / top) * 100}%` }} />)}
         </div>
-        <ol role="group" aria-label="每日已确认成本；聚焦单日查看明细，或切换表格视图" className="relative flex items-stretch gap-[3px]" style={{ height: chartHeight }}>
-          {data.map((point) => <li key={point.key} className="min-w-0 flex-1">
+        <div role="group" aria-label="每日已确认成本；聚焦单日查看明细，或切换表格视图" className="relative flex items-stretch gap-[3px]" style={{ height: chartHeight }}>
+          {data.map((point) => <div key={point.key} className="min-w-0 flex-1">
             <Tooltip content={<TrendTooltip point={point} currency={currency} owners={owners} />}>
               <div tabIndex={0} role="img" aria-label={`${point.label}：已确认成本 ${formatMoney(point.cost, currency)}，${point.calls} 条回执${point.unconfirmed ? `，${point.unconfirmed} 条成本未确认` : ""}`} className="flex h-full w-full cursor-default flex-col-reverse items-center rounded-[6px] outline-none transition-colors hover:bg-primary-soft/50 focus-visible:bg-primary-soft/50 focus-visible:ring-2 focus-visible:ring-focus">
                 {point.cost > 0 && <div className="flex w-full max-w-6 flex-col-reverse overflow-hidden rounded-t-[4px]" style={{ height: `max(2px, ${(point.cost / top) * 100}%)` }}>
@@ -233,8 +233,8 @@ function CostChart({ data, currency, owners }: { data: TrendPoint[]; currency: s
                 </div>}
               </div>
             </Tooltip>
-          </li>)}
-        </ol>
+          </div>)}
+        </div>
         <ol aria-hidden="true" className="mt-1.5 flex gap-[3px]">
           {data.map((point, index) => <li key={point.key} className="relative h-4 min-w-0 flex-1">
             {(data.length - 1 - index) % labelStep === 0 && <span className="tabular absolute left-1/2 top-0 -translate-x-1/2 whitespace-nowrap text-2xs text-muted">{point.label}</span>}

@@ -1,5 +1,5 @@
 import type { CatalogAction, CatalogChange, CatalogChannel, CatalogEntryKind, CatalogModel, CatalogOwner, CatalogServer, CatalogTool, RiskTier, ToolCatalog } from "../../shared/tool-catalog";
-import { canPrecheckModel } from "../../shared/tool-catalog";
+import { guideTools } from "../guide/guide-content";
 
 export const catalogTabs = ["overview", "models", "channels", "tools", "changes"] as const;
 export type CatalogTab = (typeof catalogTabs)[number];
@@ -121,18 +121,10 @@ export function changesByDay(changes: CatalogChange[]) {
   return [...groups.entries()].sort(([a], [b]) => b.localeCompare(a)).map(([day, items]) => ({ day, items }));
 }
 
-const scaenaModeFor = (capabilities: string[]) =>
-  capabilities.includes("frames") ? "keyframe_video" : capabilities.includes("reference") ? "image_to_video" : "text_to_video";
+const guideOwners = new Map(guideTools.map((tool) => [tool.owner, tool.id]));
 
-/** Deep link into AI 创作 for a pre-check only; never offered for historical or blocked entries. */
-export function precheckTarget(entry: CatalogEntry): string | null {
-  if (entry.kind === "model") {
-    const model = entry.value;
-    if (!canPrecheckModel(model) || !["eikona", "scaena", "sonora"].includes(model.owner)) return null;
-    const mode = model.owner === "scaena" ? scaenaModeFor(model.capabilities) : model.owner === "sonora" ? "text_to_audio" : model.capabilities.includes("text_to_image") || !model.capabilities.length ? "text_to_image" : model.capabilities[0];
-    return `/creation?${new URLSearchParams({ owner: model.owner, mode, model: model.model_ref })}`;
-  }
-  if (entry.kind === "action" && entry.value.creative_mode && entry.value.availability !== "unavailable" && entry.value.availability !== "blocked")
-    return `/creation?${new URLSearchParams({ owner: entry.value.owner, mode: entry.value.creative_mode })}`;
-  return null;
+/** 使用指南 card that explains how to call this owner from a CLI or an MCP client; null when none exists. */
+export function guideTarget(entry: CatalogEntry): string | null {
+  const tool = guideOwners.get(entry.value.owner);
+  return tool ? `/guide?tool=${encodeURIComponent(tool)}` : null;
 }

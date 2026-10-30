@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, errorCode, isAbort, type TaskNotification } from "../shared/api/control-center-client";
-import { countsAsHomeAttention, isReminderState } from "../notifications";
+import { api, errorCode, isAbort, type NotificationPage, type TaskNotification } from "../shared/api/control-center-client";
+import { countsAsHomeAttention, countsAsUnread, isReminderState } from "../notifications";
 import { useTasks } from "./tasks-context";
 import { useWorkspace } from "./workspace";
 
@@ -14,7 +14,10 @@ export interface NotificationObservation {
   refresh: () => void;
   loadMore: () => void;
   hasMore: boolean;
-  apply: (rows: TaskNotification[]) => void;
+  /** Replace the list with a freshly read first page, including the server's counts over every row. */
+  apply: (page: Pick<NotificationPage, "rows" | "unread" | "attention" | "next_cursor">) => void;
+  /** Replace one row after a single-row action, adjusting the counts by what that row changed. */
+  update: (row: TaskNotification) => void;
 }
 
 const NotificationContext = createContext<NotificationObservation | null>(null);
@@ -24,6 +27,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const { scopeId, session, generation, phase } = useWorkspace();
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [unreadTotal, setUnreadTotal] = useState(0);
+  const [attentionTotal, setAttentionTotal] = useState<number | null>(null);
   const [rows, setRows] = useState<TaskNotification[]>([]);
   const [status, setStatus] = useState<NotificationObservation["status"]>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +38,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     signature.current = "";
-    setRows([]); setUnreadTotal(0); setNextCursor(null);
+    setRows([]); setUnreadTotal(0); setAttentionTotal(null); setNextCursor(null);
     setStatus("idle");
     setError(null);
   }, [scopeId, generation]);
@@ -80,7 +84,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     syncAll()
       .then((page) => {
         if (controller.signal.aborted) return;
-        setRows(page.rows); setUnreadTotal(page.unread); setNextCursor(page.next_cursor || null);
+        setRows(page.rows); setUnreadTotal(page.unread); setAttentionTotal(page.attention ?? null); setNextCursor(page.next_cursor || null);
         setStatus("ready");
         setError(null);
       })
@@ -94,16 +98,27 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, [enabled, session?.csrf, scopeId, generation, tick, tasks.rows, tasks.observedAt, tasks.truncated, tasks.status]);
 
   const refresh = useCallback(() => setTick((value) => value + 1), []);
-  const apply = useCallback((next: TaskNotification[]) => { const delta = next.filter((v) => !v.read_at).length - rows.filter((v) => !v.read_at).length; setUnreadTotal((value) => Math.max(0, value + delta)); setRows(next); }, [rows]);
+  const apply = useCallback((page: Pick<NotificationPage, "rows" | "unread" | "attention" | "next_cursor">) => {
+    setRows(page.rows); setUnreadTotal(page.unread); setAttentionTotal(page.attention ?? null); setNextCursor(page.next_cursor || null);
+  }, []);
+  const update = useCallback((row: TaskNotification) => {
+    const previous = rows.find((item) => item.id === row.id);
+    if (!previous) return;
+    setUnreadTotal((value) => Math.max(0, value + Number(countsAsUnread(row)) - Number(countsAsUnread(previous))));
+    setAttentionTotal((value) => value === null ? null : Math.max(0, value + Number(countsAsHomeAttention(row)) - Number(countsAsHomeAttention(previous))));
+    setRows((current) => current.map((item) => item.id === row.id ? row : item));
+  }, [rows]);
   const moreIdentity = useRef(""); moreIdentity.current = `${scopeId}|${generation}`;
   const loadMore = useCallback(() => {
     if (!nextCursor || syncing) return;
     const identity = moreIdentity.current; setSyncing(true);
-    void api.notifications(scopeId, undefined, nextCursor).then((page) => { if (identity !== moreIdentity.current) return; setRows((current) => [...current, ...page.rows.filter((v) => !current.some((r) => r.id === v.id))]); setNextCursor(page.next_cursor || null); setUnreadTotal(page.unread); }).catch((e) => { if (identity === moreIdentity.current) setError(errorCode(e)); }).finally(() => { if (identity === moreIdentity.current) setSyncing(false); });
+    void api.notifications(scopeId, undefined, nextCursor).then((page) => { if (identity !== moreIdentity.current) return; setRows((current) => [...current, ...page.rows.filter((v) => !current.some((r) => r.id === v.id))]); setNextCursor(page.next_cursor || null); setUnreadTotal(page.unread); setAttentionTotal(page.attention ?? null); }).catch((e) => { if (identity === moreIdentity.current) setError(errorCode(e)); }).finally(() => { if (identity === moreIdentity.current) setSyncing(false); });
   }, [nextCursor, syncing, scopeId]);
   const unread = unreadTotal;
-  const attention = useMemo(() => rows.filter((row) => countsAsHomeAttention(row)).length, [rows]);
-  const value = useMemo<NotificationObservation>(() => ({ rows, unread, attention, hasMore: !!nextCursor, loadMore, status, error, syncing, refresh, apply }), [rows, unread, attention, nextCursor, loadMore, status, error, syncing, refresh, apply]);
+  // The server counts every row; the loaded page is only a fallback for older servers.
+  const pageAttention = useMemo(() => rows.filter((row) => countsAsHomeAttention(row)).length, [rows]);
+  const attention = attentionTotal ?? pageAttention;
+  const value = useMemo<NotificationObservation>(() => ({ rows, unread, attention, hasMore: !!nextCursor, loadMore, status, error, syncing, refresh, apply, update }), [rows, unread, attention, nextCursor, loadMore, status, error, syncing, refresh, apply, update]);
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
 }
 

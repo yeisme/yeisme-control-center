@@ -75,6 +75,14 @@ export interface DramaEpisodeRow {
   flow?: DramaFlowSummary;
 }
 
+/** Whether an owner can be read for this scope, decided from configuration alone (no owner call). */
+export type DramaSourceState = "connected" | "target_missing" | "binding_missing" | "no_credential";
+
+export interface DramaSource {
+  owner: "auctra" | "scaena";
+  state: DramaSourceState;
+}
+
 export interface DramaEpisodesResponse {
   schema_version: typeof dramaEpisodesSchema;
   epoch: number;
@@ -87,7 +95,13 @@ export interface DramaEpisodesResponse {
     reason?: string;
     total: number;
     observed_at?: string;
+    /** The scope can sync its collection now; absent from servers that predate it. */
+    can_sync?: boolean;
+    /** False when the last sync stopped before Auctra's last page, so the list may be missing episodes. */
+    complete?: boolean;
   };
+  /** Absent from servers that predate it. */
+  sources?: DramaSource[];
   read_count: number;
   row_count: number;
   total: number;
@@ -165,6 +179,9 @@ export function railFromFlow(flow: Pick<CreativeFlowProjection, "stages" | "sour
     };
   });
 }
+
+/** Nobody connected this owner for the scope yet: configuration still to do, not a read that failed. */
+export const unconnectedReasons = new Set(["source_not_configured", "scaena_storyboard_binding_missing", "collection_target_missing", "collection_binding_missing"]);
 
 /** Auctra reports a not-yet-accepted screenplay as blocked; that is progress waiting on a person, not a fault. */
 export const neutralBlockers = new Set(["source_not_accepted"]);

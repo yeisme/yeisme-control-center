@@ -16,12 +16,12 @@ import {
   PopoverTrigger,
   ReadStateView,
   SkeletonRows,
-  StaleNotice,
   TabPanel,
   Tabs,
   TaskStatePill,
   ownerLabel,
 } from "../../components/ui";
+import { SourceStatusLine } from "../../components/SourceStatusLine";
 import { formatRelative } from "../../shared/read-model/format";
 import { labelFrom } from "../../shared/read-model/labels";
 import { readErrorMessage } from "../../shared/read-model/read-state";
@@ -74,7 +74,7 @@ function FactsPopover() {
     <PopoverTrigger asChild>
       <Button size="sm" variant="ghost" icon={<Info className="size-3.5" />}>四种事实</Button>
     </PopoverTrigger>
-    <PopoverContent className="w-[min(340px,calc(100vw-24px))] p-4">
+    <PopoverContent label="四种事实" className="w-[min(340px,calc(100vw-24px))] p-4">
       <p className="text-body-sm font-semibold">四种事实分开记录</p>
       <p className="mt-0.5 text-2xs text-muted">每一步由对应的 owner 单独记录，不能互相推断。</p>
       <ol className="mt-3 space-y-3">
@@ -134,6 +134,7 @@ export default function ReviewPage() {
   return <div className="page-enter space-y-5" data-page="review">
     <h1 className="sr-only">审阅与交付</h1>
     <PageToolbar
+      foldMetrics
       summary="审阅与交付只读展示 owner 返回的状态。采用、修改意见和交付发送都是 owner 写操作，需要独立授权合同，当前保持禁用。"
       actions={<FactsPopover />}
       metrics={tasks.status !== "loading" && <MetricStrip label="审阅概况" items={[
@@ -142,7 +143,7 @@ export default function ReviewPage() {
       ]} />}
       meta={tasks.observedAt && <span className="inline-flex items-center gap-1.5 text-2xs text-muted"><Clock3 className="size-3.5" />任务观察于 {formatRelative(tasks.observedAt)}</span>}
     />
-    <NoticeStack notices={[tasks.status === "stale" && <StaleNotice key="stale" status={tasks.status} error={tasks.error} observedAt={tasks.observedAt} onRetry={tasks.refresh} />]} />
+    <NoticeStack notices={[<SourceStatusLine key="source" noun="审阅列表" />]} />
     <Tabs<Tab>
       value={tab}
       onChange={(value) => setParams(value === "review" ? new URLSearchParams() : new URLSearchParams({ tab: value }), { replace: true })}

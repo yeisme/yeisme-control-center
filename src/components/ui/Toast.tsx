@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CheckCircle2, CircleAlert, Copy, Info } from "../../icons";
+import { copyReference } from "../../shared/clipboard";
 import { cx } from "./cx";
 
 type ToastTone = "success" | "info" | "warning";
@@ -17,7 +18,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
   return <ToastContext.Provider value={notify}>
     {children}
-    <div aria-live="polite" className="pointer-events-none fixed left-1/2 top-[calc(var(--topbar-height)+12px)] z-[60] flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-2">
+    <div aria-live="polite" className="pointer-events-none fixed left-1/2 top-[calc(var(--topbar-height)+12px)] z-[85] flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-2">
       {items.map((item) => <div key={item.id} role="status" className="pop-in pointer-events-auto flex w-full items-start gap-2.5 rounded-[12px] border border-line bg-panel px-3.5 py-3 text-[13px] text-ink shadow-float">
         <span className={cx("mt-0.5 shrink-0 [&>svg]:size-4", item.tone === "success" ? "text-success" : item.tone === "warning" ? "text-warning" : "text-info")}>
           {item.tone === "success" ? <CheckCircle2 /> : item.tone === "warning" ? <CircleAlert /> : <Info />}
@@ -32,7 +33,7 @@ export function useToast() {
   return useContext(ToastContext);
 }
 
-export function CopyRef({ value, label, className }: { value: string; label?: string; className?: string }) {
+export function CopyRef({ value, label, className, onCopyFailed, onCopySucceeded }: { value: string; label?: string; className?: string; onCopyFailed?: (value: string) => void; onCopySucceeded?: () => void }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -42,8 +43,8 @@ export function CopyRef({ value, label, className }: { value: string; label?: st
   return <button
     type="button"
     title={value}
-    aria-label={`复制${label || "引用"}`}
-    onClick={() => void navigator.clipboard?.writeText(value).then(() => setCopied(true)).catch(() => {})}
+    aria-label={`复制${label || "引用"} ${value}`}
+    onClick={() => void copyReference(value).then((ok) => { setCopied(ok); if (ok) onCopySucceeded?.(); else onCopyFailed?.(value); }).catch(() => { setCopied(false); onCopyFailed?.(value); })}
     className={cx("group inline-flex max-w-full items-center gap-1.5 rounded-[6px] font-mono text-xs text-ink-soft hover:text-ink", className)}
   >
     <span className="truncate">{value}</span>

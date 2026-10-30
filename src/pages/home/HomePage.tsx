@@ -1,16 +1,18 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useOverlayParams } from "../../app/overlay-history";
 import { Activity, ArrowRight, CircleAlert, CircleHelp, ClipboardCheck, Clock3, Eye, Images, ListTodo, Plug, Route, ScrollText, ServerCog, ShieldQuestion, Unplug, Wallet } from "../../icons";
 import { api, type UsageProjection } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace, type ScopedRead } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
-import { Button, Dot, EmptyState, KindBadge, Panel, Progress, ReadStateView, SkeletonRows, StaleNotice, StatCard, TaskStatePill, ToggleGroup, cx, ownerLabel, type Tone } from "../../components/ui";
+import { Button, Dot, EmptyState, KindBadge, NoticeStack, Panel, Progress, ReadStateView, SkeletonRows, StatCard, TaskStatePill, ToggleGroup, cx, ownerLabel, type Tone } from "../../components/ui";
 import { formatMoney, formatRelative } from "../../shared/read-model/format";
 import { collectResults, connectionStateLabel, connectionTone, resultMeta, taskInProgress, taskKind } from "../../shared/read-model/tasks";
 import { progressLabel, taskIsActive, taskStateLabels } from "../../task-observation";
 import { useNotifications } from "../../app/notifications-context";
 import { countsAsHomeAttention, reminderStateLabels } from "../../notifications";
 import { SourceCoverage } from "../../components/SourceCoverage";
+import { SourceStatusLine } from "../../components/SourceStatusLine";
 import { WorkQueueInspector, WorkStatePill, workQueueKindLabels, workQueueOwnerLabel, workQueuePriorityLabels, workQueueReasonLabel } from "./WorkQueueInspector";
 import type { WorkQueueItem, WorkQueueKind } from "../../shared/work-queue";
 import { matchesWorkQueueFilters } from "../../shared/work-queue";
@@ -24,6 +26,7 @@ const queueFilters: { id: QueueFilter; label: string }[] = [
   { id: "service_blocked", label: "阻塞" },
 ];
 const queueLimit = 8;
+const workOverlays = ["work_item"] as const;
 const queueKindIcons: Record<WorkQueueKind, ReactNode> = {
   task_failure: <CircleAlert />,
   task_unknown: <CircleHelp />,
@@ -50,7 +53,8 @@ export default function HomePage() {
   const usage = useScopedRead((scopeId, signal) => api.usage(scopeId, signal));
   const services = useScopedRead((scopeId, signal) => api.services(scopeId, signal));
   const queue = useScopedRead((scopeId, signal) => api.workQueue(scopeId, {}, undefined, 50, signal), { poll: (data) => data ? 30_000 : 15_000 });
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
+  const [, writeOverlay] = useOverlayParams(workOverlays);
   const [queueKind, setQueueKind] = useState<QueueFilter>("all");
   const [inspectorMode, setInspectorMode] = useState<TaskInspectorMode>(() => typeof window !== "undefined" && window.localStorage.getItem("yeisme.control.tasks.inspector-mode") === "floating" ? "floating" : "fixed");
 
@@ -83,7 +87,12 @@ export default function HomePage() {
   const selectWork = (workRef: string) => {
     const next = new URLSearchParams(params);
     next.set("work_item", workRef);
-    setParams(next);
+    writeOverlay(next);
+  };
+  const closeWork = () => {
+    const next = new URLSearchParams(params);
+    next.delete("work_item");
+    writeOverlay(next);
   };
 
   const tiles: { label: string; value: ReactNode; hint: string; icon: ReactNode; tone: Tone; onClick: () => void }[] = [
@@ -110,7 +119,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      <StaleNotice status={tasks.status} error={tasks.error} observedAt={tasks.observedAt} onRetry={tasks.refresh} />
+      <NoticeStack notices={[<SourceStatusLine key="source" noun="工作台" partial={false} />]} />
 
       <section aria-label="概览" className="grid grid-cols-2 gap-3 @xl:grid-cols-12">
         {tiles.map((tile, index) => <div key={tile.label} className={cx("stagger-in min-w-0", index < 4 ? "@xl:col-span-3" : "@xl:col-span-4", index === tiles.length - 1 && "@max-xl:col-span-2")} style={{ "--i": index } as React.CSSProperties}>
@@ -212,7 +221,7 @@ export default function HomePage() {
       <SourceCoverage services={services.data?.services || []} connections={tasks.connections} />
     </div>
 
-    {selectedWork && <WorkQueueInspector item={selectedWork} open mode={inspectorMode} onModeChange={(mode) => { setInspectorMode(mode); window.localStorage.setItem("yeisme.control.tasks.inspector-mode", mode); }} onClose={() => { const next = new URLSearchParams(params); next.delete("work_item"); setParams(next); }} onNavigate={(target) => { const next = new URLSearchParams(params); next.delete("work_item"); setParams(next); navigate(target); }} />}
+    {selectedWork && <WorkQueueInspector item={selectedWork} open mode={inspectorMode} onModeChange={(mode) => { setInspectorMode(mode); window.localStorage.setItem("yeisme.control.tasks.inspector-mode", mode); }} onClose={closeWork} onNavigate={(target) => navigate(target)} />}
   </div>;
 }
 

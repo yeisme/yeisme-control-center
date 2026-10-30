@@ -1,6 +1,8 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { cx } from "./cx";
 import type { Tone } from "./Status";
+import { moveBetweenRows } from "./list-keys";
+import { ActionsContextMenu, type ItemAction } from "./actions";
 
 const toneText: Record<Tone, string> = { success: "text-success", info: "text-info", warning: "text-warning", danger: "text-danger", review: "text-review", neutral: "text-ink" };
 const toneChip: Record<Tone, string> = { success: "bg-success-soft text-success", info: "bg-info-soft text-info", warning: "bg-warning-soft text-warning", danger: "bg-danger-soft text-danger", review: "bg-review-soft text-review", neutral: "bg-panel-sunken text-ink-soft" };
@@ -62,14 +64,30 @@ export interface Column<T> {
 }
 
 const priorityClass = { 1: "", 2: "hidden @2xl:table-cell", 3: "hidden @4xl:table-cell" } as const;
+
+/**
+ * Width rules for a table's main column, the one that names the row. Left alone it kept the room the other columns did
+ * not need: at 1920 short titles ended 550–840px before the next column, and one long description made the tool table
+ * 2816px wide. Each rule fixes the column at 560px once the table is wide enough for the column to want more, and
+ * below that `max-w-[560px]` keeps one long line from widening the table. Table cells take a fixed width but ignore a
+ * plain maximum, so the column cannot simply stop growing.
+ */
+// Main columns that already want 560px on a 1200px table: catalog tools and actions, the compact asset list.
+export const mainColumn = "max-w-[560px] @min-[1200px]:w-[560px]";
+// Main columns that grow slowly: fixed from a 1200px table they added up to 180px before the next column on 1536–1600
+// screens, so they are fixed only from an 1800px table.
+export const narrowMainColumn = "max-w-[560px] @min-[1800px]:w-[560px]";
+// Main columns that take all the room the other columns leave until a 1200px table: the task and project lists.
+// `max-w-0` keeps long titles from widening them; it would clamp the fixed width to nothing, so the wide rule lifts it.
+export const fillMainColumn = "w-full max-w-0 @min-[1200px]:w-[560px] @min-[1200px]:max-w-[560px]";
 const densityPad = { compact: "py-1.5", comfortable: "py-2.5", spacious: "py-3.5" } as const;
 
 /**
  * Shared list table. Column visibility follows the table's own width, so a docked Inspector never
  * squeezes columns into one-character wraps. Rows are clickable with the mouse; the first cell's
- * button is the keyboard target.
+ * button is the keyboard target, and ↑/↓/Home/End move between those buttons.
  */
-export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabel, selectedKey, density = "comfortable", empty, className, rowAttributes }: {
+export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabel, selectedKey, density = "comfortable", empty, className, rowAttributes, rowActions }: {
   columns: Column<T>[];
   rows: T[];
   rowKey: (row: T) => string;
@@ -81,25 +99,27 @@ export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabe
   empty?: ReactNode;
   className?: string;
   rowAttributes?: (row: T) => Record<string, string | undefined>;
+  /** What the row's context menu offers (right click, long press, Shift+F10); the same list as its "更多操作". */
+  rowActions?: (row: T) => ItemAction[];
 }) {
   if (!rows.length && empty) return <>{empty}</>;
   const open = (row: T) => onRowClick?.(row);
   const onKey = (event: KeyboardEvent<HTMLButtonElement>, row: T) => {
     if (event.key === " ") { event.preventDefault(); open(row); }
   };
-  return <div className={cx("@container min-w-0 overflow-x-auto", className)}>
+  // Without row buttons nothing inside can take focus, so the scroll box itself does when the table is wider than the screen.
+  return <div tabIndex={onRowClick ? undefined : 0} className={cx("@container min-w-0 overflow-x-auto", className)}>
     <table aria-label={label} className="w-full border-collapse text-left text-body-sm">
       <thead className="sticky top-0 z-[1] bg-panel-soft">
         <tr className="border-b border-line">
           {columns.map((column) => <th key={column.id} scope="col" className={cx("whitespace-nowrap px-4 py-2 text-2xs font-medium text-muted", column.align === "end" && "text-right", priorityClass[column.priority || 1])}>{column.header}</th>)}
         </tr>
       </thead>
-      <tbody>
+      <tbody onKeyDown={onRowClick ? (event) => moveBetweenRows(event) : undefined}>
         {rows.map((row) => {
           const key = rowKey(row);
           const selected = selectedKey === key;
-          return <tr
-            key={key}
+          return <ActionsContextMenu key={key} actions={rowActions?.(row) || []}><tr
             {...rowAttributes?.(row)}
             data-selected={selected || undefined}
             onClick={onRowClick ? () => open(row) : undefined}
@@ -107,10 +127,17 @@ export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabe
           >
             {columns.map((column, index) => <td key={column.id} className={cx("min-w-0 px-4 align-middle", densityPad[density], column.align === "end" && "text-right", priorityClass[column.priority || 1], column.className)}>
               {index === 0 && onRowClick
-                ? <button type="button" onClick={(event) => { event.stopPropagation(); open(row); }} onKeyDown={(event) => onKey(event, row)} aria-label={rowLabel?.(row)} aria-current={selected || undefined} className="block w-full min-w-0 rounded-[6px] text-left outline-offset-2">{column.cell(row)}</button>
+                ? rowLabel
+                  // The labelled button lies over the cell instead of wrapping it: its name stays the short row label, and the
+                  // cell's text stays plain table text, so the button never names less than the text it visibly contains.
+                  ? <div className="relative min-w-0">
+                    <button type="button" data-row-button onClick={(event) => { event.stopPropagation(); open(row); }} onKeyDown={(event) => onKey(event, row)} aria-label={rowLabel(row)} aria-current={selected || undefined} className="absolute inset-0 z-[1] rounded-[6px] outline-offset-2" />
+                    {column.cell(row)}
+                  </div>
+                  : <button type="button" data-row-button onClick={(event) => { event.stopPropagation(); open(row); }} onKeyDown={(event) => onKey(event, row)} aria-current={selected || undefined} className="block w-full min-w-0 rounded-[6px] text-left outline-offset-2">{column.cell(row)}</button>
                 : column.cell(row)}
             </td>)}
-          </tr>;
+          </tr></ActionsContextMenu>;
         })}
       </tbody>
     </table>

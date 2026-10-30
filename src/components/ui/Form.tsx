@@ -1,6 +1,7 @@
 import { forwardRef, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { ChevronDown, Search, X } from "../../icons";
 import { cx } from "./cx";
+import { firstRowAfter } from "./list-keys";
 
 const control = "h-9 w-full min-w-0 rounded-control border border-line bg-panel px-3 text-[13px] text-ink outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-faint hover:border-line-strong focus:border-focus focus:ring-3 focus:ring-focus/15 disabled:opacity-50";
 
@@ -23,7 +24,20 @@ export function SearchField({ value, onChange, placeholder, label, className }: 
   return <label className={cx("relative inline-flex min-w-0 items-center", className)}>
     <span className="sr-only">{label}</span>
     <Search aria-hidden="true" className="pointer-events-none absolute left-3 size-4 text-faint" />
-    <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={cx(control, "pl-9 pr-8")} />
+    <input
+      value={value}
+      data-page-search
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowDown") return;
+        const row = firstRowAfter(event.currentTarget);
+        if (!row) return;
+        event.preventDefault();
+        row.focus();
+      }}
+      placeholder={placeholder}
+      className={cx(control, "pl-9 pr-8")}
+    />
     {value && <button type="button" aria-label="清除搜索" onClick={() => onChange("")} className="absolute right-2 grid size-5 place-items-center rounded text-faint hover:bg-panel-sunken hover:text-ink"><X className="size-3.5" /></button>}
   </label>;
 }

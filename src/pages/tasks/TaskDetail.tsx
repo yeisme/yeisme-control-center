@@ -5,14 +5,15 @@ import { useWorkspace } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
 import { useNotifications } from "../../app/notifications-context";
 import { useObservationCache } from "../../app/observation-cache";
-import { Button, CopyRef, InlineNotice, KindBadge, MenuContent, MenuItem, MenuRoot, MenuSeparator, MenuTrigger, Pill, Progress, TaskStatePill, cx, ownerLabel, taskTone, useToast } from "../../components/ui";
+import { ActionMenuItems, Button, CopyRef, InlineNotice, KindBadge, MenuContent, MenuRoot, MenuTrigger, Pill, Progress, TaskStatePill, cx, ownerLabel, itemSelector, taskTone, useToast, type ItemAction } from "../../components/ui";
 import { ResultViewer } from "../../components/ResultViewer";
 import type { MediaPreviewController } from "../../components/media-preview";
 import { formatRelative } from "../../shared/read-model/format";
 import { labelFrom } from "../../shared/read-model/labels";
-import { connectionFor, connectionStateLabel, ownerModality, recoveryLabels, stageLabel, taskInProgress } from "../../shared/read-model/tasks";
+import { collectResults, connectionFor, connectionStateLabel, ownerModality, recoveryLabels, resultAction, stageLabel, taskInProgress } from "../../shared/read-model/tasks";
+import { AudioQueue, audioTrackFrom } from "../../app/audio-player";
 import { observationDelay, progressLabel, contentStateMessage, taskStateLabels } from "../../task-observation";
-import { reminderStateLabels, taskAllowsSafeCancel, taskDeleteAvailable } from "../../notifications";
+import { reminderStateLabels, taskAllowsSafeCancel, taskIdentityOf } from "../../notifications";
 import { createIdempotencyKey } from "../../shared/action-runner";
 import { kindOf } from "../../components/ui/Kind";
 import { ProcessTimeline } from "../../components/ProcessTimeline";
@@ -62,7 +63,6 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   const [task, setTask] = useState(initial);
   const [rereading, setRereading] = useState(false);
   const [maximized, setMaximized] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [events, setEvents] = useState<EventState>({ events: [], gap: false, status: "loading", error: null, loadingMore: false });
   const eventsRef = useRef(events);
   eventsRef.current = events;
@@ -71,19 +71,6 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   const connection = connectionFor(task, connections);
 
   useEffect(() => setTask(initial), [initial]);
-
-  // InspectorShell owns Escape for the panel; while the overflow menu is open Escape must only close the menu.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      event.preventDefault();
-      setMenuOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [menuOpen]);
 
   useEffect(() => {
     if (!key) return;
@@ -124,9 +111,10 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
     }
   };
 
-  const reminder = reminders.rows.find((item) => item.task_key === key && item.presence === "live") || reminders.rows.find((item) => item.task_key === key);
+  // Match on the task identity: a reminder recorded before a server restart carries an older signature.
+  const sameTask = (item: { task_key: string; task_identity?: string }) => !!key && (item.task_identity || taskIdentityOf(item.task_key)) === taskIdentityOf(key);
+  const reminder = reminders.rows.find((item) => sameTask(item) && item.presence === "live") || reminders.rows.find(sameTask);
   const safeCancel = taskAllowsSafeCancel(task);
-  const showDelete = taskDeleteAvailable();
 
   const reread = async () => {
     if (!key || rereading) return;
@@ -149,8 +137,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
       if (action === "acknowledge") await api.acknowledgeNotification(scopeId, reminder.id, session.csrf);
       else if (action === "mute") await api.muteNotification(scopeId, reminder.id, session.csrf, "fingerprint");
       else await api.archiveNotification(scopeId, reminder.id, session.csrf);
-      const page = await api.notifications(scopeId);
-      reminders.apply(page.rows);
+      reminders.apply(await api.notifications(scopeId));
       notify("提醒状态已更新。任务事实没有改变。", "success");
     } catch (error) {
       notify(`提醒更新失败（${errorCode(error)}）。任务状态保持不变。`, "warning");
@@ -203,7 +190,12 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   const canAcknowledge = !!reminder && reminder.state !== "acknowledged";
   const canMute = !!reminder && reminder.state !== "muted";
   const canArchive = !!reminder && reminder.state !== "archived";
-  const hasMoreActions = canAcknowledge || canMute || canArchive || showDelete;
+  // Escape closes this menu first: Radix marks it handled, and the inspector only closes on an unhandled Escape.
+  const moreActions: ItemAction[] = [
+    ...(canAcknowledge ? [{ id: "acknowledge", label: "确认提醒", icon: <CheckCheck />, disabled: !session?.csrf, run: () => void markReminder("acknowledge") }] : []),
+    ...(canMute ? [{ id: "mute", label: "对该任务免提醒", icon: <BellOff />, disabled: !session?.csrf, run: () => void markReminder("mute") }] : []),
+    ...(canArchive ? [{ id: "archive", label: "归档提醒", icon: <Archive />, disabled: !session?.csrf, run: () => void markReminder("archive") }] : []),
+  ];
   const processBase = events.observation || task.process || (events.coverage ? {
     schema_version: "yeisme.process_observation.v1" as const,
     state: "unknown" as const,
@@ -242,6 +234,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
     open={open}
     mode={mode}
     maximized={maximized}
+    returnFocus={itemSelector("data-task", task.locator.task_ref)}
     onModeChange={onModeChange}
     onMaximize={() => setMaximized((value) => !value)}
     onClose={() => onOpenChange(false)}
@@ -262,14 +255,9 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
     footer={<div className="flex flex-wrap items-center gap-2">
       <Button variant={task.state === "unknown" ? "primary" : "secondary"} size="sm" disabled={rereading} onClick={() => void reread()} icon={rereading ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : <RefreshCw className="size-3.5" />}>重新读取原任务</Button>
       {safeCancel && <Button size="sm" variant="danger" disabled={cancelling} data-safe-cancel="true" onClick={() => void safeCancelTask()}>{cancelling ? "正在取消" : "安全取消"}</Button>}
-      {hasMoreActions && <MenuRoot modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
+      {moreActions.length > 0 && <MenuRoot modal={false}>
         <MenuTrigger asChild><Button size="sm" variant="ghost" className="ml-auto" aria-label="更多操作" icon={<MoreHorizontal className="size-4" />}>更多</Button></MenuTrigger>
-        <MenuContent align="end" className="z-[70]!">
-          {canAcknowledge && <MenuItem icon={<CheckCheck />} disabled={!session?.csrf} onSelect={() => void markReminder("acknowledge")}>确认提醒</MenuItem>}
-          {canMute && <MenuItem icon={<BellOff />} disabled={!session?.csrf} onSelect={() => void markReminder("mute")}>对该任务免提醒</MenuItem>}
-          {canArchive && <MenuItem icon={<Archive />} disabled={!session?.csrf} onSelect={() => void markReminder("archive")}>归档提醒</MenuItem>}
-          {showDelete && <>{reminder && <MenuSeparator />}<MenuItem tone="danger">删除任务</MenuItem></>}
-        </MenuContent>
+        <MenuContent align="end"><ActionMenuItems actions={moreActions} /></MenuContent>
       </MenuRoot>}
     </div>}
   >
@@ -293,9 +281,10 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
       {task.results.length > 0 && <section id="task-inspector-results" data-inspector-section="results" tabIndex={-1} aria-label="结果" className="scroll-mt-24 space-y-2">
         <h3 className="text-body-sm font-semibold text-ink">结果 <span className="font-normal text-muted">{task.results.length}</span></h3>
         {connection?.runtime && connection.runtime.content !== "supported" && <p className="text-2xs text-muted">{contentStateMessage(connection.runtime.content)}</p>}
-        <div className="space-y-2">
+        {/* Several dialogue lines of one task play through in order from here. */}
+        <AudioQueue tracks={collectResults([task]).filter((entry) => entry.kind === "audio" && resultAction(task, "preview").enabled).map((entry) => audioTrackFrom(entry))}><div className="space-y-2">
           {task.results.map((result) => <ResultViewer key={result.ref} task={task} result={result} kind={kindOf(result.mime, ownerModality[task.locator.owner])} preview={preview} />)}
-        </div>
+        </div></AudioQueue>
       </section>}
 
       {recovery && <section id="task-inspector-recovery" data-inspector-section="recovery" tabIndex={-1} aria-label="Provider 恢复状态" className="scroll-mt-24 space-y-2">
@@ -355,7 +344,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   </TaskInspectorFrame>;
 }
 
-export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaximize, onClose, eyebrow, title, description, context, icon, reference, sections, footer, children }: {
+export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaximize, onClose, eyebrow, title, description, context, icon, reference, sections, footer, children, returnFocus }: {
   open: boolean;
   mode: TaskInspectorMode;
   maximized: boolean;
@@ -371,6 +360,8 @@ export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaxi
   sections: { id: string; label: string }[];
   footer: React.ReactNode;
   children: React.ReactNode;
+  /** Selector of the task's list entry; see InspectorShell. */
+  returnFocus?: string;
 }) {
   const header = <div className="flex items-start gap-3">
     <span className="mt-0.5 shrink-0">{icon}</span>
@@ -397,6 +388,7 @@ export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaxi
     label="任务"
     ariaLabel="任务详情"
     dataAttribute="data-task-inspector"
+    returnFocus={returnFocus}
     header={header}
     meta={meta}
     sections={sections as InspectorSection[]}

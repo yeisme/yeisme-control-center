@@ -9,7 +9,7 @@ import {
   availabilityLabels, availabilityTone, capabilityLabels, catalogCoverageLabels, catalogCoverageTone, changeLabels, changeTone, channelStatusLabels, channelStatusTone,
   domainLabels, entryKindLabels, freshnessLabels, labelFrom, laneLabels, modelStatusLabels, modelStatusTone, reasonLabel, riskLabels, riskTone,
 } from "../../shared/read-model/labels";
-import { entryRef, precheckTarget, type CatalogEntry } from "./catalog-view";
+import { entryRef, guideTarget, type CatalogEntry } from "./catalog-view";
 
 const kindIcons = { server: Server, tool: Wrench, action: ListTree, model: Cpu, channel: Waypoints };
 
@@ -81,7 +81,7 @@ export function CatalogInspector({ entry, catalog, usage, mode, onModeChange, on
   const { kind, value } = entry;
   const Icon = kindIcons[kind];
   const changes = catalog.changes.filter((change) => change.kind === kind && change.owner === value.owner && change.entry_id === value.id);
-  const target = precheckTarget(entry);
+  const target = guideTarget(entry);
   const title = kind === "model" ? value.model_ref : kind === "channel" ? value.name : kind === "server" ? value.name : value.name;
   const reference = kind === "model" ? value.model_ref : kind === "channel" ? value.channel_id : kind === "server" ? value.owner : value.name;
 
@@ -253,8 +253,8 @@ export function CatalogInspector({ entry, catalog, usage, mode, onModeChange, on
   </div>;
   const footer = <div className="flex flex-wrap items-center gap-2">
     {target
-      ? <Button size="sm" variant="primary" icon={<ArrowRight className="size-3.5" />} onClick={() => onNavigate(target)}>在 AI 创作中预检</Button>
-      : <Button size="sm" disabled disabledReason={kind === "model" ? "历史、不可用或漂移的模型不能用于新预检" : "该条目不是可预检的生成能力"}>在 AI 创作中预检</Button>}
+      ? <Button size="sm" variant="primary" icon={<ArrowRight className="size-3.5" />} onClick={() => onNavigate(target)}>查看接入方式</Button>
+      : <Button size="sm" disabled disabledReason="使用指南暂未收录这个来源的命令">查看接入方式</Button>}
     <CopyRef value={reference} label="引用" />
     <span className={cx("ml-auto inline-flex items-center gap-1 text-2xs text-muted")}><Boxes className="size-3" />目录登记不等于可调用</span>
   </div>;

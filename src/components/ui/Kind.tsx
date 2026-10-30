@@ -28,7 +28,7 @@ const icons = { image: Image, video: Video, audio: AudioLines, text: FileText };
 
 export function KindBadge({ kind, size = "md", className }: { kind: MediaKind; size?: "sm" | "md" | "lg"; className?: string }) {
   const Icon = icons[kind];
-  return <span aria-label={labels[kind]} className={cx("grid shrink-0 place-items-center", tones[kind], size === "sm" ? "size-7 rounded-[7px] [&>svg]:size-3.5" : size === "lg" ? "size-11 rounded-[11px] [&>svg]:size-5" : "size-9 rounded-[9px] [&>svg]:size-[17px]", className)}>
+  return <span role="img" aria-label={labels[kind]} className={cx("grid shrink-0 place-items-center", tones[kind], size === "sm" ? "size-7 rounded-[7px] [&>svg]:size-3.5" : size === "lg" ? "size-11 rounded-[11px] [&>svg]:size-5" : "size-9 rounded-[9px] [&>svg]:size-[17px]", className)}>
     <Icon aria-hidden="true" />
   </span>;
 }

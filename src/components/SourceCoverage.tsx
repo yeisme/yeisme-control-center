@@ -62,7 +62,7 @@ export function SourceCoverage({ services, connections = [], readStatus = "ready
           return <li key={owner}>
             <Tooltip content={<><span className="block">{detail}</span><span className="mt-0.5 block opacity-75">{observedAt ? `观察于 ${formatRelative(observedAt)}` : "观察时间未提供"}</span></>}>
               <span tabIndex={0} className="inline-flex rounded-chip outline-none focus-visible:ring-2 focus-visible:ring-focus">
-                <Pill tone={meta.tone} icon={statusIcon(state)}><span className="font-semibold">{sourceLabels[owner]}</span><span className="opacity-80"> · {meta.label}</span></Pill>
+                <Pill tone={meta.tone} icon={statusIcon(state)}><span className="font-semibold">{sourceLabels[owner]}</span><span className="font-normal"> · {meta.label}</span></Pill>
               </span>
             </Tooltip>
           </li>;

@@ -171,9 +171,5 @@ export interface ToolCatalog {
   coverage: CatalogCoverage[];
 }
 
-/** Generation entries that a user may pre-check in AI 创作; historical or undeclared callability never qualifies. */
-export const canPrecheckModel = (model: CatalogModel) =>
-  model.status !== "historical" && model.status !== "unavailable" && model.status !== "drifted";
-
 /** Observation-cache key the catalog page publishes to so the command palette can search without a request. */
 export const toolCatalogCacheKey = "tool-catalog";

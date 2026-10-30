@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowRight, Boxes, Clock3, Cpu, History, ListTree, Plug, RefreshCw, Server, Sparkles, Waypoints, Wrench } from "../../icons";
+import { useOverlayParams } from "../../app/overlay-history";
+import { ArrowRight, Boxes, Clock3, Copy, Cpu, History, ListTree, PanelRightOpen, Plug, RefreshCw, Server, Sparkles, Waypoints, Wrench } from "../../icons";
+import { linkActions, useCopy } from "../../app/item-actions";
 import { api, isRouteUnavailable, type Epoch, type ProviderCapabilityProjection } from "../../shared/api/control-center-client";
 import { useScopedRead, type ScopedRead } from "../../app/workspace";
 import { useObservationCache } from "../../app/observation-cache";
 import {
   Button, Checkbox, DataTable, EmptyState, InlineNotice, KindBadge, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, SkeletonRows, StaleNotice,
-  TabPanel, Tabs, ToggleGroup, Unknown, cx, ownerLabel, type Column, type MediaKind,
+  TabPanel, Tabs, ToggleGroup, Unknown, cx, mainColumn, narrowMainColumn, ownerLabel, type Column, type ItemAction, type MediaKind,
 } from "../../components/ui";
 import type { InspectorMode } from "../../components/InspectorShell";
 import { toolCatalogCacheKey, type CatalogAction, type CatalogChannel, type CatalogModel, type CatalogOwner, type CatalogServer, type CatalogTool, type ToolCatalog } from "../../shared/tool-catalog";
@@ -25,12 +27,13 @@ import { readinessMeta } from "./readiness";
 type CatalogRead = (ToolCatalog & Epoch) | { route_unavailable: true };
 
 const inspectorPreferenceKey = "yeisme.control.catalog.inspector-mode";
+const catalogOverlays = ["entry"] as const;
 const ownerKind: Record<CatalogOwner, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio", aigora: "text", gateway: "text", auctra: "text" };
 const ownerOptions: { id: OwnerFilter; label: string }[] = [{ id: "all", label: "全部" }, { id: "eikona", label: "Eikona" }, { id: "scaena", label: "Scaena" }, { id: "sonora", label: "Sonora" }];
 const riskOptions: { id: RiskFilter; label: string }[] = [{ id: "all", label: "全部风险" }, { id: "read_only", label: "只读" }, { id: "mutation", label: "写入" }, { id: "paid_external", label: "付费外部" }, { id: "human_gate", label: "人工门" }];
 
 export default function CapabilityHub() {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const navigate = useNavigate();
   const tab = parseCatalogTab(params.get("tab"));
   const owner = parseOwnerFilter(params.get("owner"));
@@ -56,11 +59,12 @@ export default function CapabilityHub() {
   const cache = useObservationCache();
   useEffect(() => { if (catalog) cache.put(toolCatalogCacheKey, catalog, 5 * 60_000, 30 * 60_000); }, [cache, catalog]);
 
+  const [, writeOverlay] = useOverlayParams(catalogOverlays);
   const update = useCallback((patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(patch)) if (value) next.set(key, value); else next.delete(key);
-    setParams(next, { replace: true });
-  }, [params, setParams]);
+    writeOverlay(next);
+  }, [params, writeOverlay]);
   const selected = catalog ? findEntry(catalog, params.get("entry")) : null;
   const open = (ref: string) => update({ entry: ref });
   const metrics = useMemo(() => catalog ? catalogMetrics(catalog) : null, [catalog]);
@@ -70,6 +74,7 @@ export default function CapabilityHub() {
   return <div className={cx(!selected && "page-enter", "space-y-5", selected && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="capabilities">
     <h1 className="sr-only">模型与工具</h1>
     <PageToolbar
+      foldMetrics
       summary="跨 owner 的只读目录：模型、渠道、MCP 工具与动作。目录登记不等于可调用，控制中心不会调用任何条目。"
       metrics={metrics && <MetricStrip label="目录概况" items={[
         { label: "服务", value: `${metrics.readableServers}/${metrics.servers}`, hint: metrics.pendingServers ? `+${metrics.pendingServers} 待接入` : undefined },
@@ -197,7 +202,7 @@ function paramSummary(model: CatalogModel) {
 }
 
 const modelColumns: Column<CatalogModel>[] = [
-  { id: "model", header: "模型", cell: (model) => <span className="flex min-w-0 items-center gap-3">
+  { id: "model", header: "模型", className: narrowMainColumn, cell: (model) => <span className="flex min-w-0 items-center gap-3">
     <KindBadge kind={ownerKind[model.owner]} size="sm" />
     <span className="min-w-0"><span className="block truncate font-medium text-ink">{model.model_ref}</span><span className="block truncate text-2xs text-muted">{[ownerLabel(model.owner), ...new Set([model.provider, model.channel].filter(Boolean))].join(" · ")}</span></span>
   </span> },
@@ -207,8 +212,20 @@ const modelColumns: Column<CatalogModel>[] = [
   { id: "observed", header: "观察", priority: 3, align: "end", cell: (model) => <span className="whitespace-nowrap text-2xs text-muted">{model.observed_at ? formatRelative(model.observed_at) : "未提供"}</span> },
 ];
 
+/** Every catalog row offers the same: its details, its address, and its name to paste into a CLI or an agent. */
+function useCatalogActions(onOpen: (ref: string) => void) {
+  const copy = useCopy();
+  return (ref: string, name: string, what: string): ItemAction[] => [
+    { id: "open", label: "查看详情", icon: <PanelRightOpen />, group: "open", run: () => onOpen(ref) },
+    // The entry opens on the tab that lists it: models and channels have their own, tools and actions share one.
+    ...linkActions(`/capabilities?tab=${({ model: "models", channel: "channels" } as Record<string, string>)[ref.split(":")[0]] || "tools"}&entry=${encodeURIComponent(ref)}`, copy),
+    { id: "copy-name", label: `复制${what}`, icon: <Copy />, group: "link", run: () => void copy(name, what) },
+  ];
+}
+
 function ModelsView({ models, query, owner, selected, onOpen }: { models: CatalogModel[]; query: string; owner: OwnerFilter; selected: string | null; onOpen: (ref: string) => void }) {
   const [showHistorical, setShowHistorical] = useState(false);
+  const actions = useCatalogActions(onOpen);
   const { current, historical } = filterModels(models, { query, owner });
   const table = (rows: CatalogModel[], label: string) => <DataTable
     label={label}
@@ -219,6 +236,7 @@ function ModelsView({ models, query, owner, selected, onOpen }: { models: Catalo
     rowLabel={(model) => `查看模型 ${model.model_ref}`}
     selectedKey={selected}
     onRowClick={(model) => onOpen(entryRef("model", model.owner, model.id))}
+    rowActions={(model) => actions(entryRef("model", model.owner, model.id), model.model_ref, "模型引用")}
   />;
   return <div className="space-y-4">
     <Panel bodyClassName="p-0">
@@ -236,7 +254,7 @@ function ModelsView({ models, query, owner, selected, onOpen }: { models: Catalo
 }
 
 const channelColumns: Column<CatalogChannel>[] = [
-  { id: "channel", header: "渠道", cell: (channel) => <span className="flex min-w-0 items-center gap-3">
+  { id: "channel", header: "渠道", className: narrowMainColumn, cell: (channel) => <span className="flex min-w-0 items-center gap-3">
     <span className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-panel-sunken text-ink-soft"><Waypoints className="size-3.5" /></span>
     <span className="min-w-0"><span className="block truncate font-medium text-ink">{channel.name}</span><span className="block truncate text-2xs text-muted">{ownerLabel(channel.owner)}{channel.protocol ? ` · ${channel.protocol}` : ""}</span></span>
   </span> },
@@ -247,6 +265,7 @@ const channelColumns: Column<CatalogChannel>[] = [
 ];
 
 function ChannelsView({ channels, selected, onOpen }: { channels: CatalogChannel[]; selected: string | null; onOpen: (ref: string) => void }) {
+  const actions = useCatalogActions(onOpen);
   return <Panel bodyClassName="p-0">
     <DataTable
       label="渠道目录"
@@ -257,13 +276,14 @@ function ChannelsView({ channels, selected, onOpen }: { channels: CatalogChannel
       rowLabel={(channel) => `查看渠道 ${channel.name}`}
       selectedKey={selected}
       onRowClick={(channel) => onOpen(entryRef("channel", channel.owner, channel.id))}
+      rowActions={(channel) => actions(entryRef("channel", channel.owner, channel.id), channel.name, "渠道名称")}
       empty={<EmptyState compact icon={<Waypoints />} title="没有匹配的渠道" body="owner 未返回渠道摘要，或当前凭据不能读取。" />}
     />
   </Panel>;
 }
 
 const toolColumns: Column<CatalogTool>[] = [
-  { id: "tool", header: "MCP 工具", cell: (tool) => <span className="min-w-0"><span className="block truncate font-mono text-xs font-medium text-ink">{tool.name}</span><span className="block truncate text-2xs text-muted">{tool.title || tool.description || "owner 未描述"}</span></span> },
+  { id: "tool", header: "MCP 工具", className: mainColumn, cell: (tool) => <span className="min-w-0"><span className="block truncate font-mono text-xs font-medium text-ink">{tool.name}</span><span className="block truncate text-2xs text-muted">{tool.title || tool.description || "owner 未描述"}</span></span> },
   { id: "hints", header: "注解", priority: 2, cell: (tool) => <span className="flex flex-wrap gap-1">
     {tool.dispatcher && <Pill size="sm" tone="neutral">动作入口</Pill>}
     {tool.annotations.read_only === true && <Pill size="sm" tone="success">只读</Pill>}
@@ -275,7 +295,7 @@ const toolColumns: Column<CatalogTool>[] = [
 ];
 
 const actionColumns: Column<CatalogAction>[] = [
-  { id: "action", header: "动作", cell: (action) => <span className="min-w-0"><span className="flex items-center gap-1.5"><span className="truncate font-mono text-xs font-medium text-ink">{action.name}</span>{action.creative_mode && <span className="whitespace-nowrap rounded-[5px] bg-kind-image-soft px-1.5 py-0.5 text-2xs text-kind-image">{generationModeLabels[action.creative_mode]}</span>}</span><span className="block truncate text-2xs text-muted">{action.summary || action.description || "owner 未描述"}</span></span> },
+  { id: "action", header: "动作", className: mainColumn, cell: (action) => <span className="min-w-0"><span className="flex items-center gap-1.5"><span className="truncate font-mono text-xs font-medium text-ink">{action.name}</span>{action.creative_mode && <span className="whitespace-nowrap rounded-[5px] bg-kind-image-soft px-1.5 py-0.5 text-2xs text-kind-image">{generationModeLabels[action.creative_mode]}</span>}</span><span className="block truncate text-2xs text-muted">{action.summary || action.description || "owner 未描述"}</span></span> },
   { id: "risk", header: "风险", cell: (action) => <Pill size="sm" tone={riskTone[action.risk]}>{riskLabels[action.risk]}</Pill> },
   { id: "availability", header: "可用性", priority: 2, cell: (action) => <Pill size="sm" tone={availabilityTone[action.availability]}>{availabilityLabels[action.availability]}</Pill> },
   { id: "lane", header: "通道", priority: 3, cell: (action) => <span className="whitespace-nowrap text-2xs text-muted">{labelFrom(laneLabels, action.lane, "未声明")}</span> },
@@ -288,6 +308,7 @@ function ToolsView({ catalog, query, owner, risk, selected, onOpen }: { catalog:
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const tools = filterTools(catalog.tools, { query, owner });
   const actions = filterActions(catalog.actions, { query, owner, risk });
+  const rowMenu = useCatalogActions(onOpen);
   const owners = [...new Set([...tools.map((tool) => tool.owner), ...actions.map((action) => action.owner)])];
   const filtering = !!query.trim() || risk !== "all";
   if (!owners.length) return <Panel><EmptyState compact icon={<Wrench />} title="没有匹配的工具或动作" /></Panel>;
@@ -299,9 +320,9 @@ function ToolsView({ catalog, query, owner, risk, selected, onOpen }: { catalog:
     const ownerActions = showAll ? allActions : allActions.slice(0, collapsedActionRows);
     const hidden = allActions.length - ownerActions.length;
     return <Panel key={item} title={<span className="flex items-center gap-2"><KindBadge kind={ownerKind[item]} size="sm" />{ownerLabel(item)}</span>} eyebrow={`${ownerTools.length} 个 MCP 工具 · ${allActions.length} 个动作`} bodyClassName="p-0">
-      {ownerTools.length > 0 && <DataTable label={`${ownerLabel(item)} MCP 工具`} columns={toolColumns} rows={ownerTools} rowKey={(tool) => entryRef("tool", tool.owner, tool.id)} rowAttributes={(tool) => ({ "data-catalog-row": entryRef("tool", tool.owner, tool.id) })} rowLabel={(tool) => `查看工具 ${tool.name}`} selectedKey={selected} onRowClick={(tool) => onOpen(entryRef("tool", tool.owner, tool.id))} />}
+      {ownerTools.length > 0 && <DataTable label={`${ownerLabel(item)} MCP 工具`} columns={toolColumns} rows={ownerTools} rowKey={(tool) => entryRef("tool", tool.owner, tool.id)} rowAttributes={(tool) => ({ "data-catalog-row": entryRef("tool", tool.owner, tool.id) })} rowLabel={(tool) => `查看工具 ${tool.name}`} selectedKey={selected} onRowClick={(tool) => onOpen(entryRef("tool", tool.owner, tool.id))} rowActions={(tool) => rowMenu(entryRef("tool", tool.owner, tool.id), tool.name, "工具名")} />}
       {ownerActions.length > 0 && <div className={cx(ownerTools.length > 0 && "border-t border-line")}>
-        <DataTable label={`${ownerLabel(item)} 动作`} columns={actionColumns} rows={ownerActions} rowKey={(action) => entryRef("action", action.owner, action.id)} rowAttributes={(action) => ({ "data-catalog-row": entryRef("action", action.owner, action.id) })} rowLabel={(action) => `查看动作 ${action.name}`} selectedKey={selected} onRowClick={(action) => onOpen(entryRef("action", action.owner, action.id))} />
+        <DataTable label={`${ownerLabel(item)} 动作`} columns={actionColumns} rows={ownerActions} rowKey={(action) => entryRef("action", action.owner, action.id)} rowAttributes={(action) => ({ "data-catalog-row": entryRef("action", action.owner, action.id) })} rowLabel={(action) => `查看动作 ${action.name}`} selectedKey={selected} onRowClick={(action) => onOpen(entryRef("action", action.owner, action.id))} rowActions={(action) => rowMenu(entryRef("action", action.owner, action.id), action.name, "动作名")} />
         {(hidden > 0 || (expanded.has(item) && !filtering && allActions.length > collapsedActionRows)) && <div className="border-t border-line px-5 py-2.5">
           <Button size="sm" variant="ghost" aria-expanded={hidden === 0} onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(item)) next.delete(item); else next.add(item); return next; })}>
             {hidden > 0 ? `显示全部 ${allActions.length} 个动作` : "收起动作列表"}

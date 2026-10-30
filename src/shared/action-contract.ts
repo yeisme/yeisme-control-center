@@ -21,6 +21,8 @@ export const actionNames = [
   "project.metadata.rename",
   "project.metadata.hide",
   "project.metadata.unhide",
+  "owner_project.connect",
+  "owner_project.disconnect",
 ] as const;
 
 export type ControlAction = (typeof actionNames)[number];

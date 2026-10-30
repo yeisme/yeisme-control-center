@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, errorClassOf, errorCode, isAbort, type AuthMethods, type SessionScope, type WorkspaceSession } from "../shared/api/control-center-client";
 import { clearMediaSessionCaches } from "./media-cache";
+import { clearRecentItems } from "./recent-store";
 import { statusForFailure, type ReadState } from "../shared/read-model/read-state";
 
 export type AuthPhase = "loading" | "login_required" | "forbidden" | "offline" | "ready";
@@ -104,6 +105,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     const csrf = session?.csrf;
     clearMediaSessionCaches();
+    clearRecentItems();
     setSession(null);
     setPhase("login_required");
     setPhaseCode("");

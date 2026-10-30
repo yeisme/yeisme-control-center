@@ -51,6 +51,7 @@ function processTone(state: string) {
 export function ProcessTimeline({ observation, events, loading = false, error, reason, onRetry, onLoadMore }: { observation?: ProcessObservation; events?: ProcessCheckpoint[]; loading?: boolean; error?: string | null; reason?: string; onRetry?: () => void; onLoadMore?: () => void }) {
   const checkpoints = events?.length ? events : observation?.checkpoints || [];
   const prompt = observation?.prompt_capture || checkpoints.find((event) => event.prompt_capture)?.prompt_capture;
+  const hasObservation = !!observation;
   if (loading) return <div className="space-y-2" aria-label="加载过程观察"><div className="skeleton h-16" /><div className="skeleton h-12" /><div className="skeleton h-12" /></div>;
   const coverage = observation?.coverage;
   const sourceReason = !error ? readableReason(reason) : null;
@@ -62,12 +63,14 @@ export function ProcessTimeline({ observation, events, loading = false, error, r
     observation?.freshness === "stale" && <InlineNotice key="stale" tone="warning" icon={<Clock3 />}>过程观察已过期，正在后台刷新。</InlineNotice>,
     !error && coverage === "needs_contract" && <InlineNotice key="needs-contract" tone="neutral" icon={<Plug />}>来源未提供中间过程合同；当前只展示最终产物和已有元数据。</InlineNotice>,
     !error && coverage === "not_recorded" && <InlineNotice key="not-recorded" tone="neutral" icon={<ShieldQuestion />}>来源没有记录提示词或过程正文。</InlineNotice>,
+    !error && hasObservation && ["partial", "pending", "unknown", "complete"].includes(coverage || "") && checkpoints.length === 0 && <InlineNotice key="checkpoint-gap" tone="neutral" icon={<ShieldQuestion />}>来源已返回过程观察，但尚未返回中间检查点；当前只展示已确认的阶段状态。</InlineNotice>,
   ];
   return <div className="space-y-3">
     <PromptCaptureSummary prompt={prompt} compact />
     <NoticeStack notices={notices} />
-    {checkpoints.length === 0 && !error && <p className="text-body-sm text-muted">来源尚未返回中间检查点。</p>}
-    {checkpoints.length > 0 && <ol className="relative space-y-0">
+    {checkpoints.length === 0 && !error && !hasObservation && <p className="text-body-sm text-muted" data-process-gap="not-observed">来源尚未返回中间检查点。</p>}
+
+    {checkpoints.length > 0 && <ol className="relative space-y-0" data-process-checkpoints="true">
       {checkpoints.map((checkpoint, index) => {
         const duration = formatDurationMs(checkpoint.duration_ms);
         const stateText = stateLabels[checkpoint.state] || (checkpoint.state ? humanize(checkpoint.state) : "状态未提供");

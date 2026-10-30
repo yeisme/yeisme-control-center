@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Clock3, LoaderCircle, RefreshCw, SlidersHorizontal } from "../../icons";
+import { ChevronLeft, ChevronRight, Clock3, Copy, Eye, FolderKanban, LoaderCircle, PanelRightOpen, Play, RefreshCw, SlidersHorizontal } from "../../icons";
+import { linkActions, useCopy } from "../../app/item-actions";
 import { api, errorCode, type TaskConnectionState, type TaskSnapshot } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
+import { recentTarget, useRememberRecent } from "../../app/recent";
 import { taskTime, useTasks } from "../../app/tasks-context";
 import { useMediaPreview } from "../../components/media-preview";
-import { Button, DataTable, Dot, EmptyState, InlineNotice, NoticeStack, PageToolbar, Panel, Progress, ReadStateView, SearchField, Select, SkeletonRows, StaleNotice, TaskStatePill, ToggleGroup, cx, ownerLabel, useToast, type Column } from "../../components/ui";
+import { SourceStatusLine } from "../../components/SourceStatusLine";
+import { useOverlayParams } from "../../app/overlay-history";
+import { Button, DataTable, fillMainColumn, Dot, EmptyState, InlineNotice, NoticeAction, NoticeStack, PageToolbar, Panel, Progress, ReadStateView, SearchField, Select, SkeletonRows, TaskStatePill, ToggleGroup, cx, ownerLabel, useToast, type Column, type ItemAction } from "../../components/ui";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
 import { collectResults, connectionStateLabel, connectionTone, inView, resultAction, stageLabel, taskInProgress, ownerModality, type TaskView } from "../../shared/read-model/tasks";
 import { filterTasks, progressLabel, taskIsActive, taskNeedsAttention, taskStateLabels, type TaskFilters } from "../../task-observation";
@@ -17,6 +21,9 @@ import { FilterBar } from "../../components/FilterBar";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
 import { pageSizes, useListPreferences, type ListDensity, type PageSize } from "../../app/list-preferences";
 import { readErrorMessage } from "../../shared/read-model/read-state";
+import { AudioQueue, audioTrackFrom, useAudioPlayer } from "../../app/audio-player";
+import { AudioPlayButton } from "../../components/AudioDock";
+import { MediaViewer, viewerSlide, visualSlides } from "../../components/MediaViewer";
 
 const views: { id: TaskView; label: string }[] = [
   { id: "all", label: "全部" },
@@ -42,6 +49,7 @@ const laneMessage = (label: string, lane: TaskLane) => lane.status === "needs_co
 
 type InspectorMode = "fixed" | "floating";
 const inspectorPreferenceKey = "yeisme.control.tasks.inspector-mode";
+const taskOverlays = ["task", "preview"] as const;
 
 export default function TasksPage() {
   const tasks = useTasks();
@@ -51,6 +59,7 @@ export default function TasksPage() {
   const { pageSize, density, page: listPage, setPage, setPageSize, setDensity, resetPage } = useListPreferences();
   const listKey = "tasks";
   const [params, setParams] = useSearchParams();
+  const [, writeOverlay] = useOverlayParams(taskOverlays);
   const view = (views.some((item) => item.id === params.get("view")) ? params.get("view") : "all") as TaskView;
   const selectedKey = params.get("task");
   const [showFilters, setShowFilters] = useState(() => ["owner", "connection", "state", "results", "prompt"].some((key) => params.get(key)));
@@ -78,9 +87,9 @@ export default function TasksPage() {
       if (value) next.set(key, value);
       else next.delete(key);
     }
-    setParams(next, { replace: history === "replace" });
+    writeOverlay(next, history);
     if (resetPagination) resetPage(listKey);
-  }, [listKey, params, resetPage, setParams]);
+  }, [listKey, params, resetPage, writeOverlay]);
 
   // Legacy owner deep link `#/tasks?connection&project&family&ref` resolves the original task once.
   const legacy = useMemo(() => taskTarget("#/tasks?" + params.toString()), [params]);
@@ -108,14 +117,25 @@ export default function TasksPage() {
     history: tasks.rows.filter((task) => !taskIsActive(task)).length,
   }), [tasks.rows]);
   const selected = tasks.rows.find((task) => task.task_key === selectedKey) || (resolved?.task_key === selectedKey ? resolved : null);
+  useRememberRecent(selected?.task_key ? { key: `task:${selected.task_key}`, kind: "task", label: selected.title, meta: `${ownerLabel(selected.locator.owner)} · 任务`, target: recentTarget("/tasks", params) } : null);
   const previewEntries = useMemo(() => {
     const entries = collectResults(resolved ? [...tasks.rows, resolved] : tasks.rows);
     return [...new Map(entries.map((entry) => [entry.key, entry])).values()];
   }, [resolved, tasks.rows]);
   const resolvePreview = useCallback((key: string) => previewEntries.find((entry) => entry.key === key) || null, [previewEntries]);
-  const previewKey = params.get("preview");
+  // Audio plays in the global player, never in the task Inspector, so an audio preview key is ignored here.
+  const requestedPreview = params.get("preview");
+  const previewKey = requestedPreview && resolvePreview(requestedPreview)?.kind === "audio" ? null : requestedPreview;
   const setPreviewKey = useCallback((key: string | null, history: "push" | "replace") => update({ preview: key }, history), [update]);
-  const preview = useMediaPreview({ previewKey, resolve: resolvePreview, onPreviewKeyChange: setPreviewKey });
+  const preview = useMediaPreview({ previewKey, resolve: resolvePreview, onPreviewKeyChange: setPreviewKey, urlParam: "preview" });
+  const player = useAudioPlayer();
+  useEffect(() => {
+    if (!requestedPreview) return;
+    const entry = resolvePreview(requestedPreview);
+    if (!entry || entry.kind !== "audio") return;
+    player.play(audioTrackFrom(entry, `/tasks?task=${encodeURIComponent(entry.task.task_key || "")}`));
+    update({ preview: null }, "replace");
+  }, [player, requestedPreview, resolvePreview, update]);
   const owners = [...new Set(tasks.rows.map((task) => task.locator.owner))];
   const states = [...new Set(tasks.rows.map((task) => task.state))].sort();
   const activeFilters = ["owner", "connection", "state", "results", "prompt", "family", "project"].filter((key) => params.get(key)).length;
@@ -140,33 +160,58 @@ export default function TasksPage() {
   const laneRecovery = (lane: TaskLane) => lane.status === "needs_contract" || lane.status === "forbidden"
     ? <Button size="sm" variant="ghost" onClick={() => navigate("/services")}>查看服务与连接</Button>
     : <Button size="sm" variant="ghost" onClick={tasks.refresh}>重新读取</Button>;
-  const laneGroups = new Map<string, { labels: string[]; lane: TaskLane }>();
-  for (const [label, lane] of [["进行中任务", tasks.lanes.active], ["历史任务", tasks.lanes.history]] as const) {
-    if (!laneHasGap(lane) || (emptyExplainsLane && lane === selectedLane)) continue;
-    const group = laneGroups.get(`${lane.status}|${lane.error}`);
-    if (group) group.labels.push(label);
-    else laneGroups.set(`${lane.status}|${lane.error}`, { labels: [label], lane });
-  }
-  const laneNotices = [...laneGroups.entries()].map(([id, { labels, lane }]) => <InlineNotice key={id} tone="warning" className="items-center"><span className="flex flex-wrap items-center gap-x-2">{laneMessage(labels.join("、"), lane)}{laneRecovery(lane)}</span></InlineNotice>);
   const notices = [
     selectedKey && !selected && tasks.status !== "loading" && !resolving && <MissingSelection key="missing" onClear={() => update({ task: null })} onTasks={() => navigate("/tasks")} />,
-    ...laneNotices,
-    tasks.status === "stale" && laneNotices.length === 0 && <StaleNotice key="stale" status={tasks.status} error={tasks.error} observedAt={tasks.observedAt} />,
+    // An empty view whose lane failed explains itself below; otherwise one line names the connections the list lacks.
+    !emptyExplainsLane && <SourceStatusLine key="source" noun="任务列表" />,
     tasks.truncated && <InlineNotice key="truncated" tone="info">任务较多，本页只展示当前观察批次（已达分页上限）；筛选与计数仅针对已读取的批次。</InlineNotice>,
   ];
 
   const quickPreview = useCallback((task: TaskSnapshot, result: TaskSnapshot["results"][number]) => {
     const kind = kindOf(result.mime, ownerModality[task.locator.owner]);
     const key = `${task.task_key || task.locator.task_ref}:${result.ref}`;
+    // The row preview opens the viewer only; its 查看详情 action opens the task Inspector when wanted.
     const next = new URLSearchParams(params);
-    next.set("task", task.task_key || "");
     next.set("preview", key);
-    setParams(next, { replace: false });
-    preview.open({ key, task, result, kind }, { source: "task-row", autoplay: kind !== "audio", syncQuery: false });
-  }, [params, preview, setParams]);
+    writeOverlay(next, "push");
+    preview.open({ key, task, result, kind }, { source: "task-row", autoplay: true, syncQuery: false });
+  }, [params, preview, writeOverlay]);
+  // Playing from the task list queues every playable audio result of the listed tasks, in list order.
+  const audioQueue = useMemo(() => collectResults(filtered).filter((entry) => entry.kind === "audio" && resultAction(entry.task, "preview").enabled).map((entry) => audioTrackFrom(entry, `/tasks?task=${encodeURIComponent(entry.task.task_key || "")}`)), [filtered]);
+  const viewerSlides = useMemo(() => {
+    const slides = visualSlides(collectResults(filtered));
+    const current = previewKey ? resolvePreview(previewKey) : null;
+    return current && !slides.some((slide) => slide.key === current.key) ? [viewerSlide(current), ...slides] : slides;
+  }, [filtered, previewKey, resolvePreview]);
+  const navigateViewer = useCallback((key: string) => {
+    const entry = resolvePreview(key);
+    if (!entry) return;
+    preview.open(entry, { source: "task-row", autoplay: true, syncQuery: false });
+    update({ preview: key, ...(selectedKey ? { task: entry.task.task_key || null } : {}) }, "replace");
+  }, [preview, resolvePreview, selectedKey, update]);
+  const showViewerDetails = useCallback((key: string) => {
+    const entry = resolvePreview(key);
+    if (entry) update({ task: entry.task.task_key || null, preview: null }, "replace");
+  }, [resolvePreview, update]);
   const columns = taskColumns(tasks.connections, quickPreview);
+  const copy = useCopy();
+  // The row's context menu: what its row button, its quick action and the inspector header offer, in one place.
+  const taskActions = useCallback((task: TaskSnapshot): ItemAction[] => {
+    const key = task.task_key || "";
+    const result = task.results.length === 1 && resultAction(task, "preview").enabled ? task.results[0] : null;
+    const kind = result ? kindOf(result.mime, ownerModality[task.locator.owner]) : null;
+    const route = `/tasks?task=${encodeURIComponent(key)}`;
+    return [
+      { id: "open", label: "打开详情", icon: <PanelRightOpen />, group: "open", disabled: !key, run: () => update({ task: key || null }, "push") },
+      ...(result && kind !== "audio" ? [{ id: "preview", label: "预览结果", icon: <Eye />, group: "open", run: () => quickPreview(task, result) }] : []),
+      ...(result && kind === "audio" ? [{ id: "play", label: "播放结果", icon: <Play />, group: "open", run: () => player.play(audioTrackFrom({ key: `${key || task.locator.task_ref}:${result.ref}`, task, result, kind: "audio" }, route)) }] : []),
+      { id: "project", label: "查看所属项目", icon: <FolderKanban />, group: "open", run: () => navigate(`/projects?catalog=owner&project=${encodeURIComponent(`${task.locator.owner}:${task.locator.project}`)}`) },
+      ...(key ? linkActions(route, copy) : []),
+      { id: "copy-ref", label: "复制任务引用", icon: <Copy />, group: "link", run: () => void copy(task.locator.task_ref, "任务引用") },
+    ];
+  }, [copy, navigate, player, quickPreview, update]);
 
-  return <div className={cx(!selected && "page-enter", "flex min-h-0 flex-col gap-5", selected && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="tasks">
+  return <AudioQueue tracks={audioQueue}><div className={cx(!selected && "page-enter", "flex min-h-0 flex-col gap-5", selected && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="tasks">
     <div className={cx("flex min-h-0 flex-1 gap-4", selected && inspectorMode === "fixed" ? "items-stretch" : "") }>
       <div className="min-w-0 flex-1 space-y-5">
     <h1 className="sr-only">任务中心</h1>
@@ -213,6 +258,7 @@ export default function TasksPage() {
             selectedKey={selectedKey}
             density={density}
             onRowClick={(task) => update({ task: task.task_key || null })}
+            rowActions={taskActions}
           />
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3 text-2xs text-muted">
             <span className="tabular">显示 {filtered.length ? pageStart + 1 : 0}–{Math.min(pageStart + pageSize, filtered.length)} / {filtered.length} 条已加载任务 · 第 {currentPage} / {pageCount} 页</span>
@@ -235,7 +281,8 @@ export default function TasksPage() {
     {selected && inspectorMode === "fixed" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
     </div>
     {selected && inspectorMode === "floating" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
-  </div>;
+    <MediaViewer controller={preview} slides={viewerSlides} onNavigate={navigateViewer} onDetails={showViewerDetails} detailsLabel="查看任务" />
+  </div></AudioQueue>;
 }
 
 function StateCell({ task }: { task: TaskSnapshot }) {
@@ -254,7 +301,7 @@ function taskColumns(connections: TaskConnectionState[], onQuickPreview: (task: 
     {
       id: "task",
       header: "任务",
-      className: "w-full max-w-0 overflow-hidden",
+      className: `${fillMainColumn} overflow-hidden`,
       cell: (task) => <span className="flex min-w-0 items-center gap-3">
         <TaskThumbnail task={task} result={task.results[0]} />
         <span className="min-w-0 flex-1">
@@ -302,8 +349,9 @@ function taskColumns(connections: TaskConnectionState[], onQuickPreview: (task: 
       cell: (task) => {
         if (task.results.length !== 1 || !resultAction(task, "preview").enabled) return null;
         const result = task.results[0];
-        const verb = kindOf(result.mime, ownerModality[task.locator.owner]) === "audio" ? "播放" : "预览";
-        return <Button size="sm" variant="secondary" aria-label={`${verb} ${result.name || task.title}`} onClick={(event) => { event.stopPropagation(); onQuickPreview(task, result); }}>{verb}</Button>;
+        const kind = kindOf(result.mime, ownerModality[task.locator.owner]);
+        if (kind === "audio") return <AudioPlayButton track={audioTrackFrom({ key: `${task.task_key || task.locator.task_ref}:${result.ref}`, task, result, kind }, `/tasks?task=${encodeURIComponent(task.task_key || "")}`)} variant="secondary" stop />;
+        return <Button size="sm" variant="secondary" aria-label={`预览 ${result.name || task.title}`} onClick={(event) => { event.stopPropagation(); onQuickPreview(task, result); }}>预览</Button>;
       },
     },
   ];
@@ -333,8 +381,7 @@ function LaneStrip({ activeConnection, onFilter }: { activeConnection: string; o
 }
 
 function MissingSelection({ onClear, onTasks }: { onClear: () => void; onTasks: () => void }) {
-  return <InlineNotice tone="warning" className="items-center">
-    <span>链接中的任务不在当前观察批次中，可能已超出时间窗或属于其他范围。</span>
-    <span className="mt-2 flex gap-2"><Button size="sm" onClick={onClear}>关闭</Button><Button size="sm" variant="ghost" onClick={onTasks}>返回任务中心</Button></span>
+  return <InlineNotice tone="warning" actions={<><NoticeAction onClick={onClear}>关闭</NoticeAction><NoticeAction onClick={onTasks}>返回任务中心</NoticeAction></>}>
+    链接中的任务不在当前观察批次中，可能已超出时间窗或属于其他范围。
   </InlineNotice>;
 }

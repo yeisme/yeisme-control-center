@@ -1,0 +1,220 @@
+/* Global audio player: floating dock, seek rail and equalizer. Motion uses transform/opacity/filter only. */
+:root {
+  --audio-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --audio-dock-space: 128px;
+}
+
+@layer components {
+  .audio-dock-layer {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 35;
+    display: flex;
+    justify-content: center;
+    padding: 0 12px max(12px, env(safe-area-inset-bottom));
+    pointer-events: none;
+  }
+  @media (min-width: 1024px) {
+    .audio-dock-layer { left: var(--workspace-left, 0px); padding-inline: var(--content-gutter); }
+  }
+  /* With an Inspector open, the dock centers on the remaining content column instead of covering it. */
+  @media (min-width: 1280px) {
+    html:has([data-task-inspector="fixed"]:not([data-task-inspector-maximized="true"])) .audio-dock-layer,
+    html:has([data-asset-inspector="fixed"]:not([data-asset-inspector-maximized="true"])) .audio-dock-layer,
+    html:has([data-catalog-inspector="fixed"]) .audio-dock-layer { right: var(--inspector-width); }
+    html:has([data-task-inspector="floating"]) .audio-dock-layer,
+    html:has([data-asset-inspector="floating"]) .audio-dock-layer { right: calc(min(640px, 100vw - 24px) + 12px); }
+  }
+  html[data-audio-dock-open] #main { padding-bottom: var(--audio-dock-space); }
+
+  .audio-dock {
+    pointer-events: auto;
+    width: min(760px, 100%);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    box-shadow: var(--shadow-float);
+    padding: 12px 14px 10px;
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    backdrop-filter: blur(18px) saturate(1.2);
+    animation: audio-dock-in 520ms var(--audio-ease) both;
+  }
+  .audio-dock-layer[data-leaving] .audio-dock { animation: audio-dock-out 200ms var(--ease-out) both; }
+
+  .audio-dock-cover {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex-shrink: 0;
+    border-radius: 12px;
+    background: var(--kind-audio-soft);
+    color: var(--kind-audio);
+  }
+
+  .audio-dock-button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    color: var(--muted);
+    transition: background-color 200ms var(--ease-out), color 200ms var(--ease-out), transform 160ms var(--ease-out);
+  }
+  .audio-dock-button:hover { background: var(--panel-sunken); color: var(--ink); }
+  .audio-dock-button:active { transform: scale(0.94); }
+  .audio-dock-button:disabled { opacity: 0.4; pointer-events: none; }
+
+  .audio-dock-primary {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--primary-ink);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 14%), 0 6px 16px color-mix(in srgb, var(--primary) 24%, transparent);
+    transition: transform 160ms var(--ease-out), filter 200ms var(--ease-out);
+  }
+  .audio-dock-primary:hover { filter: brightness(1.08); }
+  .audio-dock-primary:active { transform: scale(0.94); }
+  .audio-dock-primary:disabled { opacity: 0.45; }
+  /* The play button breathes while it waits for sound to start or for the listener after a refused autoplay. */
+  .audio-dock-primary[data-attention]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: 0 0 0 2px var(--primary);
+    opacity: 0;
+    animation: audio-pulse 2s var(--ease-out) infinite;
+  }
+
+  .audio-dock-rate {
+    height: 28px;
+    min-width: 44px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    padding: 0 8px;
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-soft);
+    transition: border-color 200ms var(--ease-out), background-color 200ms var(--ease-out);
+  }
+  .audio-dock-rate:hover { border-color: var(--line-strong); background: var(--panel-soft); }
+
+  /* Seek rail: buffered and played fills scale from the left; the thumb rides a full-width head layer. */
+  .audio-scrubber { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+  .audio-time { min-width: 36px; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .audio-time-end { text-align: right; }
+  .audio-rail { position: relative; height: 20px; border-radius: 999px; cursor: pointer; touch-action: none; outline: none; }
+  .audio-rail[aria-disabled="true"] { cursor: default; }
+  .audio-rail:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .audio-rail-track {
+    position: absolute;
+    inset-inline: 0;
+    top: 50%;
+    height: 4px;
+    margin-top: -2px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--ink) 9%, transparent);
+    transition: transform 200ms var(--ease-out);
+  }
+  .audio-rail:hover .audio-rail-track, .audio-rail:focus-visible .audio-rail-track, .audio-rail[data-dragging] .audio-rail-track { transform: scaleY(1.5); }
+  .audio-rail-buffer, .audio-rail-fill { position: absolute; inset: 0; transform-origin: left center; }
+  .audio-rail-buffer { background: color-mix(in srgb, var(--ink) 12%, transparent); transform: scaleX(var(--buffered, 0)); transition: transform 320ms var(--ease-out); }
+  .audio-rail-fill { background: var(--primary); transform: scaleX(var(--played, 0)); }
+  .audio-rail-head { position: absolute; inset: 0; pointer-events: none; transform: translateX(calc(var(--played, 0) * 100%)); }
+  .audio-rail-thumb {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    border-radius: 999px;
+    background: var(--primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--panel) 90%, transparent), 0 1px 4px rgb(0 0 0 / 22%);
+    transform: scale(0);
+    transition: transform 180ms var(--audio-ease);
+  }
+  .audio-rail:hover .audio-rail-thumb, .audio-rail:focus-visible .audio-rail-thumb, .audio-rail[data-dragging] .audio-rail-thumb { transform: scale(1); }
+  .audio-rail-tip {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    transform: translateX(-50%);
+    border-radius: 6px;
+    background: var(--ink);
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 16px;
+    font-variant-numeric: tabular-nums;
+    color: var(--panel);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  /* Before a handle exists the rail shows a moving sheen instead of a fake position. */
+  .audio-scrubber[data-pending] .audio-rail-track::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--primary) 50%, transparent), transparent);
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  /* Equalizer: bars rest at fixed heights and bounce only while sound plays. */
+  .audio-eq { display: inline-flex; height: 16px; align-items: flex-end; gap: 2px; }
+  .audio-eq > i { width: 3px; height: 100%; border-radius: 2px; background: currentColor; transform-origin: 50% 100%; transform: scaleY(var(--rest)); transition: transform 320ms var(--audio-ease); }
+  .audio-eq > i:nth-child(1) { --rest: 0.42; --period: 820ms; --delay: 0ms; }
+  .audio-eq > i:nth-child(2) { --rest: 0.78; --period: 1040ms; --delay: -260ms; }
+  .audio-eq > i:nth-child(3) { --rest: 0.58; --period: 760ms; --delay: -480ms; }
+  .audio-eq > i:nth-child(4) { --rest: 0.34; --period: 940ms; --delay: -120ms; }
+  .is-playing .audio-eq > i { animation: audio-eq var(--period) cubic-bezier(0.65, 0, 0.35, 1) var(--delay) infinite alternate; }
+
+  /* Detail stage for an audio result: the same controls as the dock, sized for the Inspector. */
+  .audio-stage { border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--kind-audio-soft); padding: 14px; }
+  .audio-stage-cover { display: grid; place-items: center; width: 52px; height: 52px; flex-shrink: 0; border-radius: 14px; background: var(--panel); color: var(--kind-audio); box-shadow: var(--shadow-panel); }
+  .audio-stage-cover .audio-eq { height: 22px; gap: 3px; }
+  .audio-stage-cover .audio-eq > i { width: 4px; }
+
+  /* Gallery poster overlay: a round play target over audio posters; always visible on touch screens. */
+  .audio-poster-play {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    color: var(--ink);
+    box-shadow: var(--shadow-raised);
+    transition: transform 220ms var(--audio-ease), opacity 200ms var(--ease-out), background-color 200ms var(--ease-out);
+  }
+  .audio-poster-play:hover { transform: scale(1.06); }
+  .audio-poster-play:active { transform: scale(0.96); }
+  .audio-poster-play[data-audio-phase="playing"], .audio-poster-play[data-audio-phase="pending"] { background: var(--primary); color: var(--primary-ink); }
+  @media (hover: hover) {
+    .audio-poster-play[data-audio-phase="inactive"] { opacity: 0; transform: scale(0.9); }
+    .group:hover .audio-poster-play, .group:focus-within .audio-poster-play { opacity: 1; transform: none; }
+  }
+}
+
+@keyframes audio-dock-in {
+  from { opacity: 0; transform: translateY(24px) scale(0.985); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+@keyframes audio-dock-out { to { opacity: 0; transform: translateY(16px) scale(0.99); } }
+@keyframes audio-pulse {
+  0% { opacity: 0.55; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.6); }
+}
+@keyframes audio-eq { from { transform: scaleY(0.24); } to { transform: scaleY(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .audio-dock, .audio-dock-layer[data-leaving] .audio-dock { animation-name: fade-in; }
+  .is-playing .audio-eq > i, .audio-dock-primary[data-attention]::after, .audio-scrubber[data-pending] .audio-rail-track::after { animation: none; }
+}

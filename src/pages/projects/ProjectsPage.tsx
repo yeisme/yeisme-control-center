@@ -1,39 +1,36 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Dialog } from "radix-ui";
-import { ArrowLeft, ArrowRight, Check, CircleAlert, Clock3, Copy, Eye, FolderKanban, Images, ListTodo, MoreHorizontal, Pencil, Plug, Send } from "../../icons";
+import { ArrowLeft, ArrowRight, Check, CircleAlert, Clock3, Copy, Eye, FolderKanban, FolderPlus, Images, Link2, ListTodo, Pencil, Plug, Send, Unplug } from "../../icons";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
+import { recentTarget, useRememberRecent } from "../../app/recent";
 import { useTasks } from "../../app/tasks-context";
+import { useObservationCache } from "../../app/observation-cache";
+import { copyReference } from "../../shared/clipboard";
 import { useMediaPreview } from "../../components/media-preview";
+import { AssetPreviewStage } from "../assets/AssetsPage";
 import {
   Button,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuRoot,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
+  ActionsContextMenu,
+  ActionsMenu,
   DataTable,
+  fillMainColumn,
   Dot,
   EmptyState,
   Facts,
   Field,
-  IconButton,
   InlineNotice,
   Input,
   KindBadge,
-  MenuContent,
-  MenuItem,
-  MenuRoot,
-  MenuSeparator,
-  MenuTrigger,
   MetricStrip,
   NoticeStack,
   PageToolbar,
   Panel,
   Pill,
   ReadStateView,
+  SearchField,
+  Select,
   SkeletonRows,
-  StaleNotice,
   StatCard,
   TabPanel,
   Tabs,
@@ -45,22 +42,29 @@ import {
   ownerLabel,
   useToast,
   type Column,
+  type ItemAction,
+  type MediaKind,
 } from "../../components/ui";
-import { api, type ProjectMetadata, type TaskConnectionState, type TaskSnapshot } from "../../shared/api/control-center-client";
+import { SourceStatusLine } from "../../components/SourceStatusLine";
+import { api, type OwnerProjectRow, type ProjectMetadata, type TaskConnectionState, type TaskSnapshot } from "../../shared/api/control-center-client";
+import type { SharedProject } from "../../shared/collaboration";
 import { runAction, type ActionRunState } from "../../shared/action-runner";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
 import { labelFrom } from "../../shared/read-model/labels";
 import { readErrorMessage } from "../../shared/read-model/read-state";
-import { collectResults, connectionStateLabel, connectionTone, resultMeta, stageLabel, taskKind, type ResultEntry } from "../../shared/read-model/tasks";
+import { collectResults, connectionStateLabel, connectionTone, resultAction, resultMeta, stageLabel, taskKind, type ResultEntry } from "../../shared/read-model/tasks";
 import { taskNeedsReview } from "../../shared/read-model/review";
-import { closeProjectTask, selectProjectTab, selectProjectTask } from "../../shared/read-model/project-navigation";
-import { taskIsActive, taskNeedsAttention } from "../../task-observation";
+import { closeProjectTask, selectProjectResult, selectProjectTab, selectProjectTask } from "../../shared/read-model/project-navigation";
+import { taskIsActive, taskNeedsAttention, taskStageLabels, taskStateLabels } from "../../task-observation";
+import { AudioQueue, audioTrackFrom, useAudioPlayer } from "../../app/audio-player";
+import { MediaViewer, visualSlides } from "../../components/MediaViewer";
 import { TaskDetail, type TaskInspectorMode } from "../tasks/TaskDetail";
 import SharedProjects from "./SharedProjects";
+import { ConnectToolProjectDialog, DisconnectToolProjectDialog, type DisconnectTarget } from "./ToolProjectDialogs";
 
 type Tab = "overview" | "tasks" | "assets" | "review" | "delivery";
 type ProjectFilter = "all" | "hidden";
-type ProjectAction = "open" | "rename" | "copy" | "tasks" | "toggle";
+type ProjectAction = "open" | "rename" | "copy" | "tasks" | "toggle" | "share-new" | "share-add" | "disconnect";
 type MetadataAction = "project.metadata.rename" | "project.metadata.hide" | "project.metadata.unhide";
 
 const projectTabs: Tab[] = ["overview", "tasks", "assets", "review", "delivery"];
@@ -77,9 +81,15 @@ interface OwnerProject {
   display_label: string;
   hidden: boolean;
   revision: number;
+  /** The scope's default project for this tool. */
+  pinned: boolean;
+  /** Connections an administrator added here; only these can be disconnected. */
+  registrations: OwnerProjectRow["registrations"];
+  /** Shared projects (visible to this identity) that bind it. */
+  used: number;
 }
 
-function ownerProjects(connections: TaskConnectionState[], rows: TaskSnapshot[], metadata: ProjectMetadata[]): OwnerProject[] {
+function ownerProjects(connections: TaskConnectionState[], rows: TaskSnapshot[], metadata: ProjectMetadata[], owned: OwnerProjectRow[] = [], shared: SharedProject[] = [], scopeId = ""): OwnerProject[] {
   const map = new Map<string, OwnerProject>();
   const ensure = (owner: string, project: string) => {
     const key = `${owner}:${project}`;
@@ -94,6 +104,9 @@ function ownerProjects(connections: TaskConnectionState[], rows: TaskSnapshot[],
       display_label: known?.display_label || "未命名项目",
       hidden: known?.hidden === true,
       revision: known?.revision || 0,
+      pinned: false,
+      registrations: [],
+      used: 0,
     };
     if (known) {
       entry.display_name = known.display_name;
@@ -106,7 +119,20 @@ function ownerProjects(connections: TaskConnectionState[], rows: TaskSnapshot[],
   };
   for (const connection of connections) ensure(connection.owner, connection.project).connections.push(connection);
   for (const task of rows) ensure(task.locator.owner, task.locator.project).tasks.push(task);
-  return [...map.values()].sort((a, b) => a.display_label.localeCompare(b.display_label) || a.owner.localeCompare(b.owner) || a.project.localeCompare(b.project));
+  // Tool projects of this scope without connections or loaded tasks still belong in the list.
+  for (const row of owned) {
+    const entry = ensure(row.owner, row.project_ref);
+    entry.pinned ||= row.pinned;
+    entry.registrations = row.registrations;
+    // A name given for the same project in another scope of the tenant, when this scope has none.
+    if (!entry.display_name && row.display_name) {
+      entry.display_name = row.display_name;
+      entry.display_label = row.display_name;
+    }
+  }
+  for (const entry of map.values()) entry.used = shared.filter((p) => p.bindings.some((b) => b.owner === entry.owner && b.project_ref === entry.project && b.source_scope === scopeId)).length;
+  // Grouped by tool, the default project first.
+  return [...map.values()].sort((a, b) => a.owner.localeCompare(b.owner) || Number(b.pinned) - Number(a.pinned) || a.display_label.localeCompare(b.display_label) || a.project.localeCompare(b.project));
 }
 
 /** Unnamed projects are told apart by their owner project ref instead of repeating "未命名项目". */
@@ -135,8 +161,13 @@ function projectStats(project: OwnerProject) {
 }
 type ProjectStats = ReturnType<typeof projectStats>;
 
-function tasksHref(project: OwnerProject, view?: "attention") {
-  return `/tasks?owner=${encodeURIComponent(project.owner)}&project=${encodeURIComponent(project.project)}${view ? `&view=${view}` : ""}`;
+function tasksHref(project: OwnerProject, view?: "attention", filters: { q?: string; state?: string; stage?: string } = {}) {
+  const query = new URLSearchParams({ owner: project.owner, project: project.project });
+  if (view) query.set("view", view);
+  if (filters.q) query.set("q", filters.q);
+  if (filters.state) query.set("state", filters.state);
+  if (filters.stage) query.set("stage", filters.stage);
+  return `/tasks?${query.toString()}`;
 }
 
 const reviewStatusLabels: Record<string, string> = {
@@ -160,33 +191,18 @@ function stableProjectIdempotencyKey(scopeId: string, projectKey: string, action
   return `project_metadata_${action.replaceAll(".", "-")}_${(hash >>> 0).toString(36)}`;
 }
 
-type MenuItemComponent = (props: { children: ReactNode; icon?: ReactNode; onSelect?: () => void }) => ReactNode;
-type MenuSeparatorComponent = () => ReactNode;
-
-function ProjectMenuItems({ project, onAction, Item, Separator }: { project: OwnerProject; onAction: (action: ProjectAction) => void; Item: MenuItemComponent; Separator: MenuSeparatorComponent }) {
-  return (
-    <>
-      <Item icon={<FolderKanban />} onSelect={() => onAction("open")}>打开项目</Item>
-      <Item icon={<Pencil />} onSelect={() => onAction("rename")}>重命名</Item>
-      <Item icon={<Copy />} onSelect={() => onAction("copy")}>复制项目引用</Item>
-      <Item icon={<ListTodo />} onSelect={() => onAction("tasks")}>查看项目任务</Item>
-      <Separator />
-      <Item icon={<Eye />} onSelect={() => onAction("toggle")}>{project.hidden ? "取消隐藏项目" : "隐藏项目"}</Item>
-    </>
-  );
-}
-
-function ProjectMenus({ project, onAction }: { project: OwnerProject; onAction: (action: ProjectAction) => void }) {
-  return (
-    <MenuRoot>
-      <MenuTrigger asChild>
-        <IconButton label={`项目操作：${projectTitle(project)}`} icon={<MoreHorizontal className="size-4" />} onClick={(event) => event.stopPropagation()} />
-      </MenuTrigger>
-      <MenuContent>
-        <ProjectMenuItems project={project} onAction={onAction} Item={MenuItem} Separator={MenuSeparator} />
-      </MenuContent>
-    </MenuRoot>
-  );
+/** One list for the card's "更多操作" menu and its context menu. */
+function projectActions(project: OwnerProject, onAction: (action: ProjectAction) => void): ItemAction[] {
+  return [
+    { id: "open", label: "打开项目", icon: <FolderKanban />, group: "open", run: () => onAction("open") },
+    { id: "tasks", label: "查看项目任务", icon: <ListTodo />, group: "open", run: () => onAction("tasks") },
+    { id: "rename", label: "重命名", icon: <Pencil />, group: "edit", run: () => onAction("rename") },
+    { id: "copy", label: "复制项目引用", icon: <Copy />, group: "edit", run: () => onAction("copy") },
+    { id: "share-new", label: "用它新建共享项目", icon: <FolderPlus />, group: "share", run: () => onAction("share-new") },
+    { id: "share-add", label: "加入共享项目…", icon: <Link2 />, group: "share", run: () => onAction("share-add") },
+    { id: "toggle", label: project.hidden ? "取消隐藏项目" : "隐藏项目", icon: <Eye />, group: "state", run: () => onAction("toggle") },
+    ...(project.registrations.length ? [{ id: "disconnect", label: "断开接入", icon: <Unplug />, group: "state", tone: "danger" as const, run: () => onAction("disconnect") }] : []),
+  ];
 }
 
 function RenameDialog({ project, open, onOpenChange, onSave, saving, error }: {
@@ -250,30 +266,62 @@ function RenameDialog({ project, open, onOpenChange, onSave, saving, error }: {
   );
 }
 
+type Catalog = "shared" | "tools";
+
+/** One entry for both kinds of project: shared projects people work in, and the tool projects they draw on. */
 export default function ProjectsPage() {
   const [params, setParams] = useSearchParams();
-  const organizations = useScopedRead((_s, signal) => api.organizations(signal));
-  if (params.has("shared") || params.has("sharedProject") || (params.get("catalog") !== "owner" && !!organizations.data?.rows.length)) return <SharedProjects />;
-  return <><div className="mb-3 flex justify-end"><Button size="sm" variant="secondary" onClick={() => setParams({ shared: "1" })}>共享项目与分配</Button></div><OwnerProjectsPage /></>;
+  const catalog: Catalog = params.get("catalog") === "owner" || params.get("project") ? "tools" : "shared";
+  // Details carry their own way back; the switch only shows on the two lists.
+  if (params.get("project")) return <OwnerProjectsPage />;
+  if (params.get("sharedProject")) return <SharedProjects />;
+  const select = (next: Catalog) => setParams((current) => {
+    const value = new URLSearchParams(current);
+    for (const key of ["catalog", "project", "tab", "task", "visibility", "q", "role", "owner", "hidden", "cursor"]) value.delete(key);
+    if (next === "tools") value.set("catalog", "owner");
+    return value;
+  });
+  return (
+    <Tabs<Catalog> value={catalog} onChange={select} label="项目类型" listClassName="mb-4" options={[{ id: "shared", label: "共享项目" }, { id: "tools", label: "工具项目" }]}>
+      <TabPanel value="shared">{catalog === "shared" && <SharedProjects />}</TabPanel>
+      <TabPanel value="tools">{catalog === "tools" && <OwnerProjectsPage />}</TabPanel>
+    </Tabs>
+  );
 }
 
 function OwnerProjectsPage() {
-  const { scope, scopeId, session } = useWorkspace();
+  const { scope, scopeId, session, setScope } = useWorkspace();
   const tasks = useTasks();
   const notify = useToast();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const metadata = useScopedRead((currentScope, signal) => api.projectMetadata(currentScope, signal));
-  const projects = useMemo(() => ownerProjects(tasks.connections, tasks.rows, metadata.data?.rows || []), [tasks.connections, tasks.rows, metadata.data?.rows]);
+  const owned = useScopedRead((currentScope, signal) => api.ownerProjects(currentScope, signal));
+  const shared = useScopedRead((_currentScope, signal) => api.sharedProjects({}, signal));
+  // Tool projects belong to a personal or team scope; a shared project's scope only borrows them.
+  const home = session?.scopes.find((s) => !s.id.startsWith("project_"));
+  useEffect(() => { if (scopeId.startsWith("project_") && home) setScope(home.id); }, [scopeId, home?.id]);
+  const projects = useMemo(
+    () => ownerProjects(tasks.connections, tasks.rows, metadata.data?.rows || [], (owned.data?.rows || []).filter((row) => row.scope_id === scopeId), shared.data?.rows || [], scopeId),
+    [tasks.connections, tasks.rows, metadata.data?.rows, owned.data?.rows, shared.data?.rows, scopeId],
+  );
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [disconnectTarget, setDisconnectTarget] = useState<DisconnectTarget | null>(null);
+  const cache = useObservationCache();
+  // Connections changed on the server: cached task reads describe the old set.
+  const reloadToolProjects = () => { cache.clear(); owned.reload(); metadata.reload(); tasks.refresh(); };
   const filter = (params.get("visibility") === "hidden" ? "hidden" : "all") as ProjectFilter;
   const visibleProjects = projects.filter((project) => (filter === "hidden" ? project.hidden : !project.hidden));
   const stats = useMemo(() => new Map(projects.map((project) => [project.key, projectStats(project)])), [projects]);
   const selected = projects.find((project) => project.key === params.get("project")) || null;
+  useRememberRecent(selected ? { key: `project:${selected.key}`, kind: "project", label: selected.display_name, meta: `${ownerLabel(selected.owner)} · 项目`, target: recentTarget("/projects", params) } : null);
   const [renameTarget, setRenameTarget] = useState<OwnerProject | null>(null);
+  const [manualCopy, setManualCopy] = useState("");
   const [actionState, setActionState] = useState<ActionRunState>({ phase: "idle", preview: null, receipt: null, error: null });
 
   const open = (key: string | null, nextTab: Tab = "overview") => {
     const next = new URLSearchParams(params);
+    for (const filterKey of ["taskQ", "taskState", "taskStage", "assetQ", "assetKind", "reviewQ", "reviewStatus"]) next.delete(filterKey);
     if (key) next.set("project", key);
     else {
       next.delete("project");
@@ -321,36 +369,70 @@ function OwnerProjectsPage() {
   const handleAction = useCallback(async (project: OwnerProject, action: ProjectAction) => {
     if (action === "open") return open(project.key);
     if (action === "tasks") return navigateToTasks(project);
+    if (action === "share-new" || action === "share-add") {
+      const query = new URLSearchParams({ bindOwner: project.owner, bindProject: project.project, bindScope: scopeId, bindTenant: scope?.tenant || "" });
+      if (action === "share-new") query.set("bindNew", "1");
+      return navigate(`/projects?${query.toString()}`);
+    }
+    if (action === "disconnect") {
+      const registration = project.registrations[0];
+      if (registration) setDisconnectTarget({ connectionId: registration.id, name: projectTitle(project), owner: project.owner, used: project.used });
+      return;
+    }
     if (action === "rename") {
       setActionState({ phase: "idle", preview: null, receipt: null, error: null });
       setRenameTarget(project);
       return;
     }
     if (action === "copy") {
-      try {
-        await navigator.clipboard.writeText(project.key);
+      if (await copyReference(project.key)) {
+        setManualCopy("");
         notify("项目引用已复制", "success");
-      } catch {
-        notify("无法复制项目引用", "warning");
+      } else {
+        setManualCopy(project.key);
+        notify("浏览器未允许复制，请使用页面中的手动复制框。", "warning");
       }
       return;
     }
     await runMetadataAction(project, project.hidden ? "project.metadata.unhide" : "project.metadata.hide");
-  }, [notify, runMetadataAction]);
+  }, [navigate, notify, runMetadataAction, scope?.tenant, scopeId]);
+
+  const dialogs = scopeId && session?.csrf ? (
+    <>
+      <ConnectToolProjectDialog
+        open={connectOpen}
+        onOpenChange={setConnectOpen}
+        templates={owned.data?.templates || []}
+        scopeId={scopeId}
+        csrf={session.csrf}
+        onConnected={(label) => { setConnectOpen(false); reloadToolProjects(); notify(`已接入「${label}」`, "success"); }}
+      />
+      <DisconnectToolProjectDialog
+        target={disconnectTarget}
+        onOpenChange={(next) => { if (!next) setDisconnectTarget(null); }}
+        scopeId={scopeId}
+        csrf={session.csrf}
+        onDisconnected={() => { const name = disconnectTarget?.name; setDisconnectTarget(null); if (selected) open(null); reloadToolProjects(); notify(`已断开「${name}」`, "success"); }}
+      />
+    </>
+  ) : null;
 
   if (selected) {
     const rawTab = params.get("tab") as Tab | null;
     return (
-      <ProjectDetail
-        project={selected}
-        tab={rawTab && projectTabs.includes(rawTab) ? rawTab : "overview"}
-        selectedTaskKey={params.get("task")}
-        onTab={(value) => open(selected.key, value)}
-        onBack={() => open(null)}
-        onTaskSelect={(taskKey) => setParams(selectProjectTask(params, taskKey))}
-        onTaskClose={() => setParams(closeProjectTask(params), { replace: true })}
-        onAction={(action) => void handleAction(selected, action)}
-      />
+      <>
+        <ProjectDetail
+          project={selected}
+          tab={rawTab && projectTabs.includes(rawTab) ? rawTab : "overview"}
+          selectedTaskKey={params.get("task")}
+          onTab={(value) => open(selected.key, value)}
+          onBack={() => open(null)}
+          onTaskSelect={(taskKey) => setParams(selectProjectTask(params, taskKey))}
+          onTaskClose={() => setParams(closeProjectTask(params), { replace: true })}
+          onAction={(action) => void handleAction(selected, action)}
+        />
+        {dialogs}
+      </>
     );
   }
 
@@ -365,19 +447,22 @@ function OwnerProjectsPage() {
 
   return (
     <div className="page-enter space-y-5" data-page="projects">
-      <h1 className="sr-only">项目</h1>
+      <h1 className="sr-only">工具项目</h1>
       <PageToolbar
-        summary="owner 项目连接。计数仅含已加载的任务批次，不是 owner 全量统计；制作进度 owner 未提供。"
+        summary="当前范围能读取的 Eikona、Sonora 等工具里的项目，可以关联到多个共享项目。计数只含已加载的任务，不是工具里的全量统计。"
         actions={
-          <ToggleGroup<ProjectFilter>
-            label="项目可见性"
-            value={filter}
-            onChange={setFilter}
-            options={[
-              { id: "all", label: "显示中", count: projects.length - hiddenCount },
-              { id: "hidden", label: "已隐藏", count: hiddenCount },
-            ]}
-          />
+          <>
+            <ToggleGroup<ProjectFilter>
+              label="项目可见性"
+              value={filter}
+              onChange={setFilter}
+              options={[
+                { id: "all", label: "显示中", count: projects.length - hiddenCount },
+                { id: "hidden", label: "已隐藏", count: hiddenCount },
+              ]}
+            />
+            {owned.data?.can_register && <Button size="sm" variant="secondary" icon={<Plug className="size-4" />} onClick={() => setConnectOpen(true)}>接入工具项目</Button>}
+          </>
         }
         metrics={shownStats.length > 0 && (
           <MetricStrip
@@ -405,11 +490,12 @@ function OwnerProjectsPage() {
       />
       <NoticeStack
         notices={[
-          tasks.status === "stale" && <StaleNotice key="stale" status={tasks.status} error={tasks.error} observedAt={tasks.observedAt} onRetry={tasks.refresh} />,
+          <SourceStatusLine key="source" noun="项目结果" />,
           metadataUnavailable && <InlineNotice key="metadata" tone="warning">本地项目名称暂不可读，暂按项目引用显示。{readErrorMessage(metadata.error)}</InlineNotice>,
         ]}
       />
-      <section aria-label="owner 项目">
+      {manualCopy && <InlineNotice tone="warning">浏览器未允许复制，请手动选择项目引用：<input aria-label="手动复制 owner 项目引用" readOnly value={manualCopy} className="mt-2 w-full rounded border border-line bg-panel px-2 py-1 font-mono text-xs" onFocus={(event) => event.currentTarget.select()} /></InlineNotice>}
+      <section aria-label="工具项目">
         {tasks.status === "loading" && !projects.length ? (
           <Panel><SkeletonRows rows={3} /></Panel>
         ) : taskReadFailed ? (
@@ -418,25 +504,37 @@ function OwnerProjectsPage() {
           <Panel>
             <EmptyState
               icon={<FolderKanban />}
-              title={filter === "hidden" ? "当前范围没有已隐藏项目" : "当前范围没有项目连接"}
-              body={filter === "hidden" ? "隐藏项目会保留在当前范围，可随时恢复。" : "服务端尚未为该范围绑定 owner 项目。"}
+              title={filter === "hidden" ? "当前范围没有已隐藏项目" : "当前范围还没有工具项目"}
+              body={filter === "hidden" ? "隐藏项目会保留在当前范围，可随时恢复。" : owned.data?.can_register ? "用已配置的连接接入一个工具项目，之后就能在共享项目里关联它。" : "请管理员为这个范围配置工具连接。"}
+              action={filter !== "hidden" && owned.data?.can_register ? <Button icon={<Plug className="size-4" />} onClick={() => setConnectOpen(true)}>接入工具项目</Button> : undefined}
             />
           </Panel>
         ) : (
-          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {visibleProjects.map((project, index) => (
-              <ProjectCard
-                key={project.key}
-                project={project}
-                stats={stats.get(project.key) || projectStats(project)}
-                index={index}
-                onOpen={() => open(project.key)}
-                onAction={(action) => void handleAction(project, action)}
-              />
-            ))}
-          </ul>
+          <div className="space-y-5">
+            {[...new Set(visibleProjects.map((project) => project.owner))].map((owner) => {
+              const group = visibleProjects.filter((project) => project.owner === owner);
+              return (
+                <section key={owner} aria-label={`${ownerLabel(owner)} 项目`} data-owner-group={owner}>
+                  <h2 className="mb-2 flex items-center gap-2 text-body-sm font-semibold text-ink">{ownerLabel(owner)}<span className="tabular text-meta font-normal text-muted">{group.length} 个项目</span></h2>
+                  <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {group.map((project, index) => (
+                      <ProjectCard
+                        key={project.key}
+                        project={project}
+                        stats={stats.get(project.key) || projectStats(project)}
+                        index={index}
+                        onOpen={() => open(project.key)}
+                        onAction={(action) => void handleAction(project, action)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              );
+            })}
+          </div>
         )}
       </section>
+      {dialogs}
       <RenameDialog
         project={renameTarget}
         open={!!renameTarget}
@@ -480,11 +578,12 @@ function ConnectionSummary({ project }: { project: OwnerProject }) {
 function ProjectCard({ project, stats, index, onOpen, onAction }: { project: OwnerProject; stats: ProjectStats; index: number; onOpen: () => void; onAction: (action: ProjectAction) => void }) {
   return (
     <li className="stagger-in" style={{ "--i": index } as CSSProperties}>
-      <ContextMenuRoot>
-        <ContextMenuTrigger asChild>
+      <ActionsContextMenu actions={projectActions(project, onAction)}>
           <article
             data-project={project.key}
             onClick={(event) => {
+              // Menu items render in a portal yet still bubble here through React; only clicks on the card open it.
+              if (!event.currentTarget.contains(event.target as Node)) return;
               if (!(event.target instanceof HTMLElement) || !event.target.closest("button")) onOpen();
             }}
             className="group flex h-full cursor-pointer flex-col gap-4 rounded-card border border-line bg-panel p-4 shadow-panel transition-[border-color,box-shadow] duration-200 hover:border-line-strong hover:shadow-raised"
@@ -497,23 +596,26 @@ function ProjectCard({ project, stats, index, onOpen, onAction }: { project: Own
                   <span className="mt-0.5 block truncate text-meta text-muted"><ProjectSubtitle project={project} /></span>
                 </span>
               </button>
-              <ProjectMenus project={project} onAction={onAction} />
+              <ActionsMenu actions={projectActions(project, onAction)} label={`项目操作：${projectTitle(project)}`} />
             </header>
             <dl className="grid grid-cols-3 divide-x divide-line overflow-hidden rounded-control border border-line bg-panel-soft">
               <MiniStat label="进行中" value={stats.active} />
               <MiniStat label="需关注" value={stats.attention} warn={stats.attention > 0} />
               <MiniStat label="结果" value={stats.results} />
             </dl>
+            {(project.pinned || project.registrations.length > 0 || project.used > 0) && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {project.pinned && <Pill size="sm">默认项目</Pill>}
+                {project.registrations.length > 0 && <Pill size="sm" tone="info">控制中心接入</Pill>}
+                {project.used > 0 && <Pill size="sm" tone="success">用于 {project.used} 个共享项目</Pill>}
+              </div>
+            )}
             <footer className="mt-auto flex items-center justify-between gap-2 text-meta text-muted">
               <ConnectionSummary project={project} />
               <ArrowRight className="size-4 shrink-0 text-faint transition-transform duration-150 group-hover:translate-x-0.5" />
             </footer>
           </article>
-        </ContextMenuTrigger>
-        <ContextMenuContent>
-          <ProjectMenuItems project={project} onAction={onAction} Item={ContextMenuItem} Separator={ContextMenuSeparator} />
-        </ContextMenuContent>
-      </ContextMenuRoot>
+      </ActionsContextMenu>
     </li>
   );
 }
@@ -537,6 +639,7 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
   const selectedTask = selectedTaskKey ? project.tasks.find((task) => task.task_key === selectedTaskKey) || null : null;
   const preview = useMediaPreview({
     previewKey: params.get("preview"),
+    urlParam: "preview",
     resolve: (key) => results.find((entry) => entry.key === key) || null,
     onPreviewKeyChange: (key, history) => {
       const next = new URLSearchParams(params);
@@ -545,6 +648,16 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
       setParams(next, { replace: history === "replace" });
     },
   });
+  const viewerSlides = useMemo(() => visualSlides(results), [results]);
+  const navigateViewer = (key: string) => {
+    const entry = results.find((item) => item.key === key);
+    if (!entry) return;
+    preview.open(entry, { source: "detail-sheet", autoplay: true, syncQuery: false });
+    const next = new URLSearchParams(params);
+    next.set("preview", key);
+    if (params.get("result")) next.set("result", key);
+    setParams(next, { replace: true });
+  };
   const changeInspectorMode = useCallback((mode: TaskInspectorMode) => {
     setInspectorMode(mode);
     window.localStorage.setItem("yeisme.control.tasks.inspector-mode", mode);
@@ -570,7 +683,7 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
         </div>
         <div className="flex items-center gap-1">
           <Button size="sm" variant="primary" onClick={() => navigate(tasksHref(project))} icon={<ListTodo className="size-3.5" />}>在任务中心打开</Button>
-          <ProjectMenus project={project} onAction={onAction} />
+          <ActionsMenu actions={projectActions(project, onAction)} label={`项目操作：${projectTitle(project)}`} />
         </div>
       </header>
       <Tabs<Tab>
@@ -593,7 +706,7 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
           <TasksTab project={project} selectedTaskKey={selectedTaskKey} onSelect={onTaskSelect} />
         </TabPanel>
         <TabPanel value="assets">
-          <AssetsTab results={results} onOpen={(entry) => navigate(`/assets?result=${encodeURIComponent(entry.key)}`)} />
+          <AssetsTab project={project} results={results} selectedKey={params.get("result")} preview={preview} onSelect={(entry) => setParams(selectProjectResult(params, entry.key))} onClose={() => setParams(selectProjectResult(params, null))} onPreview={(entry) => { const next = selectProjectResult(params, entry.key); next.set("preview", entry.key); setParams(next); }} />
         </TabPanel>
         <TabPanel value="review">
           <ReviewTab tasks={review} />
@@ -609,6 +722,7 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
         项目页只组合已授权的 owner 只读投影；新建项目、成员邀请和制作单元维护需要独立 owner 写合同。
       </p>
       {selectedTask && <TaskDetail task={selectedTask} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} onOpenChange={closeTask} />}
+      <MediaViewer controller={preview} slides={viewerSlides} onNavigate={navigateViewer} onDetails={(key) => setParams(selectProjectResult(params, key), { replace: true })} />
       {selectedTaskKey && !selectedTask && (
         <InlineNotice tone="warning" className="items-center">
           <span>当前观察批次未找到该项目任务，未跳转到任务中心，也未使用演示数据补齐。</span>
@@ -678,12 +792,20 @@ function TruncationNote({ shown, total, noun, onOpenAll }: { shown: number; tota
 
 function TasksTab({ project, selectedTaskKey, onSelect }: { project: OwnerProject; selectedTaskKey: string | null; onSelect: (taskKey: string) => void }) {
   const navigate = useNavigate();
-  const rows = project.tasks.slice(0, listLimit);
+  const [params, setParams] = useSearchParams();
+  const text = params.get("taskQ") || "";
+  const state = params.get("taskState") || "";
+  const stage = params.get("taskStage") || "";
+  const patch = (key: string, value: string) => setParams((current) => { const next = new URLSearchParams(current); if (value) next.set(key, value); else next.delete(key); return next; }, { replace: true });
+  const filtered = project.tasks.filter((task) => (!state || task.state === state) && (!stage || task.stage === stage) && (!text || `${task.title} ${task.locator.task_ref}`.toLocaleLowerCase().includes(text.toLocaleLowerCase())));
+  const selectedIndex = selectedTaskKey ? filtered.findIndex((task) => task.task_key === selectedTaskKey) : -1;
+  const start = selectedIndex >= listLimit ? Math.floor(selectedIndex / listLimit) * listLimit : 0;
+  const rows = filtered.slice(start, start + listLimit);
   const columns: Column<TaskSnapshot>[] = [
     {
       id: "task",
       header: "任务",
-      className: "w-full max-w-0",
+      className: fillMainColumn,
       cell: (task) => (
         <span className="flex min-w-0 items-center gap-3">
           <KindBadge kind={taskKind(task)} size="sm" />
@@ -705,6 +827,11 @@ function TasksTab({ project, selectedTaskKey, onSelect }: { project: OwnerProjec
   ];
   return (
     <Panel bodyClassName="p-0">
+      <div className="flex flex-wrap gap-2 border-b border-line px-4 py-3">
+        <SearchField value={text} onChange={(value) => patch("taskQ", value)} label="搜索项目任务" placeholder="任务名称或引用" className="w-full sm:w-56" />
+        <Select aria-label="任务状态" value={state} onChange={(event) => patch("taskState", event.target.value)} className="w-32"><option value="">全部状态</option>{[...new Set(project.tasks.map((task) => task.state))].map((item) => <option key={item} value={item}>{taskStateLabels[item] || item}</option>)}</Select>
+        <Select aria-label="任务阶段" value={stage} onChange={(event) => patch("taskStage", event.target.value)} className="w-32"><option value="">全部阶段</option>{[...new Set(project.tasks.map((task) => task.stage))].map((item) => <option key={item} value={item}>{taskStageLabels[item] || item}</option>)}</Select>
+      </div>
       <DataTable
         label="项目任务"
         columns={columns}
@@ -714,20 +841,41 @@ function TasksTab({ project, selectedTaskKey, onSelect }: { project: OwnerProjec
         rowLabel={(task) => `打开任务 ${task.title}`}
         selectedKey={selectedTaskKey}
         onRowClick={(task) => { if (task.task_key) onSelect(task.task_key); }}
-        empty={<EmptyState compact icon={<ListTodo />} title="当前批次没有该项目的任务" />}
+        empty={<EmptyState compact icon={<ListTodo />} title={project.tasks.length ? "没有符合条件的任务" : "当前批次没有该项目的任务"} />}
       />
-      <TruncationNote shown={rows.length} total={project.tasks.length} noun="任务" onOpenAll={() => navigate(tasksHref(project))} />
+      <TruncationNote shown={rows.length} total={filtered.length} noun="任务" onOpenAll={() => navigate(tasksHref(project, undefined, { q: text, state, stage }))} />
     </Panel>
   );
 }
 
-function AssetsTab({ results, onOpen }: { results: ResultEntry[]; onOpen: (entry: ResultEntry) => void }) {
-  const rows = results.slice(0, listLimit);
+function AssetsTab({ project, results, selectedKey, preview, onSelect, onClose, onPreview }: { project: OwnerProject; results: ResultEntry[]; selectedKey: string | null; preview: ReturnType<typeof useMediaPreview>; onSelect: (entry: ResultEntry) => void; onClose: () => void; onPreview: (entry: ResultEntry) => void }) {
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const text = params.get("assetQ") || "";
+  const kind = params.get("assetKind") || "";
+  const patch = (key: string, value: string) => setParams((current) => { const next = new URLSearchParams(current); if (value) next.set(key, value); else next.delete(key); return next; }, { replace: true });
+  const player = useAudioPlayer();
+  const resultHref = (entry: ResultEntry) => `/projects?catalog=owner&project=${encodeURIComponent(project.key)}&tab=assets&result=${encodeURIComponent(entry.key)}`;
+  const filtered = results.filter((entry) => (!kind || entry.kind === kind) && (!text || `${entry.result.name || ""} ${entry.task.title}`.toLocaleLowerCase().includes(text.toLocaleLowerCase())));
+  const audioQueue = filtered.filter((entry) => entry.kind === "audio" && resultAction(entry.task, "preview").enabled).map((entry) => audioTrackFrom(entry, resultHref(entry)));
+  const handlePreview = (entry: ResultEntry) => {
+    onSelect(entry);
+    if (entry.kind === "audio") {
+      player.play(audioTrackFrom(entry, resultHref(entry)), audioQueue);
+      return;
+    }
+    onPreview(entry);
+  };
+  const selected = results.find((entry) => entry.key === selectedKey) || null;
+  const selectedIndex = selected ? filtered.indexOf(selected) : -1;
+  const start = selectedIndex >= listLimit ? Math.floor(selectedIndex / listLimit) * listLimit : 0;
+  const rows = filtered.slice(start, start + listLimit);
+  const step = (direction: -1 | 1) => { const next = filtered[selectedIndex + direction]; if (next) onSelect(next); };
   const columns: Column<ResultEntry>[] = [
     {
       id: "result",
       header: "结果",
-      className: "w-full max-w-0",
+      className: fillMainColumn,
       cell: (entry) => (
         <span className="flex min-w-0 items-center gap-3">
           <KindBadge kind={entry.kind} size="sm" />
@@ -741,30 +889,47 @@ function AssetsTab({ results, onOpen }: { results: ResultEntry[]; onOpen: (entry
     { id: "kind", header: "类型", priority: 2, cell: (entry) => <span className="whitespace-nowrap text-body-sm text-ink-soft">{kindLabel(entry.kind)}</span> },
     { id: "task", header: "所属任务", priority: 2, cell: (entry) => <span className="block max-w-[260px] truncate text-body-sm text-ink-soft" title={entry.task.title}>{entry.task.title}</span> },
     { id: "spec", header: "规格", priority: 3, cell: (entry) => <span className="whitespace-nowrap text-meta text-muted">{resultMeta(entry.result).join(" · ") || <Unknown>未提供</Unknown>}</span> },
-    { id: "open", header: <span className="sr-only">在资源库打开</span>, align: "end", cell: () => <ArrowRight className="ml-auto size-4 text-faint" /> },
+    { id: "access", header: "预览", align: "end", cell: (entry) => resultAction(entry.task, "preview").enabled ? <Button size="sm" variant="ghost" onClick={(event) => { event.stopPropagation(); handlePreview(entry); }}>{entry.kind === "audio" ? "播放" : "预览"}</Button> : <span className="text-2xs text-warning">{resultAction(entry.task, "preview").reason || "未授权"}</span> },
   ];
   return (
-    <Panel bodyClassName="p-0">
-      <DataTable
-        label="项目结果"
-        columns={columns}
-        rows={rows}
-        rowKey={(entry) => entry.key}
-        rowLabel={(entry) => `在资源库打开 ${entry.result.name || "未命名结果"}`}
-        onRowClick={onOpen}
-        empty={<EmptyState compact icon={<Images />} title="当前批次没有该项目的结果" />}
-      />
-      <TruncationNote shown={rows.length} total={results.length} noun="结果" />
-    </Panel>
+    <AudioQueue tracks={audioQueue}><div className="space-y-3">
+      <Panel bodyClassName="p-0">
+        <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+          <SearchField value={text} onChange={(value) => patch("assetQ", value)} label="搜索项目结果" placeholder="结果或任务名称" className="w-full sm:w-56" />
+          <Select aria-label="结果类型" value={kind} onChange={(event) => patch("assetKind", event.target.value)} className="w-32"><option value="">全部类型</option>{["image", "video", "audio", "text"].map((item) => <option key={item} value={item}>{kindLabel(item as MediaKind)}</option>)}</Select>
+          <Button size="sm" variant="ghost" className="ml-auto" onClick={() => navigate(`/assets?project=${encodeURIComponent(project.project)}`)}>在资源库查看</Button>
+        </div>
+        <DataTable
+          label="项目结果"
+          columns={columns}
+          rows={rows}
+          rowKey={(entry) => entry.key}
+          rowLabel={(entry) => `查看 ${entry.result.name || "未命名结果"}`}
+          selectedKey={selected?.key || null}
+          onRowClick={onSelect}
+          empty={<EmptyState compact icon={<Images />} title={results.length ? "没有符合条件的结果" : "当前批次没有该项目的结果"} />}
+        />
+        <TruncationNote shown={rows.length} total={filtered.length} noun="结果" />
+      </Panel>
+      {selectedKey && !selected && <InlineNotice tone="warning">当前观察批次没有这个结果，未跳转资源库。</InlineNotice>}
+      {selected && <Panel title={selected.result.name || "未命名结果"} actions={<div className="flex gap-1"><Button size="sm" variant="ghost" disabled={selectedIndex <= 0} onClick={() => step(-1)}>上一项</Button><Button size="sm" variant="ghost" disabled={selectedIndex < 0 || selectedIndex >= filtered.length - 1} onClick={() => step(1)}>下一项</Button><Button size="sm" variant="ghost" onClick={onClose}>关闭</Button></div>}>
+        <div className="space-y-3 p-4"><AssetPreviewStage entry={selected} preview={preview} />{!resultAction(selected.task, "preview").enabled && <p className="text-xs text-warning">{resultAction(selected.task, "preview").reason || "未授权"}</p>}</div>
+      </Panel>}
+    </div></AudioQueue>
   );
 }
 
 function ReviewTab({ tasks }: { tasks: TaskSnapshot[] }) {
+  const [params, setParams] = useSearchParams();
+  const text = params.get("reviewQ") || "";
+  const status = params.get("reviewStatus") || "";
+  const patch = (key: string, value: string) => setParams((current) => { const next = new URLSearchParams(current); if (value) next.set(key, value); else next.delete(key); return next; }, { replace: true });
+  const rows = tasks.filter((task) => (!status || (task.provider_recovery?.review_status || "") === status) && (!text || task.title.toLocaleLowerCase().includes(text.toLocaleLowerCase())));
   const columns: Column<TaskSnapshot>[] = [
     {
       id: "task",
       header: "任务",
-      className: "w-full max-w-0",
+      className: fillMainColumn,
       cell: (task) => (
         <span className="block min-w-0">
           <span className="block truncate text-body-sm font-medium text-ink">{task.title}</span>
@@ -781,12 +946,16 @@ function ReviewTab({ tasks }: { tasks: TaskSnapshot[] }) {
   ];
   return (
     <Panel bodyClassName="p-0">
+      <div className="flex flex-wrap gap-2 border-b border-line px-4 py-3">
+        <SearchField value={text} onChange={(value) => patch("reviewQ", value)} label="搜索审阅任务" placeholder="任务名称" className="w-full sm:w-56" />
+        <Select aria-label="审阅结论" value={status} onChange={(event) => patch("reviewStatus", event.target.value)} className="w-36"><option value="">全部结论</option>{[...new Set(tasks.map((task) => task.provider_recovery?.review_status).filter((item): item is string => !!item))].map((item) => <option key={item} value={item}>{reviewStatusLabel(item)}</option>)}</Select>
+      </div>
       <DataTable
         label="待审阅任务"
         columns={columns}
-        rows={tasks}
+        rows={rows}
         rowKey={(task) => task.task_key || `${task.locator.owner}:${task.locator.task_ref}`}
-        empty={<EmptyState compact title="没有审阅相关记录" body="只有 owner 返回待审阅状态或审阅结论时才会出现。" />}
+        empty={<EmptyState compact title={tasks.length ? "没有符合条件的审阅记录" : "没有审阅相关记录"} body="只有 owner 返回待审阅状态或审阅结论时才会出现。" />}
       />
     </Panel>
   );

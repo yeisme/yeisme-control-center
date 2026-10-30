@@ -9,9 +9,49 @@
     <title>Yeisme Control Center</title>
     <link rel="icon" href="data:," />
     <script type="module" src="/src/theme-boot.ts"></script>
+    <style>
+      /* Boot splash: painted before any script, so it uses its own literal colors; React fades it out. */
+      .boot-splash { --boot-canvas: #f5f3ee; --boot-ink: #1f2b25; --boot-muted: #616e66; --boot-line: #dcdfd5; --boot-mark: #173c30; --boot-accent: #d0e778; --boot-ease: cubic-bezier(0.16, 1, 0.3, 1);
+        position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: var(--boot-canvas); color: var(--boot-ink);
+        font-family: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", ui-sans-serif, system-ui, sans-serif; }
+      @media (prefers-color-scheme: dark) { .boot-splash { --boot-canvas: #111714; --boot-ink: #e8efe9; --boot-muted: #a1afa6; --boot-line: #29352f; --boot-mark: #0f1a15; } }
+      :root[data-theme="dark"] .boot-splash { --boot-canvas: #111714; --boot-ink: #e8efe9; --boot-muted: #a1afa6; --boot-line: #29352f; --boot-mark: #0f1a15; }
+      :root[data-theme="light"] .boot-splash { --boot-canvas: #f5f3ee; --boot-ink: #1f2b25; --boot-muted: #616e66; --boot-line: #dcdfd5; --boot-mark: #173c30; }
+      .boot-stage { display: flex; flex-direction: column; align-items: center; text-align: center; }
+      .boot-mark { position: relative; display: grid; place-items: center; width: 84px; height: 84px; animation: boot-pop 900ms var(--boot-ease) both; }
+      .boot-orbit { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--boot-line); }
+      .boot-orbit::after { content: ""; position: absolute; inset: -1.5px; border-radius: 50%; border: 1.5px solid transparent; border-top-color: var(--boot-accent); border-right-color: color-mix(in srgb, var(--boot-accent) 35%, transparent); animation: boot-spin 1.6s cubic-bezier(0.65, 0, 0.35, 1) infinite; }
+      .boot-y { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 15px; background: var(--boot-mark); color: var(--boot-accent); font-size: 24px; font-weight: 700; box-shadow: 0 10px 28px rgb(25 49 38 / 18%), inset 0 0 0 1px rgb(255 255 255 / 6%); }
+      .boot-word { margin: 20px 0 0; display: flex; flex-direction: column; gap: 2px; animation: boot-up 800ms 140ms var(--boot-ease) both; }
+      .boot-word strong { font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em; }
+      .boot-word span { font-size: 13px; line-height: 18px; color: var(--boot-muted); }
+      .boot-status { margin-top: 18px; display: grid; min-height: 20px; }
+      .boot-status > p { grid-area: 1 / 1; margin: 0; font-size: 13px; line-height: 20px; color: var(--boot-muted); }
+      .boot-note { animation: boot-fade 400ms 700ms both, boot-out 300ms 10s forwards; }
+      .boot-slow { visibility: hidden; opacity: 0; animation: boot-show 400ms 10.2s forwards; }
+      .boot-slow a { color: var(--boot-ink); font-weight: 600; text-underline-offset: 3px; }
+      .boot-splash[data-leaving] { pointer-events: none; animation: boot-fade-out 380ms var(--boot-ease) forwards; }
+      .boot-splash[data-leaving] .boot-stage { animation: boot-leave 380ms var(--boot-ease) forwards; }
+      @keyframes boot-pop { from { opacity: 0; transform: scale(0.86); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+      @keyframes boot-up { from { opacity: 0; transform: translateY(10px); filter: blur(4px); } to { opacity: 1; transform: none; filter: none; } }
+      @keyframes boot-fade { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes boot-show { from { visibility: visible; opacity: 0; } to { visibility: visible; opacity: 1; } }
+      @keyframes boot-out { to { opacity: 0; } }
+      @keyframes boot-fade-out { to { opacity: 0; } }
+      @keyframes boot-leave { to { transform: translateY(-8px) scale(1.02); filter: blur(4px); } }
+      @keyframes boot-spin { to { transform: rotate(1turn); } }
+      @media (prefers-reduced-motion: reduce) { .boot-mark, .boot-word, .boot-orbit::after { animation: none; } .boot-splash[data-leaving], .boot-splash[data-leaving] .boot-stage { animation: none; } }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot-splash" class="boot-splash" role="status" aria-live="polite">
+      <div class="boot-stage">
+        <div class="boot-mark" aria-hidden="true"><span class="boot-orbit"></span><span class="boot-y">Y</span></div>
+        <p class="boot-word"><strong>Yeisme</strong><span>Control Center</span></p>
+        <div class="boot-status"><p class="boot-note">正在连接控制中心…</p><p class="boot-slow">连接比平时慢。<a href="" onclick="location.reload();return false;">重新加载</a></p></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

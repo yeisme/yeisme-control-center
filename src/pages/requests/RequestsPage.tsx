@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useSearchParams } from "react-router-dom";
-import { ChevronDown, Clock3, FileText, Info, LoaderCircle, LockKeyhole, RefreshCw, SlidersHorizontal } from "../../icons";
+import { useOverlayParams } from "../../app/overlay-history";
+import { ChevronDown, Clock3, Copy, FileText, Info, LoaderCircle, LockKeyhole, PanelRightOpen, RefreshCw, SlidersHorizontal } from "../../icons";
+import { linkActions, useCopy } from "../../app/item-actions";
 import { api, errorClassOf, errorCode, isAbort, type Coverage, type Owner, type RequestPage, type RequestProjection, type RequestQuery, type RequestSummaryResponse } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
+import { recentTarget, useRememberRecent } from "../../app/recent";
 import { useObservationCache } from "../../app/observation-cache";
 import { coverageLabels, defaultRequestQuery, type CoverageState } from "../../request-visibility";
-import { Button, CoverageChip, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, Select, SkeletonBlock, StaleNotice, TaskStatePill, ToggleGroup, coverageTone, cx, ownerLabel, type Metric, type Tone } from "../../components/ui";
+import { ActionsContextMenu, Button, CoverageChip, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, Select, SkeletonBlock, StaleNotice, TaskStatePill, ToggleGroup, coverageTone, cx, moveBetweenRows, ownerLabel, type ItemAction, type Metric, type Tone } from "../../components/ui";
 import { readStatusLabels, statusForFailure, type ReadStatus } from "../../shared/read-model/read-state";
 import { reasonLabel } from "../../shared/read-model/labels";
 import { formatCount, formatFullTime, formatRelative } from "../../shared/read-model/format";
@@ -20,6 +23,7 @@ const windows: { id: Window; label: string; hours: number }[] = [
 
 const kindLabels: Record<string, string> = { gateway: "网关调用", generation: "生成任务", operation: "领域操作" };
 const toneText: Record<Tone, string> = { success: "text-success", info: "text-info", warning: "text-warning", danger: "text-danger", review: "text-review", neutral: "text-muted" };
+const requestOverlays = ["request"] as const;
 const rowColumns = "md:grid-cols-[minmax(0,2fr)_96px_minmax(0,1fr)_112px_104px]";
 const summaryMetrics: { key: keyof Omit<NonNullable<Extract<RequestSummaryResponse["sources"][number], { summary: unknown }>["summary"]>, "coverage" | "from" | "to">; label: string }[] = [
   { key: "gateway", label: "网关调用" },
@@ -52,7 +56,8 @@ interface ListState { status: ReadStatus; rows: RequestProjection[]; coverage: C
 export default function RequestsPage() {
   const { scopeId, generation, expire, noteEpoch } = useWorkspace();
   const cache = useObservationCache();
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
+  const [, writeOverlay] = useOverlayParams(requestOverlays);
   const timeWindow = (windows.some((item) => item.id === params.get("window")) ? params.get("window") : "24h") as Window;
   const owner = params.get("owner") || "all";
   const state = params.get("state") || "all";
@@ -81,13 +86,14 @@ export default function RequestsPage() {
   const identityRef = useRef(identity);
   identityRef.current = identity;
 
+  const copy = useCopy();
   const update = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(patch)) {
       if (value && value !== "all") next.set(key, value);
       else next.delete(key);
     }
-    setParams(next, { replace: true });
+    writeOverlay(next);
   };
 
   useEffect(() => {
@@ -144,6 +150,7 @@ export default function RequestsPage() {
   }, [list.next, list.loadingMore, scopeId, query]);
 
   const selected = selectedKey ? list.rows.find((row) => row.owner + ":" + row.id === selectedKey) : undefined;
+  useRememberRecent(selected ? { key: `request:${selected.owner}:${selected.id}`, kind: "request", label: selected.title || selected.id, meta: `${ownerLabel(selected.owner)} · 请求`, target: recentTarget("/requests", params) } : null);
   const [selectedOwner, ...selectedIdParts] = (selectedKey || "").split(":");
   const delegationMissing = list.coverage.length > 0 && list.coverage.every((item) => item.reason === "delegation_unavailable" || item.reason === "source_not_configured");
   const refresh = () => setTick((value) => value + 1);
@@ -162,6 +169,7 @@ export default function RequestsPage() {
   return <div className="page-enter space-y-5" data-page="requests">
     <h1 className="sr-only">请求记录</h1>
     <PageToolbar
+      foldMetrics
       summary="先核对各来源的汇总，再用时间窗与筛选读取请求批次；请求正文需说明用途后按需读取，并写入审计。"
       metrics={batchLoading ? <SkeletonBlock className="h-[50px] w-72 max-w-full rounded-control" /> : list.rows.length > 0 ? <MetricStrip label="当前批次概况" items={batchMetrics} /> : undefined}
       meta={list.observedAt ? <span className="inline-flex items-center gap-1.5 text-2xs text-muted"><Clock3 className="size-3.5" />读取于 {formatRelative(list.observedAt)}</span> : undefined}
@@ -180,7 +188,7 @@ export default function RequestsPage() {
     <Panel bodyClassName="p-0">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
         <ToggleGroup<Window> label="时间窗" value={timeWindow} onChange={(value) => update({ window: value === "24h" ? null : value })} options={windows.map((item) => ({ id: item.id, label: item.label }))} />
-        <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value })} className="w-36">
+        <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value })} className="w-36 max-sm:w-28">
           <option value="all">全部来源</option>
           {(["aigora", "eikona", "scaena", "sonora"] as Owner[]).map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
         </Select>
@@ -207,14 +215,20 @@ export default function RequestsPage() {
 
       {list.coverage.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2.5">
         <span className="mr-1 text-meta text-muted">来源覆盖</span>
-        {list.coverage.map((item) => <CoverageChip key={item.owner} owner={item.owner} state={item.state} reason={coverageReason(item.reason)} />)}
+        {/* Phones list only the sources that did not return in full; the rest become one count. */}
+        {list.coverage.map((item) => <CoverageChip key={item.owner} owner={item.owner} state={item.state} reason={coverageReason(item.reason)} className={item.state === "complete" ? "max-sm:hidden" : undefined} />)}
+        {list.coverage.some((item) => item.state === "complete") && <span className="text-meta text-muted sm:hidden">{list.coverage.every((item) => item.state === "complete") ? "全部来源已提供" : `其余 ${list.coverage.filter((item) => item.state === "complete").length} 个已提供`}</span>}
       </div>}
 
       <ReadStateView status={list.status === "empty" ? "ready" : list.status} error={list.error} onRetry={refresh} skeleton={<RequestListSkeleton />}>
         {list.rows.length === 0 ? <EmptyState icon={<FileText />} title="当前批次没有请求" body={list.coverage.some((item) => item.state !== "complete") ? "部分来源没有完整返回，空列表不代表没有请求，请查看上方来源覆盖。" : "所选时间窗内没有记录。"} /> : <>
           <RequestListHeader />
-          <ul className="divide-y divide-line" aria-label="请求列表">
-            {list.rows.map((row, index) => <RequestRow key={row.owner + ":" + row.id} row={row} index={index} selected={selectedKey === row.owner + ":" + row.id} onOpen={() => update({ request: row.owner + ":" + row.id })} />)}
+          <ul className="divide-y divide-line" aria-label="请求列表" onKeyDown={(event) => moveBetweenRows(event)}>
+            {list.rows.map((row, index) => <RequestRow key={row.owner + ":" + row.id} row={row} index={index} selected={selectedKey === row.owner + ":" + row.id} onOpen={() => update({ request: row.owner + ":" + row.id })} actions={[
+              { id: "open", label: "打开详情", icon: <PanelRightOpen />, group: "open", run: () => update({ request: row.owner + ":" + row.id }) },
+              ...linkActions(`/requests?request=${encodeURIComponent(row.owner + ":" + row.id)}`, copy),
+              { id: "copy-ref", label: "复制请求引用", icon: <Copy />, group: "link", run: () => void copy(row.id, "请求引用") },
+            ]} />)}
           </ul>
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-3 text-meta text-muted">
             <span className="tabular">当前批次 {list.rows.length} 条（{list.pages} 页，按来源分批）</span>
@@ -244,11 +258,11 @@ function RequestListHeader() {
   </div>;
 }
 
-function RequestRow({ row, index, selected, onOpen }: { row: RequestProjection; index: number; selected: boolean; onOpen: () => void }) {
+function RequestRow({ row, index, selected, onOpen, actions }: { row: RequestProjection; index: number; selected: boolean; onOpen: () => void; actions: ItemAction[] }) {
   const incomplete = row.coverage.state !== "complete";
   const kind = kindLabels[row.kind] || "请求";
-  return <li className="stagger-in" style={{ "--i": index } as CSSProperties}>
-    <button type="button" data-request={row.owner + ":" + row.id} aria-current={selected || undefined} onClick={onOpen} className={cx("group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 px-4 py-3 text-left transition-colors duration-150 hover:bg-panel-soft focus-visible:outline-offset-[-2px]", rowColumns, selected && "bg-primary-soft/50")}>
+  return <ActionsContextMenu actions={actions}><li className="stagger-in" style={{ "--i": index } as CSSProperties}>
+    <button type="button" data-row-button data-request={row.owner + ":" + row.id} aria-current={selected || undefined} onClick={onOpen} className={cx("group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 px-4 py-3 text-left transition-colors duration-150 hover:bg-panel-soft focus-visible:outline-offset-[-2px]", rowColumns, selected && "bg-primary-soft/50")}>
       <span className="min-w-0">
         <span className="block truncate text-body-sm font-medium text-ink group-hover:text-primary dark:group-hover:text-accent">{row.title || row.id}</span>
         <span className="block truncate text-meta text-muted">{ownerLabel(row.owner)} · <span className="font-mono text-2xs">{row.id}</span><span className="md:hidden"> · {kind}</span>{incomplete && <span className={toneText[coverageTone(row.coverage.state)]}> · {coverageLabels[row.coverage.state as CoverageState] || row.coverage.state}</span>}</span>
@@ -258,7 +272,7 @@ function RequestRow({ row, index, selected, onOpen }: { row: RequestProjection; 
       <span className="justify-self-end md:justify-self-start"><span className="sr-only">状态：</span><TaskStatePill state={row.state} /></span>
       <span className="col-span-2 truncate text-meta text-muted tabular md:col-span-1 md:text-right" title={formatFullTime(row.created_at)}><span className="sr-only">创建时间：</span>{formatRelative(row.created_at)}</span>
     </button>
-  </li>;
+  </li></ActionsContextMenu>;
 }
 
 const skeletonWidths = ["w-3/5", "w-1/2", "w-2/3", "w-2/5"];
@@ -296,6 +310,8 @@ function SummarySkeleton() {
 }
 
 function SummaryPanel({ summary }: { summary: { status: ReadStatus; data: RequestSummaryResponse | null; error: string | null } }) {
+  // Phones fold the per-source table under its title line; the list below is what most visits are for.
+  const [unfolded, setUnfolded] = useState(false);
   if (summary.status === "loading") return <SummarySkeleton />;
   if (!summary.data) return <InlineNotice tone="neutral" icon={<Info />}>全范围汇总暂不可读（{readStatusLabels[summary.status]}）；列表批次仍可单独查看。</InlineNotice>;
   const sources = summary.data.sources;
@@ -304,9 +320,10 @@ function SummaryPanel({ summary }: { summary: { status: ReadStatus; data: Reques
     title="全范围汇总"
     actions={<span className="flex flex-wrap items-center gap-2 text-meta text-muted">
       {summary.status === "stale" && <Pill size="sm" tone="warning">{readStatusLabels.stale}</Pill>}
-      <span>{summary.data.complete ? "所有来源完整" : "部分来源不完整"} · 各来源分别计数，不相加为总量</span>
+      <span>{summary.data.complete ? "所有来源完整" : "部分来源不完整"}<span className="max-sm:hidden"> · 各来源分别计数，不相加为总量</span></span>
+      <button type="button" aria-expanded={unfolded} onClick={() => setUnfolded((value) => !value)} className="inline-flex items-center gap-0.5 font-medium text-ink-soft sm:hidden">{unfolded ? "收起" : "展开"}<ChevronDown className={cx("size-3.5 transition-transform", unfolded && "rotate-180")} /></button>
     </span>}
-    bodyClassName="p-0"
+    bodyClassName={cx("p-0", !unfolded && "max-sm:hidden")}
   >
     {withSummary.length === 0 ? <div className="flex flex-wrap gap-1.5 px-4 py-3">{sources.map((source) => <CoverageChip key={source.owner} owner={source.owner} state={source.coverage?.state || "unknown"} reason={coverageReason(source.coverage?.reason)} />)}</div> : <div role="region" aria-label="各来源汇总表" tabIndex={0} className="overflow-x-auto">
       <table aria-label="各来源请求汇总" className="w-full min-w-[720px] text-body-sm">

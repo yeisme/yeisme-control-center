@@ -6,10 +6,10 @@ import type { ControlCenterErrorClass } from "../types";
 import type { ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt } from "../action-contract";
 import type { WorkQueueFilters, WorkQueueResponse } from "../work-queue";
 import type { CreativeFlowProjection } from "../creative-flow";
-import type { DramaEpisodeDetail, DramaEpisodesResponse } from "../drama";
+import type { DramaEpisodeDetail, DramaEpisodesResponse, DramaSourceState } from "../drama";
 import type { CreativeCapabilityContract, CreativeInputSpec } from "../creative-input";
 import type { ToolCatalog } from "../tool-catalog";
-import type { CollaborationMember, CollaborationOrganization, CollaborationTeam, DirectoryPage, DirectoryQuery, GenerationBatch, ProjectBinding, ProjectFolder, ProjectItem, SharedProject } from "../collaboration";
+import type { BindingOption, CollaborationMember, CollaborationOrganization, CollaborationTeam, DirectoryPage, DirectoryQuery, GenerationBatch, GenerationBatchDetail, GenerationBatchPage, GenerationBatchQuery, ProjectFolder, ProjectItem, ProjectItemPage, SharedProject } from "../collaboration";
 
 export const controlCenterPrefix = "/api/control-center/v1";
 export type { TaskConnectionState, TaskEvent, TaskPage, TaskSnapshot, ServiceDirectoryEntry, AttachmentRead, ContentRead, Coverage, CoverageState, Owner, RequestProjection, RequestQuery, RequestSummary, ProcessObservation, ProcessCheckpoint, PromptCaptureObservation, ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt, WorkQueueFilters, WorkQueueResponse, CreativeFlowProjection, CreativeCapabilityContract, CreativeInputSpec };
@@ -208,6 +208,8 @@ export interface UsageBudget {
   reserved: number;
   remaining: number;
   per_owner: Record<string, number>;
+  /** The currency owners cap a live run in; amounts here are never converted. */
+  currency: string;
 }
 export interface UsageProjection extends Epoch {
   scope?: string;
@@ -317,6 +319,10 @@ export interface TaskNotification {
   category?: string;
   read_at?: string | null;
   target_path?: string | null;
+  /** Unsigned half of the task key; stays the same across server restarts. */
+  task_identity?: string;
+  /** Set when a fresh owner read showed the task is no longer failing. */
+  recovered_at?: string | null;
   id: string;
   scope_id: string;
   task_key: string;
@@ -344,7 +350,20 @@ export interface NotificationPage extends Epoch {
   next_cursor?: string | null;
   total?: number;
   rows: TaskNotification[];
+  /** Unread reminders over every row, not just this page (see `countsAsUnread`). */
   unread: number;
+  /** Fresh unread failures shown on Home, over every row. */
+  attention?: number;
+}
+
+export interface NotificationMuteRule {
+  id: string;
+  scope_id: string;
+  kind: "task" | "error_code";
+  owner: string;
+  key: string;
+  label: string;
+  created_at: string;
 }
 
 export interface ServicesResponse extends Epoch {
@@ -392,6 +411,10 @@ export interface AuctraCollectionPage extends Epoch {
   rows: AuctraCollectionRecord[];
   total: number;
   next_cursor?: string;
+  /** Configuration-only connection state; absent from servers that predate it. */
+  connection?: { state: DramaSourceState; reason?: string; project_ref?: string };
+  /** The last sync that stored anything; `complete` is false when it stopped before Auctra's last page. */
+  last_sync?: { at: string; complete: boolean; reason?: string };
 }
 export interface AuctraCollectionSyncReceipt extends Epoch {
   schema_version: "yeisme.auctra.collection.sync.v1";
@@ -403,6 +426,9 @@ export interface AuctraCollectionSyncReceipt extends Epoch {
   cursor: string | null;
   counts: { inserted: number; updated: number; returned: number; total: number };
   blocker: string | null;
+  /** Absent from servers that predate paging; such a server read one page only. */
+  pages?: number;
+  complete?: boolean;
 }
 
 export interface ProjectMetadata {
@@ -421,6 +447,38 @@ export interface ProjectMetadataPage extends Epoch {
   scope: string;
   observed_at: string;
   rows: ProjectMetadata[];
+}
+
+/** A tool project one scope reads: pinned in the scope, or the project of one of its connections. */
+export interface OwnerProjectRow {
+  owner: string;
+  project_ref: string;
+  connection_ids: string[];
+  pinned: boolean;
+  registered: boolean;
+  scope_id: string;
+  scope_label: string;
+  tenant: string;
+  display_name: string;
+  hidden: boolean;
+  revision: number;
+  /** Connections an administrator added from the control center; only these can be disconnected. */
+  registrations: { id: string; template_id: string; label: string }[];
+}
+
+export interface OwnerProjectTemplate {
+  id: string;
+  owner: string;
+  label: string;
+  project: string;
+}
+
+export interface OwnerProjectsPage extends Epoch {
+  schema_version: "yeisme.owner_projects.v1";
+  scope: string;
+  rows: OwnerProjectRow[];
+  can_register: boolean;
+  templates: OwnerProjectTemplate[];
 }
 
 export function requestParams(query: RequestQuery): Query {
@@ -444,13 +502,14 @@ export const api = {
   collaborationMembers: (organization: string, signal?: AbortSignal) => get<{ rows: CollaborationMember[] }>(`/organizations/${encodeURIComponent(organization)}/members`, {}, signal),
   collaborationTeams: (organization: string, signal?: AbortSignal) => get<{ rows: CollaborationTeam[] }>(`/organizations/${encodeURIComponent(organization)}/teams`, {}, signal),
   collaborationCandidates: (organization: string, signal?: AbortSignal) => get<{ rows: { identity: string; name: string }[] }>(`/organizations/${encodeURIComponent(organization)}/candidates`, {}, signal),
-  bindingOptions: (organization: string, signal?: AbortSignal) => get<{ rows: ProjectBinding[] }>(`/organizations/${encodeURIComponent(organization)}/binding-options`, {}, signal),
+  bindingOptions: (organization: string, signal?: AbortSignal) => get<{ rows: BindingOption[] }>(`/organizations/${encodeURIComponent(organization)}/binding-options`, {}, signal),
   sharedProjects: (query: { organization?: string; q?: string; hidden?: string } = {}, signal?: AbortSignal) => get<DirectoryPage<SharedProject>>("/projects", query, signal),
   sharedProject: (id: string, signal?: AbortSignal) => get<SharedProject>(`/projects/${encodeURIComponent(id)}`, {}, signal),
   projectFolders: (project: string, signal?: AbortSignal) => get<{ rows: ProjectFolder[] }>(`/projects/${encodeURIComponent(project)}/folders`, {}, signal),
   projectItemTask: (project: string, item: string, signal?: AbortSignal) => get<TaskSnapshot & Epoch>(`/projects/${encodeURIComponent(project)}/items/${encodeURIComponent(item)}/task`, {}, signal),
-  projectItems: (project: string, query: DirectoryQuery = {}, signal?: AbortSignal) => get<DirectoryPage<ProjectItem> & { next_source_cursor?: string | null }>(`/projects/${encodeURIComponent(project)}/items`, { ...query }, signal),
-  generationBatches: (project: string, signal?: AbortSignal) => get<{ rows: GenerationBatch[] }>(`/projects/${encodeURIComponent(project)}/generation-batches`, {}, signal),
+  projectItems: (project: string, query: DirectoryQuery = {}, signal?: AbortSignal) => get<ProjectItemPage>(`/projects/${encodeURIComponent(project)}/items`, { ...query }, signal),
+  generationBatches: (project: string, query: GenerationBatchQuery = {}, signal?: AbortSignal) => get<GenerationBatchPage>(`/projects/${encodeURIComponent(project)}/generation-batches`, query, signal),
+  generationBatch: (project: string, batch: string, signal?: AbortSignal) => get<GenerationBatchDetail>(`/projects/${encodeURIComponent(project)}/generation-batches/${encodeURIComponent(batch)}`, {}, signal),
   readNotification: (scope: string, id: string, csrf: string) => post<{ notification: TaskNotification }>(`/notifications/${encodeURIComponent(id)}/read`, { scope }, {}, csrf),
   authMethods: (signal?: AbortSignal) => get<AuthMethods>("/auth/methods", {}, signal),
   session: (signal?: AbortSignal) => get<WorkspaceSession>("/session", {}, signal),
@@ -461,6 +520,7 @@ export const api = {
   services: (scope: string, signal?: AbortSignal) => get<ServicesResponse>("/services", { scope, observe: 1 }, signal),
   auctraCollection: (scope: string, query: { record_kind?: string; collection_state?: string; source_state?: string; label?: string; project_ref?: string; from?: string; to?: string; cursor?: string; limit?: number } = {}, signal?: AbortSignal) => get<AuctraCollectionPage>("/auctra/collection", { scope, ...query }, signal),
   projectMetadata: (scope: string, signal?: AbortSignal) => get<ProjectMetadataPage>("/project-metadata", { scope }, signal),
+  ownerProjects: (scope: string, signal?: AbortSignal) => get<OwnerProjectsPage>("/owner-projects", { scope }, signal),
   auctraCollectionRecord: (scope: string, recordRef: string, signal?: AbortSignal) => get<{ record: AuctraCollectionRecord } & Epoch>("/auctra/collection/records/" + encodeURIComponent(recordRef), { scope }, signal),
   syncAuctraCollection: (scope: string, body: { cursor?: string; updated_after?: string; limit?: number }, csrf: string, signal?: AbortSignal) => post<AuctraCollectionSyncReceipt>("/auctra/collection/sync", { scope }, body, csrf, signal),
   connections: (scope: string, signal?: AbortSignal) => get<{ connections: TaskConnectionState[] } & Epoch>("/connections", { scope }, signal),
@@ -478,17 +538,20 @@ export const api = {
 
   notifications: (scope: string, signal?: AbortSignal, cursor?: string) => get<NotificationPage>("/notifications", { scope, cursor }, signal),
   syncNotifications: (scope: string, body: { tasks: Pick<TaskSnapshot, "task_key" | "state" | "revision" | "native_state" | "title" | "locator" | "provider_recovery">[]; present_task_keys: string[]; complete: boolean }, csrf: string, signal?: AbortSignal) =>
-    post<NotificationPage & { inserted: string[]; touched: string[]; staled: string[]; owner_writes: number }>("/notifications/sync", { scope }, body, csrf, signal),
+    post<NotificationPage & { inserted: string[]; touched: string[]; staled: string[]; owner_writes: number; verification_complete: boolean }>("/notifications/sync", { scope }, body, csrf, signal),
   acknowledgeNotification: (scope: string, id: string, csrf: string) =>
     post<{ notification: TaskNotification; task_states_changed: number; owner_writes: number }>("/notifications/" + encodeURIComponent(id) + "/acknowledge", { scope }, {}, csrf),
-  muteNotification: (scope: string, id: string, csrf: string, muteScope: "fingerprint" | "error_code" = "fingerprint") =>
-    post<{ updated: string[]; owner_writes: number; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/mute", { scope }, { scope: muteScope }, csrf),
+  muteNotification: (scope: string, id: string, csrf: string, muteScope: "fingerprint" | "task" | "error_code" = "fingerprint") =>
+    post<{ updated: string[]; rule: NotificationMuteRule | null; owner_writes: number; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/mute", { scope }, { scope: muteScope }, csrf),
   archiveNotification: (scope: string, id: string, csrf: string) =>
     post<{ notification: TaskNotification; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/archive", { scope }, {}, csrf),
   reopenNotification: (scope: string, id: string, csrf: string) =>
     post<{ notification: TaskNotification; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/reopen", { scope }, {}, csrf),
   bulkNotifications: (scope: string, body: { action: "acknowledge" | "archive" | "mute"; ids?: string[]; all?: boolean }, csrf: string) =>
     post<{ updated: string[]; owner_writes: number; task_states_changed: number }>("/notifications/bulk", { scope }, body, csrf),
+  muteRules: (scope: string, signal?: AbortSignal) => get<{ rows: NotificationMuteRule[] } & Epoch>("/notifications/mute-rules", { scope }, signal),
+  removeMuteRule: (scope: string, id: string, csrf: string) =>
+    post<{ removed: string; task_states_changed: number }>("/notifications/mute-rules/" + encodeURIComponent(id) + "/remove", { scope }, {}, csrf),
   cleanupNotifications: (scope: string, csrf: string) =>
     post<{ demoted: number; deleted_tasks: number; owner_writes: number; task_states_changed: number }>("/notifications/cleanup", { scope }, {}, csrf),
 

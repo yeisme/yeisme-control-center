@@ -2,6 +2,7 @@ export type WorkspacePage =
   | "home"
   | "projects"
   | "drama"
+  | "guide"
   | "creation"
   | "assets"
   | "tasks"
@@ -22,9 +23,9 @@ export interface NavItem {
 
 export const navItems: NavItem[] = [
   { id: "home", label: "工作台", group: "创作空间", description: "需要处理的事项、服务状态和最近结果" },
-  { id: "projects", label: "项目", group: "创作空间", description: "授权范围与 owner 项目连接" },
+  { id: "projects", label: "项目", group: "创作空间", description: "创建协作组织与共享项目，并关联已获准的 owner 项目" },
   { id: "drama", label: "剧集制作", group: "创作空间", description: "每一集走到哪一步、卡在哪、下一步谁来做" },
-  { id: "creation", label: "AI 创作", group: "创作空间", description: "能力、参数合同与预算预检" },
+  { id: "guide", label: "使用指南", group: "创作空间", description: "用 CLI 与 MCP 调用 Yeisme 的创作工具" },
   { id: "assets", label: "资源库", group: "创作空间", description: "任务结果、内容权限和逐结果预览" },
   { id: "tasks", label: "任务中心", group: "生产协作", description: "机器执行状态、事件和原任务恢复" },
   { id: "reminders", label: "提醒中心", group: "生产协作", description: "失败提醒、确认、免提醒和本地归档" },
@@ -36,7 +37,12 @@ export const navItems: NavItem[] = [
   { id: "team", label: "团队与设置", group: "团队", description: "身份、授权范围、成员与审计" },
 ];
 
-const pageIds = new Set<string>(navItems.map((item) => item.id));
+/** Routable pages that are reached from inside other pages, never from the sidebar or search. */
+const hiddenItems: NavItem[] = [
+  { id: "creation", label: "批量生成", group: "创作空间", description: "共享项目的生成批次" },
+];
+
+const pageIds = new Set<string>([...navItems, ...hiddenItems].map((item) => item.id));
 
 const aliases: Record<string, WorkspacePage> = {
   "": "home",
@@ -51,6 +57,10 @@ const aliases: Record<string, WorkspacePage> = {
   connections: "services",
   episodes: "drama",
   series: "drama",
+  help: "guide",
+  docs: "guide",
+  cli: "guide",
+  mcp: "guide",
 };
 
 export function pageFromPath(pathname: string): WorkspacePage {
@@ -60,5 +70,5 @@ export function pageFromPath(pathname: string): WorkspacePage {
 }
 
 export function navItem(page: WorkspacePage) {
-  return navItems.find((item) => item.id === page) || navItems[0];
+  return navItems.find((item) => item.id === page) || hiddenItems.find((item) => item.id === page) || navItems[0];
 }
