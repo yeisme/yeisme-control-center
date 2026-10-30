@@ -31,3 +31,11 @@
 #### Scenario: owner 尚无领域写合同
 - **WHEN** 审阅或交付动作没有可用 owner adapter
 - **THEN** 保留能力与合同任务，显示 needs_contract，不以本地收集确认替代领域审阅通过
+
+#### Scenario: 额外工具来源尚无观察合同
+- **WHEN** 服务目录中的来源标记为 not_integrated，或 owner 尚未发布只读观察合同
+- **THEN** 目录与工作队列保持 needs_contract 并写明具名 owner 与缺失合同，不编造任务、目录或连接数据，也不复用 Agent 管理凭据代读
+
+#### Scenario: owner 管理动作缺少委托合同
+- **WHEN** owner 配置或成员变更动作没有 owner 发布的 OIDC 委托合同
+- **THEN** 预览返回 availability=needs_contract，并以 owner_config_contract_not_configured 或 owner_membership_contract_not_configured 作为 blocker；确认只产生 needs_contract 回执、不调用 owner；本地组织成员不授予任何 owner 权限

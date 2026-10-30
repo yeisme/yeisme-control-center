@@ -22,7 +22,7 @@ Yeisme Workspace v18.1 是当前正式 Control Center 的视觉与交互基线�
 终端一启动内存 API 服务：
 
 ```bash
-cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
+cd client/yeisme-control-center
 bun install --frozen-lockfile
 bun run build
 bun run dev
@@ -31,7 +31,7 @@ bun run dev
 打开 `http://127.0.0.1:4298/`：
 
 ```bash
-cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
+cd client/yeisme-control-center
 V18_API_ORIGIN=http://127.0.0.1:4312 bun run dev
 ```
 

@@ -15,7 +15,7 @@
 - 未采用版本不能自动显示为交付内容；结果未知保持未知。
 
 ```bash
-cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
+cd client/yeisme-control-center
 bun run build
 bun run dev
 ```
@@ -23,7 +23,7 @@ bun run dev
 另开终端执行：
 
 ```bash
-cd /home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center
+cd client/yeisme-control-center
 bun run typecheck
 bun run test
 bun run test:app

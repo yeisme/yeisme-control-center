@@ -87,7 +87,9 @@ YEISME_RELEASE_VERIFY_PORT=4350 bun scripts/verify-release-component.ts <candida
 Provider transport、action contract、任务观测、内容读取和真实生成分别验收。`configured`、`transport verified` 或 `tools/list` 成功都不能直接推导业务 ready。真实 canary 只允许在明确预算和 owner 授权下运行：
 
 ```bash
-bun run test:provider-live -- --confirm-live --total-cny 30 --image-cny 15 --video-cny 10 --audio-cny 5
+bun run test:provider-live -- --confirm-live --modality audio --run-label <新标签> --total-usd 0.5 --audio-usd 0.5
 ```
+
+预算以 USD 给出，原样交给 owner，不换汇。各模态的准入与证据要求见 [Provider 实时调用](provider-live.md)。
 
 当前状态以 [当前实现状态](current-status.md) 为准；本文件不记录真实部署地址或秘密配置。

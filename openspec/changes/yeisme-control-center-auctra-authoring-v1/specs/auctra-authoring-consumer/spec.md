@@ -28,3 +28,8 @@ When Auctra is unavailable, forbidden, stale, or missing an event contract, the 
 
 - **WHEN** Auctra has no published collection contract
 - **THEN** the service detail shows `needs_contract` and preserves the previous index without claiming freshness
+
+#### Scenario: collection event source not yet published
+
+- **WHEN** Auctra has not published a collection event source that defines event ids, cursor replay, scope and epoch filtering, reconnect, and revocation
+- **THEN** the Control Center keeps explicit sync only, offers no SSE stream or hidden polling, and keeps the SSE relay task pending

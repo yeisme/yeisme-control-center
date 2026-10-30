@@ -43,3 +43,25 @@ The usage view SHALL deduplicate by owner and source reference and SHALL keep es
 #### Scenario: Missing owner cost
 - **WHEN** a Provider receipt omits cost information
 - **THEN** the usage projection marks cost `unknown` and does not insert zero
+
+#### Scenario: Cost without a currency
+- **WHEN** a Provider receipt reports a cost but no currency
+- **THEN** the usage projection marks the cost `unknown` and does not record it as yuan or dollars
+
+### Requirement: Budget caps stay in the owner's currency
+Live provider runs SHALL carry their budget cap in USD, the currency the owners cap a run in, and SHALL hand it to the owner unconverted. No exchange rate is assumed anywhere in the run path.
+
+#### Scenario: Cap in another currency
+- **WHEN** a live run request carries a cap in CNY or any currency other than USD
+- **THEN** the Control Center refuses it with `provider_budget_currency_mismatch` before any owner call and reserves nothing
+
+#### Scenario: Owner without a cost cap parameter
+- **WHEN** an owner's submit action accepts no cost cap
+- **THEN** the Control Center reservation alone does not count as an owner-enforced cap, and that modality's canary is not admitted until the owner accepts one
+
+### Requirement: Per-modality canary admission
+Image, video and audio canaries SHALL be admitted and evidenced separately: channel and model, authorization, an owner-enforced USD cap, the original idempotency key, a downloaded result that decodes or plays, and an actual cost with its currency.
+
+#### Scenario: Video without a known quote
+- **WHEN** Scaena has not published the fixed video plan and known-cost quote contract
+- **THEN** the video canary is not admitted and stays pending whatever the image and audio results are
