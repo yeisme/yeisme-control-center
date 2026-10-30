@@ -28,7 +28,7 @@ const config: ServerConfig = {
 process.env.TEST_SCAENA_TOKEN = "test-scaena-token";
 process.env.TEST_SONORA_TOKEN = "test-sonora-token";
 
-function fetcher(malformedSonoraDiagnostic = false) {
+function fetcher(malformedSonoraDiagnostic = false, wrappedSonoraDiagnostic = false) {
   const calls: string[] = [];
   const fetch = async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -40,7 +40,7 @@ function fetcher(malformedSonoraDiagnostic = false) {
     if (body.method === "tools/call" && body.params.name === "sonora.search") return Response.json({ id: body.id, result: { structuredContent: { results: [{ provider_id: "openai-tts", model_ref: "openai-tts", voice_ref: "alloy" }] } } });
     if (body.method === "tools/call" && body.params.arguments.action === "getProjectMediaCapabilities") return Response.json({ id: body.id, result: { structuredContent: { state: "ready" } } });
     if (body.method === "tools/call" && body.params.arguments.action === "credential.status") return Response.json({ id: body.id, result: { structuredContent: { configured: true } } });
-    if (body.method === "tools/call" && body.params.arguments.action === "doctor.run") return Response.json({ id: body.id, result: { structuredContent: malformedSonoraDiagnostic ? { unexpected: true } : { configured: false, diagnostic_status: "credential_missing" } } });
+    if (body.method === "tools/call" && body.params.arguments.action === "doctor.run") return Response.json({ id: body.id, result: { structuredContent: malformedSonoraDiagnostic ? { unexpected: true } : wrappedSonoraDiagnostic ? { request_id: "req-1", result: { action: "doctor.run", schema_version: "sonora.execute.v1", status: "success", data: { projection: { status: "success", data: { configured: false, provider_id: "openai-tts", status: "credential_missing" }, facts: { configured: "false", diagnostic_status: "credential_missing" } } } } } : { configured: false, diagnostic_status: "credential_missing" } } });
     throw new Error(`unexpected MCP call: ${JSON.stringify(body)}`);
   };
   return { fetch: fetch as typeof globalThis.fetch, calls };
@@ -58,6 +58,11 @@ describe("provider read-only discovery", () => {
     expect(transport.calls.some((call) => call.includes("createVideoProviderTask"))).toBe(false);
   });
 
+  it("reads Sonora's diagnosis inside its execute envelope, so a successful call with a missing credential is not configured", async () => {
+    const manager = new ProviderRunManager(config, fetcher(false, true).fetch);
+    const sonora = (await manager.capabilities(scope)).find((row) => row.owner === "sonora");
+    expect(sonora).toMatchObject({ readiness: "needs_configuration", supports_live_submit: false, diagnostic: { code: "credential_missing", configured: false } });
+  });
   it("projects Sonora provider diagnosis without calling voice.audition", async () => {
     const transport = fetcher();
     const manager = new ProviderRunManager(config, transport.fetch);

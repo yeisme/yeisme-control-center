@@ -138,6 +138,8 @@ export interface CapabilityProjection {
   modality: ProviderModality;
   name: string;
   model_ref: string;
+  /** The owner project this scope binds; a live run must name it. */
+  project_ref: string | null;
   state: "configured" | "needs_configuration" | "needs_contract";
   transport: "mcp";
   supports_live_submit: boolean;
@@ -312,7 +314,7 @@ const jsonText = (value: any): any => {
   return value;
 };
 const providerIdFromModel = (modelRef: string) => {
-  const match = modelRef.match(/(?:sonora:\/\/voice\/|sonora\/voice\/)([^/]+)/);
+  const match = modelRef.match(/(?:sonora:\/\/(?:voice|tts-model)\/|sonora\/voice\/)([^/]+)/);
   return match?.[1] || (modelRef.includes("/") ? modelRef.split("/").at(-1) || "openai-tts" : modelRef || "openai-tts");
 };
 const normalizeBinding = (value: any): ProviderBinding | null => {
@@ -380,23 +382,28 @@ const normalizeRecovery = (value: any, fallbackRef: string | null): ProviderTask
   };
 };
 const normalizeReceipt = (value: any, fallback: ProviderRunProjection): ProviderReceipt => {
-  const source = text(find(value, ["source_ref", "run_ref", "run_id", "task_ref", "submission_ref", "id", "request_ref"]));
-  const outputs = find(value, ["output_refs", "outputs", "artifacts", "results"]);
-  const outputRefs = Array.isArray(outputs)
-    ? outputs.flatMap((item) => {
-        const ref = typeof item === "string" ? item : item?.ref || item?.artifact_ref || item?.uri;
-        return typeof ref === "string" && ref.length <= 500 ? [ref] : [];
-      }).slice(0, 50)
-    : [];
+  // Sonora's synchronous audition names its usage record and its audio asset rather than a run.
+  const source = text(find(value, ["source_ref", "run_ref", "run_id", "task_ref", "submission_ref", "id", "request_ref", "provider_usage_ref"]));
+  const outputs = find(value, ["output_refs", "outputs", "artifacts", "results", "audio_asset_ref"]);
+  const outputRefs = (Array.isArray(outputs) ? outputs : typeof outputs === "string" ? [outputs] : [])
+    .flatMap((item) => {
+      const ref = typeof item === "string" ? item : item?.ref || item?.artifact_ref || item?.uri;
+      return typeof ref === "string" && ref.length <= 500 ? [ref] : [];
+    }).slice(0, 50);
   const errorValue = find(value, ["error_code", "code", "error"]);
   const currency = text(find(value, ["currency", "currency_code"]));
+  // A cost reported without its currency cannot be accounted for, so it stays unknown instead of being read as yuan or
+  // dollars. A field that names its unit, such as Sonora's `cost_usd`, does report its currency.
+  const named = currency ? finite(find(value, ["upstream_cost", "cost", "amount", "price"])) : null;
+  const usd = finite(find(value, ["cost_usd", "upstream_cost_usd"]));
+  const microUsd = finite(find(value, ["cost_micro_usd"]));
+  const unitCost = usd ?? (microUsd === null ? null : microUsd / 1_000_000);
   return {
     state: state(find(value, ["state", "status", "native_state", "outcome"]) ?? fallback.state),
     source_ref: source || fallback.source_ref,
     output_refs: outputRefs,
-    // A cost reported without its currency cannot be accounted for, so it stays unknown instead of being read as yuan or dollars.
-    upstream_cost: currency ? finite(find(value, ["upstream_cost", "cost", "amount", "price"])) : null,
-    currency: currency || fallback.currency,
+    upstream_cost: named ?? unitCost,
+    currency: named === null && unitCost !== null ? "USD" : currency || fallback.currency,
     error_code: typeof errorValue === "string" ? errorValue.slice(0, 120) : null,
     evidence_refs: [],
   };
@@ -514,8 +521,9 @@ class McpProviderAdapter implements ProviderAdapter {
     });
     return value.result?.structuredContent || value.result || value;
   }
-  private async call(action: string, args: Record<string, unknown>) {
-    return this.callTool(this.owner + ".execute", { action, args });
+  /** `envelope` holds fields that sit beside `args`, such as Sonora's idempotency key. */
+  private async call(action: string, args: Record<string, unknown>, envelope: Record<string, unknown> = {}) {
+    return this.callTool(this.owner + ".execute", { action, args, ...envelope });
   }
   /** One read-only discovery pass for this owner; the catalog and the capability projection share it. */
   async observe(): Promise<OwnerObservation> {
@@ -573,11 +581,15 @@ class McpProviderAdapter implements ProviderAdapter {
         const credentialStatus: any = await this.discoveryCall("sonora.execute", { action: "credential.status", args: { provider_id: providerId } }).catch(() => null);
         const diagnosis: any = await this.discoveryCall("sonora.execute", { action: "doctor.run", args: { provider_id: providerId } });
         const catalog: any = await this.discoveryCall("sonora.search", { query: providerId, types: ["provider", "model", "voice"], limit: 50 }).catch(() => null);
-        const diagnosisConfigured = find(diagnosis, ["configured"]);
+        // Sonora wraps the diagnosis in an execute envelope whose own `status: success` only says the call ran; the
+        // diagnosis itself is the projection's data and facts (e.g. `status: credential_missing`, `configured: false`).
+        const projection = find(diagnosis, ["projection"]);
+        const diagnosed = projection && typeof projection === "object" ? { ...(projection.facts || {}), ...(projection.data || {}) } : diagnosis;
+        const diagnosisConfigured = find(diagnosed, ["configured"]);
         const configured = diagnosisConfigured ?? find(credentialStatus, ["configured"]);
-        const diagnosticCode = text(find(diagnosis, ["diagnostic_status", "status", "code", "error_code"]), 160);
+        const diagnosticCode = text(find(diagnosed, ["diagnostic_status", "status", "code", "error_code"]), 160);
         const diagnosticShapeValid = typeof diagnosisConfigured === "boolean" || diagnosticCode !== null || (diagnosis && typeof diagnosis === "object" && Object.keys(diagnosis).length > 0 && find(diagnosis, ["diagnostic", "provider", "readiness"]) !== undefined);
-        const diagnosticState = !diagnosticShapeValid ? "unavailable" as const : diagnosticCode === "credential_missing" ? "needs_configuration" as const : ["success", "ok", "healthy", "ready"].includes((diagnosticCode || "").toLowerCase()) ? "configured" as const : diagnosisConfigured === false ? "needs_configuration" as const : readiness(diagnosticCode || "configured");
+        const diagnosticState = !diagnosticShapeValid ? "unavailable" as const : diagnosticCode === "credential_missing" || diagnosisConfigured === false ? "needs_configuration" as const : ["success", "ok", "healthy", "ready"].includes((diagnosticCode || "").toLowerCase()) ? "configured" as const : readiness(diagnosticCode || "configured");
         const entries = jsonText(catalog);
         const refs = Array.isArray(find(entries, ["providers", "results", "items"])) ? find(entries, ["providers", "results", "items"]) as any[] : [];
         const providerRefs = refs.flatMap((item) => { const ref = text(item?.provider_id || item?.id || item?.ref, 200); return ref ? [ref] : []; });
@@ -671,15 +683,16 @@ class McpProviderAdapter implements ProviderAdapter {
       };
     }
     if (this.owner === "sonora") {
-      const providerId = input.model_ref.includes("/") ? input.model_ref.split("/")[1] : "openai-tts";
+      // Same parser as discovery: `sonora://voice/<provider>/<voice>` names its provider; a plain split took the empty segment after `sonora:`.
+      const providerId = providerIdFromModel(input.model_ref);
+      // Sonora refuses any argument an action does not declare; voice.audition declares exactly these, and the
+      // idempotency key travels beside `args` (see submit).
       return {
         confirm_external_call: true,
         max_cost_usd: Math.max(0.01, input.budget_cap.amount).toFixed(2),
         provider_id: providerId,
         voice_model_ref: input.model_ref,
         text: input.prompt,
-        idempotency_key: idempotency,
-        ...creative,
       };
     }
     // Eikona's MCP generate takes no cost cap, so only the reservation above bounds an image run; see docs/provider-live.md.
@@ -693,7 +706,8 @@ class McpProviderAdapter implements ProviderAdapter {
     };
   }
   async submit(input: ProviderRunRequest) {
-    return normalizeReceipt(await this.call(this.manifest.submit, this.args(input)), {
+    const envelope = this.owner === "sonora" ? { idempotency_key: input.idempotency_key } : {};
+    return normalizeReceipt(await this.call(this.manifest.submit, this.args(input), envelope), {
       run_ref: "", owner: this.owner, modality: input.modality, model_ref: input.model_ref,
       scope_id: input.scope_id, project_ref: input.project_ref, trace_ref: input.trace_ref || "",
       source_ref: null, state: "accepted", output_refs: [], upstream_cost: null, currency: budgetCurrency,
@@ -835,7 +849,7 @@ export class ProviderRunManager {
         ? { ...entry.observation.capability, ...(stale ? { readiness: "stale" as const, blocker: entry.failure?.reason || "owner_observation_stale" } : {}) }
         : { state: "needs_configuration" as const, readiness: "needs_configuration" as const, observed_at: new Date().toISOString(), provider_refs: [], model_refs: connection?.model_refs || [], voice_refs: [], bindings: [], diagnostic: null, blocker: "provider_not_configured", ...normalizeCreativeContract(null) };
       const model = connection?.model_refs?.[0] || observation.model_refs[0] || (owner === "eikona" ? "openai/gpt-image-2.5-sunburst" : owner === "scaena" ? "seedance25-ark-text-1080p" : "sonora/voice");
-      return { id: owner + ":" + modalityFor[owner], owner, modality: modalityFor[owner], name: owner[0].toUpperCase() + owner.slice(1), model_ref: model, state: observation.state, transport: "mcp" as const, supports_live_submit: observation.state === "configured" && !stale, observed_at: observation.observed_at, readiness: observation.readiness, submit_gate: "disabled_by_default" as const, provider_refs: observation.provider_refs, model_refs: [...new Set([model, ...observation.model_refs])], voice_refs: observation.voice_refs, bindings: observation.bindings, diagnostic: observation.diagnostic, blocker: observation.blocker, input_modes: observation.input_modes, reference_roles: observation.reference_roles, timeline_support: observation.timeline_support, output_constraints: observation.output_constraints, input_schema_ref: observation.input_schema_ref, limits: observation.limits };
+      return { id: owner + ":" + modalityFor[owner], owner, modality: modalityFor[owner], name: owner[0].toUpperCase() + owner.slice(1), model_ref: model, project_ref: scope.owners[owner]?.project || null, state: observation.state, transport: "mcp" as const, supports_live_submit: observation.state === "configured" && !stale, observed_at: observation.observed_at, readiness: observation.readiness, submit_gate: "disabled_by_default" as const, provider_refs: observation.provider_refs, model_refs: [...new Set([model, ...observation.model_refs])], voice_refs: observation.voice_refs, bindings: observation.bindings, diagnostic: observation.diagnostic, blocker: observation.blocker, input_modes: observation.input_modes, reference_roles: observation.reference_roles, timeline_support: observation.timeline_support, output_constraints: observation.output_constraints, input_schema_ref: observation.input_schema_ref, limits: observation.limits };
     });
   }
   async create(input: ProviderRunRequest, scope: ScopeBinding, _session: Session): Promise<ProviderRunProjection> {

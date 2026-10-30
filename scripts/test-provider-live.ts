@@ -41,9 +41,10 @@ const redact = (value: unknown): RedactedValue => {
       .map(([key, item]) => [key, redact(item)]),
   ) as { [key: string]: RedactedValue };
 };
-const request = async (path: string, init: RequestInit = {}) => fetch(origin + "/api/control-center/v1" + path, { ...init, headers: { ...(init.headers || {}), ...(cookie ? { Cookie: cookie } : {}) }});
+// Login and CSRF-checked writes require the control center's own Origin, as a browser on that origin would send.
+const request = async (path: string, init: RequestInit = {}) => fetch(origin + "/api/control-center/v1" + path, { ...init, headers: { Origin: origin, ...(init.headers || {}), ...(cookie ? { Cookie: cookie } : {}) }});
 let cookie = "";
-const loginResponse = await fetch(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: login.username, password: login.password }) });
+const loginResponse = await fetch(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: login.username, password: login.password }) });
 if (!loginResponse.ok) throw Error("local_login_failed");
 cookie = loginResponse.headers.get("set-cookie")?.split(";")[0] || "";
 const sessionResponse = await request("/session");
@@ -52,14 +53,14 @@ const session = await sessionResponse.json() as { csrf: string; scopes: { id: st
 const scope = session.scopes[0];
 if (!scope) throw Error("no_authorized_scope");
 const capabilitiesResponse = await request(`/capabilities?scope=${encodeURIComponent(scope.id)}`);
-const capabilities = capabilitiesResponse.ok ? await capabilitiesResponse.json() as { capabilities: Array<{ owner: "eikona" | "scaena" | "sonora"; modality: "image" | "video" | "audio"; model_ref: string; supports_live_submit: boolean }> } : { capabilities: [] };
+const capabilities = capabilitiesResponse.ok ? await capabilitiesResponse.json() as { capabilities: Array<{ owner: "eikona" | "scaena" | "sonora"; modality: "image" | "video" | "audio"; model_ref: string; project_ref?: string | null; supports_live_submit: boolean }> } : { capabilities: [] };
 const prompts = { eikona: "Yeisme live canary: abstract rain-lit street lamp, no text", scaena: "Yeisme live canary: a one second slow move through a rain-lit empty street", sonora: "Yeisme live canary audio" };
 const results: unknown[] = [];
 for (const owner of selected) {
   const capability = capabilities.capabilities.find((item) => item.owner === owner && item.supports_live_submit);
   if (!capability) { results.push({ owner, state: "needs_contract" }); continue; }
   const key = `live-canary-${label}-${owner}`;
-  const response = await request(`/provider-runs?scope=${encodeURIComponent(scope.id)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify({ mode: "live", owner, modality: modalities[owner], model_ref: capability.model_ref, scope_id: scope.id, project_ref: scope.project, prompt: prompts[owner], budget_cap: { amount: caps[owner], currency: "USD" }, idempotency_key: key, trace_ref: key }) });
+  const response = await request(`/provider-runs?scope=${encodeURIComponent(scope.id)}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf }, body: JSON.stringify({ mode: "live", owner, modality: modalities[owner], model_ref: capability.model_ref, scope_id: scope.id, project_ref: capability.project_ref || scope.project, prompt: prompts[owner], budget_cap: { amount: caps[owner], currency: "USD" }, idempotency_key: key, trace_ref: key }) });
   const run = await response.json();
   results.push(redact(run));
   if (!response.ok || !run.run_ref) continue;

@@ -168,6 +168,8 @@ export interface ProviderCapabilityProjection {
   modality: "image" | "video" | "audio";
   name: string;
   model_ref: string;
+  /** The owner project this scope binds; a live run must name it. */
+  project_ref?: string | null;
   state: "configured" | "needs_configuration" | "needs_contract";
   readiness: ProviderReadiness;
   transport: "mcp";

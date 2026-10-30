@@ -40,7 +40,7 @@ const request = (key = "canary-image-0001") => ({
 });
 function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD" }) {
   let submit = 0;
-  const calls: { action: string; args: Record<string, any> }[] = [];
+  const calls: { action: string; args: Record<string, any>; idempotency_key?: string }[] = [];
   const fetch = async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
     if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
@@ -95,18 +95,36 @@ describe("ProviderRunManager", () => {
     const run = await new ProviderRunManager(estimating, fetch).create(request("canary-estimate-cny"), scope, session);
     expect([run.state, run.error_code, transport.submits]).toEqual(["failed", "provider_budget_currency_mismatch", 0]);
   });
+  it("reads Sonora's synchronous audition: its usage record, its audio asset and its cost in USD", async () => {
+    const audition = { status: "success", data: { projection: { status: "success", data: { audio_asset_ref: "sonora://audio-asset/audition-1", provider_usage_ref: "sonora://provider-usage/audition-1", cost_usd: 0, review_status: "pending_review" } } } };
+    const fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (body.method === "tools/list") return Response.json({ id: body.id, result: { tools: [{ name: "sonora.execute" }] } });
+      return Response.json({ id: body.id, result: { structuredContent: { request_id: "req-1", result: { action: body.params.arguments.action, schema_version: "sonora.execute.v1", ...audition } } } });
+    }) as typeof globalThis.fetch;
+    const sonora = { ...config, providers: { sonora: { owner: "sonora", endpoint: "https://provider.example/mcp", credential_env: "TEST_PROVIDER_TOKEN", enabled: true, action_manifest: { submit: "voice.audition" } } } } as ServerConfig;
+    const manager = new ProviderRunManager(sonora, fetch);
+    const run = await manager.create({ ...request("canary-audio-sync1"), owner: "sonora", modality: "audio", model_ref: "sonora://voice/openai-tts/alloy", budget_cap: { amount: 0.5, currency: "USD" } }, scope, session);
+    expect(run).toMatchObject({ state: "succeeded", source_ref: "sonora://provider-usage/audition-1", output_refs: ["sonora://audio-asset/audition-1"], upstream_cost: 0, currency: "USD", cost_state: "confirmed" });
+    expect(manager.usageRows(scope)).toHaveLength(1);
+  });
   it("hands each owner its cap in USD exactly as given", async () => {
     const transport = fetcher();
     const providers = { ...config.providers, scaena: { owner: "scaena", endpoint: "https://provider.example/mcp", credential_env: "TEST_PROVIDER_TOKEN", enabled: true }, sonora: { owner: "sonora", endpoint: "https://provider.example/mcp", credential_env: "TEST_PROVIDER_TOKEN", enabled: true } } as ServerConfig["providers"];
     const manager = new ProviderRunManager({ ...config, providers }, transport.fetch);
     await manager.create({ ...request("canary-video-0001"), owner: "scaena", modality: "video", model_ref: "scaena/video", budget_cap: { amount: 1.2, currency: "USD" } }, scope, session);
-    await manager.create({ ...request("canary-audio-0001"), owner: "sonora", modality: "audio", model_ref: "sonora/openai-tts", budget_cap: { amount: 0.5, currency: "USD" } }, scope, session);
+    await manager.create({ ...request("canary-audio-0001"), owner: "sonora", modality: "audio", model_ref: "sonora://voice/openai-tts/alloy", budget_cap: { amount: 0.5, currency: "USD" } }, scope, session);
     const submitted = (action: string) => transport.calls.find((call) => call.action === action)!.args;
     expect(submitted("createVideoProviderTask").body.max_cost_micro_usd).toBe(1_200_000);
-    expect(submitted("voice").max_cost_usd).toBe("0.50");
+    // The provider comes from the voice reference, as Sonora's voice.audition requires.
+    // Only the arguments voice.audition declares, with the idempotency key beside them as Sonora requires.
+    expect(submitted("voice")).toEqual({ max_cost_usd: "0.50", provider_id: "openai-tts", voice_model_ref: "sonora://voice/openai-tts/alloy", confirm_external_call: true, text: "A minimal abstract blue square" });
+    expect(transport.calls.find((call) => call.action === "voice")).toMatchObject({ idempotency_key: "canary-audio-0001" });
   });
   it("accounts an owner's cost only with its currency, and keeps a cost without one unknown", async () => {
-    for (const [status, cost, currency, state] of [[{ cost: 0.04, currency: "USD" }, 0.04, "USD", "confirmed"], [{ cost: 12 }, null, "USD", "unknown"]] as const) {
+    for (const [status, cost, currency, state] of [[{ cost: 0.04, currency: "USD" }, 0.04, "USD", "confirmed"], [{ cost: 12 }, null, "USD", "unknown"], [{ cost_usd: 0.003 }, 0.003, "USD", "confirmed"], [{ cost_micro_usd: 25_000 }, 0.025, "USD", "confirmed"]] as const) {
       const manager = new ProviderRunManager(config, fetcher(status).fetch);
       const run = await manager.create(request(`canary-cost-${state}-01`), scope, session);
       const reconciled = await manager.reconcile(run.run_ref);
@@ -133,7 +151,8 @@ describe("ProviderRunManager", () => {
     const app = createApp(scopedConfig, { auth, providers: manager });
     const requestTo = (path: string, method = "GET", body?: unknown) => new Request(scopedConfig.origin + "/api/control-center/v1" + path, { method, headers: { Cookie: "yeisme_session=" + session.id, Origin: scopedConfig.origin, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     const caps = await app(requestTo("/capabilities?scope=scope-1"));
-    expect((await caps.json()).capabilities[0].owner).toBe("eikona");
+    // Each capability names the owner project this scope binds, which a live run must use.
+    expect((await caps.json()).capabilities[0]).toMatchObject({ owner: "eikona", project_ref: "project-1" });
     const created = await app(requestTo("/provider-runs?scope=scope-1", "POST", request("canary-http-0001")));
     expect(created.status).toBe(202);
     const run = await created.json();
