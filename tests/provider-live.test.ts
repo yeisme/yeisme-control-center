@@ -3,6 +3,7 @@ import { ProviderRunManager } from "../server/provider-live";
 import type { ScopeBinding, ServerConfig } from "../server/contracts";
 import { createApp } from "../server/app";
 import { SessionAuth } from "../server/auth";
+import { eikonaRuntimeCapabilities } from "../scripts/fixtures/provider-catalog";
 
 const scope: ScopeBinding = {
   id: "scope-1",
@@ -38,7 +39,13 @@ const request = (key = "canary-image-0001") => ({
   budget_cap: { amount: 2, currency: "USD" as const },
   idempotency_key: key,
 });
-function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD" }) {
+/** Eikona's runtime capabilities; an older Eikona's generate does not declare `max_cost_usd`. */
+function runtimeCapabilities(capDeclared: boolean) {
+  const document = eikonaRuntimeCapabilities();
+  if (!capDeclared) for (const action of document.data.actions) delete (action.input_schema as { properties: Record<string, unknown> }).properties.max_cost_usd;
+  return document;
+}
+function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD" }, options: { capDeclared?: boolean; capUnreadable?: boolean; refuse?: string } = {}) {
   let submit = 0;
   const calls: { action: string; args: Record<string, any>; idempotency_key?: string }[] = [];
   const fetch = async (_url: unknown, init?: RequestInit) => {
@@ -46,8 +53,14 @@ function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD"
     if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
     if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
     if (body.method === "tools/list") return Response.json({ id: body.id, result: { tools: [{ name: "eikona.execute" }] } });
+    if (body.method === "resources/read" && body.params.uri === "eikona://runtime/capabilities" && options.capUnreadable)
+      return Response.json({ id: body.id, error: { code: -32603, message: "backing unavailable" } });
+    if (body.method === "resources/read" && body.params.uri === "eikona://runtime/capabilities")
+      return Response.json({ id: body.id, result: { contents: [{ uri: body.params.uri, text: JSON.stringify(runtimeCapabilities(options.capDeclared ?? true)) }] } });
     if (body.method === "tools/call") {
       calls.push(body.params.arguments);
+      if (options.refuse && body.params.arguments.action === "generate")
+        return Response.json({ id: body.id, result: { isError: true, structuredContent: { request_id: "req-1", error: { code: options.refuse, message: "refused before provider submit" } } } });
       if (["generate", "createVideoProviderTask", "voice"].includes(body.params.arguments.action)) {
         submit++;
         return Response.json({ id: body.id, result: { structuredContent: { result: { run_id: "eikona-run-1", state: "queued" } } } });
@@ -139,6 +152,34 @@ describe("ProviderRunManager", () => {
     expect(first.state).toBe("queued");
     expect(transport.submits).toBe(1);
   });
+  it("hands Eikona the cap, and does not submit to an Eikona that does not declare one", async () => {
+    const declared = fetcher();
+    await new ProviderRunManager(config, declared.fetch).create(request("canary-image-capped"), scope, session);
+    expect(declared.calls.find((call) => call.action === "generate")!.args.max_cost_usd).toBe(2);
+    // An older Eikona ignores arguments it does not declare, so its run would carry no owner-enforced cap.
+    const older = fetcher(undefined, { capDeclared: false });
+    const manager = new ProviderRunManager(config, older.fetch);
+    const run = await manager.create(request("canary-image-uncapped"), scope, session);
+    expect([run.state, run.error_code, older.calls.filter((call) => call.action === "generate").length]).toEqual(["failed", "provider_cost_cap_unsupported", 0]);
+    expect(manager.budgetStatus().reserved).toBe(0);
+    expect((await manager.capabilities(scope))[0]).toMatchObject({ owner: "eikona", supports_live_submit: false, readiness: "needs_contract", blocker: "owner_cost_cap_undeclared" });
+  });
+  it("does not submit when Eikona's contract cannot be read, and says so rather than calling it unsupported", async () => {
+    const unreadable = fetcher(undefined, { capUnreadable: true });
+    const manager = new ProviderRunManager(config, unreadable.fetch);
+    const run = await manager.create(request("canary-image-unverified"), scope, session);
+    expect([run.state, run.error_code, unreadable.submits]).toEqual(["failed", "provider_cost_cap_unverified", 0]);
+    expect(manager.budgetStatus().reserved).toBe(0);
+    expect((await manager.capabilities(scope))[0]).toMatchObject({ supports_live_submit: false, blocker: "runtime_capabilities_unreadable" });
+  });
+  it("ends a run Eikona refuses for cost as failed and releases its reservation", async () => {
+    for (const code of ["COST_LIMIT_EXCEEDED", "UNKNOWN_COST_REJECTED"]) {
+      const manager = new ProviderRunManager(config, fetcher(undefined, { refuse: code }).fetch);
+      const run = await manager.create(request(`canary-refused-${code.toLowerCase()}`), scope, session);
+      expect([run.state, run.error_code]).toEqual(["failed", code]);
+      expect(manager.budgetStatus().reserved).toBe(0);
+    }
+  });
   it("serves scoped capability, usage, run and SSE projections", async () => {
     const transport = fetcher();
     const scopedConfig: ServerConfig = {
@@ -152,7 +193,7 @@ describe("ProviderRunManager", () => {
     const requestTo = (path: string, method = "GET", body?: unknown) => new Request(scopedConfig.origin + "/api/control-center/v1" + path, { method, headers: { Cookie: "yeisme_session=" + session.id, Origin: scopedConfig.origin, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     const caps = await app(requestTo("/capabilities?scope=scope-1"));
     // Each capability names the owner project this scope binds, which a live run must use.
-    expect((await caps.json()).capabilities[0]).toMatchObject({ owner: "eikona", project_ref: "project-1" });
+    expect((await caps.json()).capabilities[0]).toMatchObject({ owner: "eikona", project_ref: "project-1", supports_live_submit: true });
     const created = await app(requestTo("/provider-runs?scope=scope-1", "POST", request("canary-http-0001")));
     expect(created.status).toBe(202);
     const run = await created.json();

@@ -59,6 +59,19 @@ Live provider runs SHALL carry their budget cap in USD, the currency the owners 
 - **WHEN** an owner's submit action accepts no cost cap
 - **THEN** the Control Center reservation alone does not count as an owner-enforced cap, and that modality's canary is not admitted until the owner accepts one
 
+#### Scenario: Owner that ignores undeclared arguments
+- **WHEN** Eikona's discovered `generate` action does not declare `max_cost_usd`
+- **THEN** the image capability is `needs_contract` with blocker `owner_cost_cap_undeclared` and does not support live submit
+- **AND** a live run request ends `failed` with `provider_cost_cap_unsupported` before any submit call, releasing its reservation
+
+#### Scenario: Owner contract unreadable at submit
+- **WHEN** the Control Center re-reads Eikona's runtime capabilities right before a live submit and cannot read them
+- **THEN** the run ends `failed` with `provider_cost_cap_unverified` before any submit call, releasing its reservation
+
+#### Scenario: Owner refuses the run for cost
+- **WHEN** Eikona refuses a submit with `COST_LIMIT_EXCEEDED` or `UNKNOWN_COST_REJECTED`
+- **THEN** the run ends `failed` with that code and its reservation is released, because the refusal happens before any provider call
+
 ### Requirement: Per-modality canary admission
 Image, video and audio canaries SHALL be admitted and evidenced separately: channel and model, authorization, an owner-enforced USD cap, the original idempotency key, a downloaded result that decodes or plays, and an actual cost with its currency.
 

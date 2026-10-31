@@ -196,6 +196,10 @@ export interface OwnerObservation {
   capability: CapabilityObservation;
 }
 
+/** Eikona ignores arguments an action does not declare, so its cost cap binds only once the submit action declares it. */
+const declaresCostCap = (actions: CatalogAction[], submit: string) =>
+  actions.some((action) => action.name === submit && action.input.fields.some((field) => field.name === "max_cost_usd"));
+
 const discoveryTimeoutMs = 8000;
 const discoveryActions = new Set(["getProjectMediaCapabilities", "credential.status", "doctor.run"]);
 const discoveryTools = new Set(["sonora.search"]);
@@ -486,6 +490,8 @@ class McpProviderAdapter implements ProviderAdapter {
     this.initialized = true;
   }
   private serverInfo: OwnerObservation["server"] = { protocol_version: null, server_name: null, server_version: null };
+  /** What the last discovery pass found about Eikona's submit action and `max_cost_usd`; unverified until a pass reads it. */
+  private costCap: "declared" | "undeclared" | "unverified" = "unverified";
   /** Follows tools/list pagination; tool bodies are summarized by the catalog normalizer. */
   private async listTools(maxPages = 5) {
     await this.initialize();
@@ -623,15 +629,20 @@ class McpProviderAdapter implements ProviderAdapter {
       if (models) { result.models = normalizeModels("eikona", models, "eikona://models/readiness"); result.complete_kinds.push("model"); }
       const channels = await this.readResourceJSON("eikona://channels").catch((error) => { partial(errorReason(error, "channel_summary_unreadable")); return null; });
       if (channels) { result.channels = normalizeChannels("eikona", channels); result.complete_kinds.push("channel"); }
+      // Without a declared cap a paid image run would carry no owner-enforced limit, so live submit stays off.
+      this.costCap = !runtime ? "unverified" : declaresCostCap(parsed.actions, this.manifest.submit) ? "declared" : "undeclared";
+      const capped = this.costCap === "declared";
       result.capability = {
         ...result.capability,
         ...deriveCreativeContract("eikona", { actions: parsed.actions }),
-        state: "configured",
-        readiness: "configured",
+        state: capped ? "configured" : "needs_contract",
+        readiness: capped ? "configured" : "needs_contract",
         model_refs: [...new Set([...result.capability.model_refs, ...result.models.filter((model) => model.status !== "historical").map((model) => model.model_ref)])].slice(0, 50),
+        blocker: capped ? null : runtime ? "owner_cost_cap_undeclared" : "runtime_capabilities_unreadable",
       };
       return result;
     } catch (error) {
+      if (this.owner === "eikona") this.costCap = "unverified";
       const coverage = coverageFromError(error);
       result.coverage = coverage;
       const providerState: ProviderReadinessState = coverage.state === "needs_contract" ? "needs_contract" : coverage.state === "forbidden" ? "forbidden" : coverage.state === "not_configured" ? "needs_configuration" : "unavailable";
@@ -695,17 +706,25 @@ class McpProviderAdapter implements ProviderAdapter {
         text: input.prompt,
       };
     }
-    // Eikona's MCP generate takes no cost cap, so only the reservation above bounds an image run; see docs/provider-live.md.
+    // Eikona refuses an estimate above `max_cost_usd`, or one it cannot price in USD, before calling its provider. It
+    // ignores arguments its action does not declare, so submit first checks that the action declares the cap.
     return {
       prompt: input.prompt,
       model: input.model_ref,
       project_id: input.project_ref,
       confirm_external_call: true,
       idempotency_key: idempotency,
+      max_cost_usd: input.budget_cap.amount,
       ...creative,
     };
   }
   async submit(input: ProviderRunRequest) {
+    if (this.owner === "eikona") {
+      // Re-read the contract right before paying: the server being called may have changed since the last pass.
+      await this.observe();
+      if (this.costCap === "unverified") throw new AuthError("provider_cost_cap_unverified", 503);
+      if (this.costCap === "undeclared") throw new AuthError("provider_cost_cap_unsupported", 409);
+    }
     const envelope = this.owner === "sonora" ? { idempotency_key: input.idempotency_key } : {};
     return normalizeReceipt(await this.call(this.manifest.submit, this.args(input), envelope), {
       run_ref: "", owner: this.owner, modality: input.modality, model_ref: input.model_ref,
@@ -896,7 +915,9 @@ export class ProviderRunManager {
       this.publish(run);
       if (!["succeeded", "failed", "unknown"].includes(run.state)) void this.monitor(run.run_ref);
     } catch (error) {
-      run = { ...run, state: error instanceof AuthError && ["provider_budget_exceeded", "provider_budget_currency_mismatch"].includes(error.code) ? "failed" : "unknown", error_code: error instanceof AuthError ? error.code : "provider_submit_unknown", observed_at: new Date().toISOString() };
+      // These refusals happen before anything reaches the provider, so the run ends; any other failure may have been sent.
+      const refused = error instanceof AuthError && ["provider_budget_exceeded", "provider_budget_currency_mismatch", "provider_cost_cap_unsupported", "provider_cost_cap_unverified", "COST_LIMIT_EXCEEDED", "UNKNOWN_COST_REJECTED"].includes(error.code);
+      run = { ...run, state: refused ? "failed" : "unknown", error_code: error instanceof AuthError ? error.code : "provider_submit_unknown", observed_at: new Date().toISOString() };
       this.publish(run);
     }
     return run;
