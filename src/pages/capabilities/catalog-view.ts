@@ -126,5 +126,5 @@ const guideOwners = new Map(guideTools.map((tool) => [tool.owner, tool.id]));
 /** 使用指南 card that explains how to call this owner from a CLI or an MCP client; null when none exists. */
 export function guideTarget(entry: CatalogEntry): string | null {
   const tool = guideOwners.get(entry.value.owner);
-  return tool ? `/guide?tool=${encodeURIComponent(tool)}` : null;
+  return tool ? `/guide/tools/${encodeURIComponent(tool)}` : null;
 }

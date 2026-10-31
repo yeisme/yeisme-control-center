@@ -234,12 +234,28 @@ try {
     await page.getByRole("heading", { name: "服务目录" }).waitFor();
     await shot(page, "services");
   });
-  await check("guide replaces AI creation and switches commands per tool and client", async () => {
+  await check("guide replaces AI creation, moves between chapters from its top bar and switches commands per tool and client", async () => {
     await page.goto(`${ui}/#/creation`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-page="guide"]').waitFor();
     if (!page.url().includes("#/guide")) throw new Error(`creation_not_redirected:${page.url()}`);
     if (await page.locator('[data-nav="creation"]').count()) throw new Error("ai_creation_nav_still_listed");
     await page.locator('[data-nav="guide"][aria-current="page"]').waitFor();
+    // The chapter bar keeps its place in the hash route and the sidebar keeps 使用指南 current on every chapter.
+    const chapters = page.getByRole("navigation", { name: "指南章节" });
+    await chapters.getByRole("link", { name: "案例", exact: true }).click();
+    await page.getByRole("heading", { name: "同一个场景，从关键帧做到配乐" }).waitFor();
+    if (!page.url().includes("#/guide/cases")) throw new Error(`chapter_not_in_route:${page.url()}`);
+    if (await chapters.getByRole("link", { name: "案例", exact: true }).getAttribute("aria-current") !== "page") throw new Error("chapter_not_current");
+    await page.locator('[data-nav="guide"][aria-current="page"]').waitFor();
+    const bar = await chapters.boundingBox();
+    await page.mouse.wheel(0, 1600);
+    await page.waitForTimeout(300);
+    const stuck = await chapters.boundingBox();
+    if (!bar || !stuck || Math.abs(stuck.y - 60) > 2) throw new Error(`chapter_bar_not_under_top_bar:${JSON.stringify(stuck)}`);
+    await page.goBack();
+    await page.locator('[data-page="guide"]').waitFor();
+    await chapters.getByRole("link", { name: "开始", exact: true }).click();
+    await page.getByRole("heading", { name: "从一条体检命令开始" }).waitFor();
     await page.getByRole("radio", { name: /Sonora/ }).click();
     await page.getByText("claude mcp add sonora -- sonora mcp serve --stdio", { exact: true }).waitFor();
     await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { name: "Codex" }).click();
@@ -262,8 +278,10 @@ try {
     if (await inspector.getByRole("button", { name: /调用|执行|提交/ }).count()) throw new Error("catalog_inspector_offers_invocation");
     await shot(page, "capabilities-model-inspector");
     await inspector.getByRole("button", { name: "查看接入方式" }).click();
-    await page.locator("#guide-tool-eikona.is-highlighted").waitFor();
-    if (hashParams(page).get("tool") !== "eikona") throw new Error(`guide_link_lost_owner:${page.url()}`);
+    // The catalog leads to the tool's own guide page, not to a card on a long page.
+    await page.getByRole("heading", { name: "Eikona", exact: true }).waitFor();
+    if (!page.url().includes("#/guide/tools/eikona")) throw new Error(`guide_link_lost_owner:${page.url()}`);
+    await page.getByRole("navigation", { name: "本页大纲" }).waitFor();
     await page.goto(`${ui}/#/capabilities?tab=tools&owner=eikona`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-catalog-row="action:eikona:eikona.execute#upscale"] button').click();
     await inspector.getByText("输入合同").first().waitFor();

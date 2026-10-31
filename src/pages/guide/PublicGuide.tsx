@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { BookOpen, LogIn, Monitor, Moon, Sun } from "../../icons";
 import { ThemeProvider, useTheme, type ThemePreference } from "../../app-shell/theme";
 import { GuideContent } from "./GuideContent";
-import type { GuideClient } from "./guide-content";
+import { parsePublicGuide, publicGuideHref } from "./guide-location";
+import type { GuideNavigator } from "./GuideNav";
 
 const themeOptions: { id: ThemePreference; label: string; icon: typeof Sun }[] = [
   { id: "light", label: "浅色", icon: Sun },
@@ -17,22 +18,26 @@ function ThemeSwitch() {
   </div>;
 }
 
-const readParams = () => new URLSearchParams(window.location.search);
+const readLocation = () => parsePublicGuide(new URLSearchParams(window.location.search), window.location.hash);
 
-/** The guide as a public page: no login, no session, no request to the control-center API. */
+/**
+ * The guide as a public page: no login, no session, no request to the control-center API. The chapter, page, tool
+ * and client live in the query string and the section in the fragment, so every place in the guide has a link and
+ * Back returns to the previous chapter.
+ */
 function PublicGuidePage() {
-  const [params, setParams] = useState(readParams);
+  const [location, setLocation] = useState(readLocation);
   useEffect(() => {
-    const onPop = () => setParams(readParams());
+    const onPop = () => setLocation(readLocation());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  // The choice stays in the address so a link can name a tool and a client, like the signed-in guide.
-  const write = (key: "tool" | "client", value: string) => {
-    const next = new URLSearchParams(params);
-    next.set(key, value);
-    window.history.replaceState(null, "", `${window.location.pathname}?${next.toString()}${window.location.hash}`);
-    setParams(next);
+  const nav: GuideNavigator = {
+    hrefFor: (to) => publicGuideHref(to),
+    go: (to, options) => {
+      window.history[options?.replace ? "replaceState" : "pushState"](null, "", publicGuideHref(to));
+      setLocation(to);
+    },
   };
   return <div className="public-guide">
     <header className="public-guide-bar">
@@ -46,14 +51,7 @@ function PublicGuidePage() {
       </div>
     </header>
     <main className="public-guide-main">
-      <GuideContent
-        toolId={params.get("tool")}
-        client={(params.get("client") === "codex" ? "codex" : "claude") as GuideClient}
-        onTool={(id) => write("tool", id)}
-        onClient={(id) => write("client", id)}
-        link={{ label: "登录控制中心查看工具状态", href: "./" }}
-        page="public-guide"
-      />
+      <GuideContent location={location} nav={nav} link={{ label: "登录控制中心查看工具状态", href: "./" }} page="public-guide" />
     </main>
     <footer className="public-guide-footer"><BookOpen className="size-3.5" />这份指南公开可读；命令里的凭据都是占位符，真实凭据只写进你自己的用户级配置。</footer>
   </div>;

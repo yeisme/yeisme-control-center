@@ -14,6 +14,7 @@ import { dismissBootSplash } from "./boot-splash";
 import { AppShell } from "../app-shell/AppShell";
 import { ThemeProvider } from "../app-shell/theme";
 import { pageFromPath, type WorkspacePage } from "../app-shell/navigation";
+import { isGuidePath } from "../pages/guide/guide-location";
 import { Button, EmptyState, SkeletonBlock, SkeletonRows, ToastProvider, TooltipProvider } from "../components/ui";
 import { CopyProvider } from "./item-actions";
 import { RefreshCw, Unplug } from "../icons";
@@ -100,7 +101,7 @@ function Workspace() {
   usePrefetchPages(phase === "ready");
   useEffect(() => { if (phase !== "loading") dismissBootSplash(); }, [phase]);
   if (phase === "loading") return <AuthLoading />;
-  if (phase === "login_required") return location.pathname === "/guide" ? <PublicGuideRedirect search={location.search} /> : <LoginScreen />;
+  if (phase === "login_required") return isGuidePath(location.pathname) ? <PublicGuideRedirect pathname={location.pathname} search={location.search} /> : <LoginScreen />;
   if (phase === "forbidden") return <AuthProblem kind="forbidden" />;
   if (phase === "offline") return <AuthProblem kind="offline" />;
   const page = pageFromPath(location.pathname);

@@ -74,10 +74,10 @@ describe("catalog view", () => {
     expect(changesByDay(catalog.changes).map((group) => group.day)).toEqual(["2026-10-20", "2026-10-19"]);
   });
 
-  it("links catalog entries to the guide card of an owner the guide covers", () => {
-    expect(guideTarget({ kind: "model", value: catalog.models[1] })).toBe("/guide?tool=eikona");
-    expect(guideTarget({ kind: "model", value: catalog.models[3] })).toBe("/guide?tool=scaena");
-    expect(guideTarget({ kind: "action", value: catalog.actions[0] })).toBe("/guide?tool=eikona");
+  it("links catalog entries to the guide page of an owner the guide covers", () => {
+    expect(guideTarget({ kind: "model", value: catalog.models[1] })).toBe("/guide/tools/eikona");
+    expect(guideTarget({ kind: "model", value: catalog.models[3] })).toBe("/guide/tools/scaena");
+    expect(guideTarget({ kind: "action", value: catalog.actions[0] })).toBe("/guide/tools/eikona");
     expect(guideTarget({ kind: "server", value: catalog.servers[1] })).toBeNull();
   });
 });

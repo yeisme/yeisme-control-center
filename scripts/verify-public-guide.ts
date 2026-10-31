@@ -1,7 +1,8 @@
 /**
- * The public guide, end to end against the real server and the production build: it opens without a session, never
- * calls the control-center API, breaks no content policy, keeps its choices in the address, is reached from a
- * signed-out in-app link, serves media with byte ranges, and passes axe in both themes and on a phone.
+ * The public guide, end to end against the real server and the production build: it opens without a session, walks
+ * every chapter through its top bar (Back included), never calls the control-center API, breaks no content policy,
+ * keeps its place and choices in the address, is reached from a signed-out in-app link, serves media with byte
+ * ranges, marks the section being read in its outline, and passes axe on every chapter in both themes and on a phone.
  * Evidence lands in temp/integration-test-runs/public-guide-<run-id>/. Run `bun run build` first.
  */
 import { spawn } from "node:child_process";
@@ -55,6 +56,20 @@ async function axe(page: Page) {
     return violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.id}@${v.nodes.slice(0, 2).map((node) => node.target.join(" ")).join(",")}`);
   });
 }
+/** Chapters in top-bar order, with headings that only that chapter shows. */
+const chapters = [
+  { id: "start", label: "开始", texts: ["从一条体检命令开始", "先搜索，再执行", "公开页面"] },
+  { id: "tools", label: "工具", texts: ["每个工具管好一件事", "把文件、笔记和代码也交给 Agent"] },
+  { id: "cases", label: "案例", texts: ["同一个场景，从关键帧做到配乐", "看 Agent 怎么找工具"] },
+  { id: "connect", label: "接入", texts: ["把服务接进 Claude Code 和 Codex", "让控制中心看到工具里的任务"] },
+  { id: "help", label: "排障与问答", texts: ["遇到这些情况，先这样查", "开始之前，你可能想知道"] },
+] as const;
+const chapterUrl = (id: string) => `${base}/guide.html${id === "start" ? "" : `?chapter=${id}`}`;
+async function openChapter(page: Page, id: string) {
+  await page.goto(chapterUrl(id), { waitUntil: "domcontentloaded" });
+  await page.locator('[data-page="public-guide"]').waitFor();
+}
+
 /** Scroll through once so every one-time reveal has played, then back to the top. */
 async function revealAll(page: Page) {
   await page.evaluate(async () => {
@@ -79,18 +94,33 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
 
-  await check("opens without a session and shows the whole guide", async () => {
+  await check("opens without a session and walks every chapter through the top bar, Back included", async () => {
     const response = await page.goto(`${base}/guide.html`, { waitUntil: "domcontentloaded" });
     if (response?.status() !== 200) throw new Error(`status_${response?.status()}`);
     if (!(response.headers()["content-security-policy"] || "").includes("object-src 'none'")) throw new Error("csp_header_missing");
     await page.locator('[data-page="public-guide"]').waitFor();
-    for (const text of ["三步上手", "先搜索，再执行", "同一个场景，从关键帧做到配乐", "看 Agent 怎么找工具", "每个工具管好一件事", "每个工具从安装到读回结果", "把服务接进 Claude Code 和 Codex", "遇到这些情况，先这样查", "开始之前，你可能想知道", "公开页面"]) await page.getByText(text, { exact: false }).first().waitFor();
+    const bar = page.getByRole("navigation", { name: "指南章节" });
+    for (const chapter of chapters) {
+      const link = bar.getByRole("link", { name: chapter.label, exact: true });
+      await link.click();
+      for (const text of chapter.texts) await page.getByText(text, { exact: false }).first().waitFor();
+      if (await link.getAttribute("aria-current") !== "page") throw new Error(`not_current:${chapter.id}`);
+      const named = new URL(page.url()).searchParams.get("chapter");
+      if (chapter.id !== "start" && named !== chapter.id) throw new Error(`address:${chapter.id}:${page.url()}`);
+      await page.screenshot({ path: path.join(run, "artifacts", `public-guide-${chapter.id}.png`) });
+    }
+    await page.goBack();
+    await page.getByText("让控制中心看到工具里的任务").first().waitFor();
+    if (await bar.getByRole("link", { name: "接入", exact: true }).getAttribute("aria-current") !== "page") throw new Error("back_did_not_return_to_previous_chapter");
+    // A tool's own page, reached from the overview, carries its manual.
+    await bar.getByRole("link", { name: "工具", exact: true }).click();
+    await page.getByRole("link", { name: /Sonora 手册/ }).click();
+    await page.getByRole("heading", { name: "Sonora", exact: true }).waitFor();
+    if (new URL(page.url()).searchParams.get("page") !== "sonora") throw new Error(`tool_page_address:${page.url()}`);
     if ((await context.cookies()).length) throw new Error("cookies_set");
-    await page.waitForTimeout(1_200);
-    await page.screenshot({ path: path.join(run, "artifacts", "public-guide.png") });
   });
-  await check("never calls the control-center API and breaks no content policy", async () => {
-    await revealAll(page);
+  await check("never calls the control-center API and breaks no content policy on any chapter", async () => {
+    for (const chapter of chapters) { await openChapter(page, chapter.id); await revealAll(page); }
     await page.waitForTimeout(500);
     const api = requests.filter((p) => p.startsWith("/api/"));
     if (api.length) throw new Error(`api_requests:${api.join(",")}`);
@@ -99,6 +129,7 @@ try {
     if (errors.length) throw new Error(`runtime_errors:${errors.join(" | ")}`);
   });
   await check("keeps the chosen tool and client in the address and links to sign-in", async () => {
+    await openChapter(page, "start");
     await page.getByRole("radiogroup", { name: "选择工具" }).getByRole("radio").nth(1).click();
     await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { name: /Codex/ }).click();
     const params = new URL(page.url()).searchParams;
@@ -108,10 +139,13 @@ try {
     if (await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { checked: true }).innerText() !== "Codex") throw new Error("client_not_restored");
     if (await page.getByRole("link", { name: "登录控制中心", exact: true }).getAttribute("href") !== "./") throw new Error("login_link");
   });
-  await check("a signed-out visit to the in-app guide lands on the public page with the same choices", async () => {
+  await check("a signed-out visit to the in-app guide lands on the same place of the public page", async () => {
     await page.goto(`${base}/#/guide?tool=sonora&client=codex`, { waitUntil: "domcontentloaded" });
-    await page.waitForURL(/\/guide\.html\?tool=sonora&client=codex/, { timeout: 15_000 });
+    await page.waitForURL(/\/guide\.html\?chapter=start&tool=sonora&client=codex#guide-steps$/, { timeout: 15_000 });
     await page.locator('[data-page="public-guide"]').waitFor();
+    await page.goto(`${base}/#/guide/tools/sonora?client=codex`, { waitUntil: "domcontentloaded" });
+    await page.waitForURL(/\/guide\.html\?chapter=tools&page=sonora&client=codex$/, { timeout: 15_000 });
+    await page.getByRole("heading", { name: "Sonora", exact: true }).waitFor();
     await page.goto(`${base}/`, { waitUntil: "domcontentloaded" });
     await page.getByRole("link", { name: /使用指南（无需登录）/ }).click();
     await page.locator('[data-page="public-guide"]').waitFor();
@@ -132,7 +166,7 @@ try {
     const onResponse = (response: { url: () => string; status: () => number }) => { const path = new URL(response.url()).pathname; if (/\.(mp4|mp3)$/.test(path)) media.push({ path, status: response.status() }); };
     page.on("response", onResponse);
     try {
-      await page.goto(`${base}/guide.html`, { waitUntil: "domcontentloaded" });
+      await openChapter(page, "cases");
       await page.locator("#guide-showcase").waitFor();
       await revealAll(page);
       const images = page.locator(".guide-thumb img, .guide-before-after img, .guide-chain-thumb img");
@@ -200,33 +234,72 @@ try {
     await picker.getByRole("radio", { name: "Codex" }).click();
     await page.locator(".guide-replay-head", { hasText: "Codex" }).waitFor();
     if (new URL(page.url()).searchParams.get("client") !== "codex") throw new Error(`client_param:${page.url()}`);
-    if (await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { checked: true }).innerText() !== "Codex") throw new Error("quick_start_not_following");
     if (await page.locator(".guide-replay-outcome").count()) throw new Error("result_shown_before_the_end");
+    // The client choice travels with the reader: 开始 shows the Codex commands.
+    await page.getByRole("navigation", { name: "指南章节" }).getByRole("link", { name: "开始", exact: true }).click();
+    if (await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { checked: true }).innerText() !== "Codex") throw new Error("quick_start_not_following");
   });
-  await check("passes axe in the light and dark themes", async () => {
-    await page.goto(`${base}/guide.html`, { waitUntil: "domcontentloaded" });
-    await page.locator('[data-page="public-guide"]').waitFor();
-    await revealAll(page);
-    const light = await axe(page);
+  await check("the outline rail marks the section being read while both bars stay on screen", async () => {
+    await openChapter(page, "cases");
+    const outline = page.getByRole("navigation", { name: "本页大纲" });
+    const replay = outline.getByRole("link", { name: "Agent 回放", exact: true });
+    if (!await replay.isVisible()) throw new Error("rail_not_shown_at_1440");
+    if (await outline.getByRole("button", { name: /本页大纲/ }).isVisible()) throw new Error("fold_button_shown_at_1440");
+    await page.locator("#guide-replay").scrollIntoViewIfNeeded();
+    await page.evaluate(() => document.getElementById("guide-replay")!.scrollIntoView({ block: "start" }));
+    await page.waitForFunction(() => document.querySelector('[aria-label="本页大纲"] a[aria-current="location"]')?.textContent === "Agent 回放", undefined, { timeout: 5_000 });
+    const top = await page.getByRole("navigation", { name: "指南章节" }).boundingBox();
+    if (!top || top.y < 50 || top.y > 62) throw new Error(`chapter_bar_not_sticky:${JSON.stringify(top)}`);
+    // An outline click lands the section under both bars and records it in the address without a new history entry.
+    const before = await page.evaluate(() => history.length);
+    await outline.getByRole("link", { name: "声音", exact: true }).click();
+    await page.waitForFunction(() => location.hash === "#guide-showcase-audio");
+    await page.waitForFunction(() => { const top = document.getElementById("guide-showcase-audio")!.getBoundingClientRect().top; return top > 100 && top < 140; }, undefined, { timeout: 5_000 });
+    if (await page.evaluate(() => history.length) !== before) throw new Error("outline_click_pushed_history");
+  });
+  await check("passes axe on every chapter and a tool page, in the light and dark themes", async () => {
+    const failures: string[] = [];
+    for (const target of [...chapters.map((chapter) => chapterUrl(chapter.id)), `${base}/guide.html?chapter=tools&page=eikona`]) {
+      await page.goto(target, { waitUntil: "domcontentloaded" });
+      await page.locator('[data-page="public-guide"]').waitFor();
+      await revealAll(page);
+      const light = await axe(page);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
+      const dark = await axe(page);
+      await page.emulateMedia({ colorScheme: "light" });
+      await page.waitForFunction(() => document.documentElement.dataset.theme !== "dark");
+      if (light.length || dark.length) failures.push(`${target} light:${light.join(" | ")} dark:${dark.join(" | ")}`);
+    }
     await page.emulateMedia({ colorScheme: "dark" });
-    await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
-    const dark = await axe(page);
     await page.screenshot({ path: path.join(run, "artifacts", "public-guide-dark.png") });
     await page.emulateMedia({ colorScheme: "light" });
-    if (light.length || dark.length) throw new Error(`axe light:${light.join(" | ")} dark:${dark.join(" | ")}`);
+    if (failures.length) throw new Error(`axe ${failures.join(" || ")}`);
   });
-  await check("fits a phone without sideways scrolling and passes axe there", async () => {
+  await check("fits a phone without sideways scrolling on any chapter, folds the outline and passes axe there", async () => {
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     try {
       const small = await phone.newPage();
-      await small.goto(`${base}/guide.html`, { waitUntil: "domcontentloaded" });
-      await small.locator('[data-page="public-guide"]').waitFor();
-      await revealAll(small);
-      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-      if (overflow > 1) throw new Error(`horizontal_overflow_${overflow}`);
-      const found = await axe(small);
-      await small.screenshot({ path: path.join(run, "artifacts", "public-guide-phone.png") });
-      if (found.length) throw new Error(`axe_phone:${found.join(" | ")}`);
+      const failures: string[] = [];
+      for (const chapter of chapters) {
+        await openChapter(small, chapter.id);
+        await revealAll(small);
+        const overflow = await small.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (overflow > 1) failures.push(`${chapter.id}:overflow_${overflow}`);
+        const found = await axe(small);
+        if (found.length) failures.push(`${chapter.id}:axe:${found.join(" | ")}`);
+        await small.screenshot({ path: path.join(run, "artifacts", `public-guide-phone-${chapter.id}.png`) });
+      }
+      // On a phone the outline is one button that unfolds the list.
+      await openChapter(small, "cases");
+      const outline = small.getByRole("navigation", { name: "本页大纲" });
+      const fold = outline.getByRole("button", { name: /本页大纲/ });
+      if (await outline.getByRole("link", { name: "Agent 回放", exact: true }).isVisible()) failures.push("outline_open_by_default_on_phone");
+      await fold.click();
+      if (await fold.getAttribute("aria-expanded") !== "true") failures.push("fold_not_expanded");
+      await outline.getByRole("link", { name: "Agent 回放", exact: true }).click();
+      await small.waitForFunction(() => location.hash === "#guide-replay");
+      if (failures.length) throw new Error(failures.join(" || "));
     } finally {
       await phone.close();
     }

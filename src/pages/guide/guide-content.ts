@@ -156,9 +156,10 @@ export interface MoreTool {
 }
 
 export const moreTools: MoreTool[] = [
-  { name: "MCP Gateway", domain: "统一入口", command: "mcp-gateway quickstart", note: "把多个服务收进一个 /mcp；工具默认不放行，按名单逐个开。目前从源码构建。" },
+  { name: "MCP Gateway", domain: "统一入口", command: "mcp-gateway quickstart", note: "把多个服务收进一个 /mcp；工具默认不放行，按名单逐个开。目前从源码构建。控制中心可以只读它的后端、工具与用量，见「接入」。" },
+  { name: "Anatomia", domain: "视频拉片", command: "anatomia-video-mcp", note: "本机 stdio 的 MCP 服务，要和 API、worker 指向同一个数据库与对象目录；拉片和问答只排队，由 worker 执行。控制中心可以观察带项目的分析，见「接入」。" },
   { name: "Pinax", domain: "笔记", command: "pinax mcp serve --vault ./my-notes", note: "本地 Markdown 知识库，默认只读，写入要显式开关。" },
-  { name: "DriveBridge", domain: "文件", command: "drivebridge install --client claude-code", note: "网盘文件的上传、下载与稳定引用；尚未发布，先从源码构建。" },
+  { name: "DriveBridge", domain: "文件", command: "drivebridge install --client claude-code", note: "网盘文件的上传、下载与稳定引用；尚未发布，先从源码构建。控制中心可以只读它的运行记录，见「接入」。" },
   { name: "gitea-mcp", domain: "代码托管", command: "gitea-mcp -t stdio", note: "仓库、PR 和 CI；默认只读，破坏性操作一律拒绝。" },
 ];
 

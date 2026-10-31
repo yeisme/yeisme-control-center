@@ -1,9 +1,12 @@
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useMemo } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api, isRouteUnavailable } from "../../shared/api/control-center-client";
 import { useScopedRead } from "../../app/workspace";
 import { useObservationCache } from "../../app/observation-cache";
 import { toolCatalogCacheKey, type ToolCatalog } from "../../shared/tool-catalog";
 import { GuideContent, type GuideCatalog } from "./GuideContent";
+import { appGuidePath, parseAppGuide } from "./guide-location";
+import type { GuideNavigator } from "./GuideNav";
 
 /** Live catalog for the proof line and per-tool status; the guide copy never waits on it. */
 function useCatalog() {
@@ -22,21 +25,20 @@ function useCatalog() {
   });
 }
 
+/** The guide inside the workspace: chapters and pages live in the hash route, `#/guide/<chapter>/<page>?…`. */
 export default function GuidePage() {
   const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
+  const route = useLocation();
   const read = useCatalog();
-  const write = (key: "tool" | "client", value: string) => {
-    const next = new URLSearchParams(params);
-    next.set(key, value);
-    setParams(next, { replace: true });
+  const location = useMemo(() => parseAppGuide(route.pathname, new URLSearchParams(route.search)), [route.pathname, route.search]);
+  const nav: GuideNavigator = {
+    hrefFor: (to) => `#${appGuidePath(to)}`,
+    go: (to, options) => navigate(appGuidePath(to), { replace: options?.replace }),
   };
   const catalog: GuideCatalog = { status: read.status === "loading" ? "loading" : read.data?.catalog ? "ready" : "unavailable", catalog: read.data?.catalog ?? null };
   return <GuideContent
-    toolId={params.get("tool")}
-    client={params.get("client") === "codex" ? "codex" : "claude"}
-    onTool={(id) => write("tool", id)}
-    onClient={(id) => write("client", id)}
+    location={location}
+    nav={nav}
     catalog={catalog}
     link={{ label: "查看已发现的工具", onClick: () => navigate("/capabilities?tab=tools") }}
   />;

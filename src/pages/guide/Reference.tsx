@@ -1,51 +1,7 @@
-import { ArrowRight, BookOpen, Wrench } from "../../icons";
-import { guideTools, type GuideTool } from "./guide-content";
+import { Wrench } from "../../icons";
 import { Reveal } from "./guide-motion";
-import { CommandLine, SectionHeading, scrollIntoViewGently } from "./guide-parts";
-import { clientConfigs, toolManuals, troubleshooting, type ToolManual } from "./guide-reference";
-
-function ManualArticle({ tool, manual }: { tool: GuideTool; manual: ToolManual }) {
-  return <Reveal as="article" kind="card" id={`guide-manual-${tool.id}`} className="guide-manual-tool">
-    <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <h3 className="guide-h3">{tool.name}</h3>
-      <span className="text-meta text-muted">{tool.domain}</span>
-    </header>
-    <div className="guide-manual-grid">
-      <section className="guide-manual-topic" aria-label={`${tool.name}：安装`}>
-        <h4>安装</h4>
-        <CommandLine command={tool.install} />
-        <CommandLine command={`${tool.id} --version`} />
-      </section>
-      {manual.topics.map((topic) => <section key={topic.title} className="guide-manual-topic" aria-label={`${tool.name}：${topic.title}`}>
-        <h4>{topic.title}</h4>
-        {topic.commands?.map((item) => <CommandLine key={item.command} command={item.command} note={item.note} />)}
-        {topic.body && <p className="guide-manual-body">{topic.body}</p>}
-      </section>)}
-    </div>
-    <p className="guide-manual-samples">
-      <span>真实样例</span>
-      {manual.samples.length
-        ? manual.samples.map((sample) => <button key={sample.label} type="button" className="guide-link" onClick={() => scrollIntoViewGently(sample.target)}>{sample.label}<ArrowRight className="size-3.5" /></button>)
-        : <span className="text-muted">这一轮还没有录制</span>}
-    </p>
-  </Reveal>;
-}
-
-export function ManualSection() {
-  return <section className="guide-section" aria-labelledby="guide-manual">
-    <SectionHeading id="guide-manual" eyebrow="工具手册" title="每个工具从安装到读回结果" body="安装、凭据、生成、费用和输出，一个工具一张卡。命令照抄各工具自己的文档，尖括号里的内容换成你的值。" />
-    <Reveal className="guide-manual-nav" delay={60}>
-      <BookOpen className="size-4 text-muted" />
-      {guideTools.map((tool) => <button key={tool.id} type="button" onClick={() => scrollIntoViewGently(`guide-manual-${tool.id}`)}>{tool.name}</button>)}
-    </Reveal>
-    <div className="guide-manual-list">
-      {guideTools.map((tool) => {
-        const manual = toolManuals.find((item) => item.id === tool.id);
-        return manual ? <ManualArticle key={tool.id} tool={tool} manual={manual} /> : null;
-      })}
-    </div>
-  </section>;
-}
+import { CommandLine, SectionHeading } from "./guide-parts";
+import { clientConfigs, connectedTools, controlCenterSteps, troubleshooting } from "./guide-reference";
 
 export function ConfigSection() {
   return <section className="guide-section" aria-labelledby="guide-config">
@@ -59,6 +15,37 @@ export function ConfigSection() {
             <CommandLine command={step.command} note={step.note} block={step.block} label={step.label} dark={step.block} />
           </li>)}
         </ol>
+      </Reveal>)}
+    </div>
+  </section>;
+}
+
+/** How a tool shows up in the control center: an observer credential from the tool, a connection line, a check. */
+export function ControlCenterSection() {
+  return <section className="guide-section" aria-labelledby="guide-control-center">
+    <SectionHeading id="guide-control-center" eyebrow="接入控制中心" title="让控制中心看到工具里的任务" body="控制中心只读：它查看任务、进度和结果，花钱和改动仍在各工具里由你确认。下面以 Eikona 为例，其他工具照它们各自的观察凭据说明签发。" />
+    <ol className="guide-connect-steps">
+      {controlCenterSteps.map((step, index) => <Reveal as="li" key={step.title} kind="card" delay={index * 90} className="guide-config">
+        <p className="guide-config-title"><span className="guide-step-index is-small" aria-hidden="true">{index + 1}</span>{step.title}</p>
+        <p className="mt-1 text-body-sm text-muted text-pretty">{step.body}</p>
+        {step.commands.length > 0 && <div className="mt-3 space-y-2">{step.commands.map((item) => <CommandLine key={item.command} command={item.command} note={item.note} />)}</div>}
+      </Reveal>)}
+    </ol>
+  </section>;
+}
+
+/** 接入更多工具: the tools beyond the creative ones, each with its read-only credential and one registration line. */
+export function ConnectedToolsSection() {
+  return <section className="guide-section" aria-labelledby="guide-control-center-more">
+    <SectionHeading id="guide-control-center-more" eyebrow="更多工具" title="拉片、文件传输和网关也能看" body="和创作工具一样：在工具那边签发只读凭据，再在控制中心登记一行。控制中心只读，不在这些工具里发起、修改或取消任何事。" />
+    <div className="guide-connect-tools">
+      {connectedTools.map((tool, index) => <Reveal as="article" key={tool.id} kind="card" delay={index * 90} className="guide-config">
+        <div className="flex flex-wrap items-center gap-2" data-connected-tool={tool.id}>
+          <h3 className="guide-h3">{tool.name}</h3>
+          <span className="guide-tag">{tool.kind}</span>
+        </div>
+        <p className="mt-1 text-body-sm text-muted text-pretty">{tool.sees}</p>
+        <div className="mt-3 space-y-2">{tool.steps.map((step) => <CommandLine key={step.command} command={step.command} note={step.note} />)}</div>
       </Reveal>)}
     </div>
   </section>;

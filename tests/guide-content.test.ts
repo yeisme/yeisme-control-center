@@ -55,10 +55,12 @@ describe("使用指南 content", () => {
     expect(guideTools.filter((tool) => tool.mcpNote).map((tool) => tool.id)).toEqual(["sonora", "auctra"]);
   });
 
-  it("keeps deep-link scrolling independent from in-page tool selection", () => {
-    const source = readFileSync(resolve(import.meta.dirname, "../src/pages/guide/GuideContent.tsx"), "utf8");
-    expect(source).toContain("}, [initialTool]);");
-    expect(source).not.toContain("[initialTool, requested?.id]");
+  it("keeps the guide free of the ui barrel and Radix, so the public page loads no menu or dialog code", () => {
+    const names = readdirSync(resolve(import.meta.dirname, "../src/pages/guide")).filter((name) => /\.tsx?$/.test(name));
+    for (const name of names) {
+      const source = readFileSync(resolve(import.meta.dirname, "../src/pages/guide", name), "utf8");
+      expect(source, name).not.toMatch(/from ["'](radix-ui|@radix-ui\/[^"']+)["']|from ["']\.\.\/\.\.\/components\/ui["']/);
+    }
   });
 
   it("keeps the landing structure: three call steps, a multi-line tagline and six to twelve FAQs", () => {

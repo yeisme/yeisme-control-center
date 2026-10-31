@@ -192,6 +192,40 @@ export interface TroubleRow {
   seen?: boolean;
 }
 
+export interface ControlCenterStep {
+  title: string;
+  body: string;
+  commands: GuideCommand[];
+}
+
+/**
+ * Connecting a tool to the control center: a read-only observer credential issued by the tool, then one connection
+ * line in the control center's own config. The flags are the owners' own (eikona service access-key issue,
+ * sonora serve) and the control center's personal-config script.
+ */
+export const controlCenterSteps: ControlCenterStep[] = [
+  {
+    title: "在工具那边签发只读观察凭据",
+    body: "观察凭据只能读任务、进度和结果清单，不能生成、修改或取消，而且必须绑定一个项目。要在控制中心里预览结果，另外给它内容权限。",
+    commands: [
+      { command: "eikona service access-key issue --name control-center --role reader --project <project-id> --purpose personal-observer-v1 --key-file <key-dir>/eikona-observer.key", note: "Eikona：再加 --purpose personal-observer-content-v1 才能预览结果" },
+      { command: "sonora serve --mcp-observer-token-file <token-file> --mcp-observer-project <project-ref>", note: "Sonora：追加到服务现有的 serve 参数后；观察令牌和执行令牌分开，--mcp-observer-content 另开预览" },
+    ],
+  },
+  {
+    title: "在控制中心登记连接",
+    body: "凭据文件必须是 0600；配置里只记文件位置，不记内容。",
+    commands: [
+      { command: "bun scripts/personal-config.ts connect <config-file> eikona-main eikona https://<owner-host>/mcp <project-id> <key-dir>/eikona-observer.key", note: "加 --content 允许预览结果；私网 http 地址要加 --private-http" },
+    ],
+  },
+  {
+    title: "重启后核对",
+    body: "重启控制中心，「服务」页的这条连接显示“任务观测”和可读状态，任务出现在「任务」页和工作台。被拒时页面会写明是授权、合同还是网络的问题。",
+    commands: [],
+  },
+];
+
 /** Rows marked `seen` were hit while recording on 2026-10-29; the rest come from the owners' error tables. */
 export const troubleshooting: TroubleRow[] = [
   { tool: "Eikona", symptom: "dry run 通过，真正运行却 failed，查询也看不到原因", cause: "比例换算出的尺寸不是 16 的倍数，比如 3:2 算成 1254×836", fix: "直接写 size，比如 1536x1024；用 eikona inspect <run_id> 看错误", seen: true },
@@ -206,4 +240,52 @@ export const troubleshooting: TroubleRow[] = [
   { tool: "Claude Code", symptom: "无头模式跑去调别的工具或技能", cause: "用户级技能和内置工具也在场", fix: '加 --strict-mcp-config 和 --allowedTools mcp__<服务名>；只想用 MCP 时再加 --tools ""', seen: true },
   { tool: "通用", symptom: "unknown_action：Agent 说找不到动作", cause: "动作名是猜的", fix: "先 <tool>.search，再 actions.describe，照着返回的参数结构调用", seen: true },
   { tool: "通用", symptom: "Agent 里看不到工具", cause: "二进制太旧没有 mcp 命令，或服务没连上", fix: "<tool> mcp doctor；再用 claude mcp list 或 codex mcp list 看连接状态" },
+];
+
+export interface ConnectedTool {
+  id: "anatomia" | "drivebridge" | "gateway";
+  name: string;
+  /** How the control center reads it: like a task owner, or as runs of an open tool. */
+  kind: "任务观测" | "运行投影";
+  /** What shows up in the control center once connected. */
+  sees: string;
+  steps: GuideCommand[];
+}
+
+/**
+ * Tools beyond the creative ones that the control center can read. Commands follow each owner's docs
+ * (Anatomia's control-center observation contract, DriveBridge's agents CLI, MCP Gateway's tokens CLI) and the
+ * control center's personal-config script; addresses, projects and files stay placeholders.
+ */
+export const connectedTools: ConnectedTool[] = [
+  {
+    id: "anatomia",
+    name: "Anatomia",
+    kind: "任务观测",
+    sees: "拉片分析和视频问答的进度、阶段，以及拉片得到的关键帧；不能在控制中心取消。",
+    steps: [
+      { command: "anatomia control service-keys create --scope observer.read --scope observer.content --project project:<name> --output-file <key-dir>/anatomia-observer.key --json", note: "服务端要同时开启 ANATOMIA_MCP_ENABLED=1 和 ANATOMIA_TASK_OBSERVATION_ENABLED=1；只看进度就去掉 --scope observer.content" },
+      { command: "bun scripts/personal-config.ts connect <config-file> anatomia-main anatomia https://<anatomia-host>/mcp project:<name> <key-dir>/anatomia-observer.key --content", note: "只列出属于这个项目的分析；新登记的视频要带上项目，旧数据没有项目，不会出现" },
+    ],
+  },
+  {
+    id: "drivebridge",
+    name: "DriveBridge",
+    kind: "运行投影",
+    sees: "服务健康、上传下载等运行的进度和失败；看不到文件名、路径和空间容量。",
+    steps: [
+      { command: "drivebridge-server --config <config-file> --state <state-dir> agents create --name yeisme-control-center --space <space-id> --scopes read --days 30 --out <key-dir>/drivebridge-agent.token --json", note: "令牌最长 30 天，到期前重签；服务运行时这条命令会以 state_in_use 退出，先停服务再签" },
+      { command: "bun scripts/personal-config.ts open-tool <config-file> drivebridge https://<drivebridge-host> <key-dir>/drivebridge-agent.token", note: "read 权限也能读这个空间的文件，控制中心只调用健康、能力和运行记录三个接口；私网 http 地址加 --private-http" },
+    ],
+  },
+  {
+    id: "gateway",
+    name: "MCP Gateway",
+    kind: "运行投影",
+    sees: "后端是否就绪、网关列出的工具（进「模型与工具」）、REST 运行和 7 天调用量；不会替你调用任何工具。",
+    steps: [
+      { command: "mcp-gateway tokens create --tenant <tenant> --workspace <workspace> --scopes mcp:tools:read,mcp:audit:read --ttl 720h --actor-id yeisme-control-center --credential-dir <key-dir> --json", note: "要用管理令牌（MCP_GATEWAY_ADMIN_TOKEN）签发；一定带 --workspace，否则读不到后端、运行和用量；令牌写进 <key-dir>/tokens/<token-id>.token，不打印明文" },
+      { command: "bun scripts/personal-config.ts open-tool <config-file> gateway https://<gateway-host> <key-dir>/tokens/<token-id>.token", note: "停用：open-tool <config-file> gateway off；改地址或换令牌加 --replace" },
+    ],
+  },
 ];

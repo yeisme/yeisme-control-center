@@ -3,6 +3,7 @@ import { ArrowRight, BookOpen, CircleAlert, LoaderCircle, LockKeyhole, RefreshCw
 import { useWorkspace } from "./workspace";
 import { errorCode } from "../shared/api/control-center-client";
 import { BootSplash, hasBootSplash } from "./boot-splash";
+import { publicGuideFromApp } from "../pages/guide/guide-location";
 import { Button, Input, cx } from "../components/ui";
 
 const loginErrors: Record<string, string> = {
@@ -87,9 +88,9 @@ export function LoginScreen() {
   </AuthFrame>;
 }
 
-/** The guide is public: a signed-out visit to its in-app address goes to the public page with the same choices. */
-export function PublicGuideRedirect({ search }: { search: string }) {
-  useEffect(() => { window.location.replace(`guide.html${search}`); }, [search]);
+/** The guide is public: a signed-out visit to any of its in-app addresses goes to the same place on the public page. */
+export function PublicGuideRedirect({ pathname, search }: { pathname: string; search: string }) {
+  useEffect(() => { window.location.replace(publicGuideFromApp(pathname, search)); }, [pathname, search]);
   return <AuthLoading />;
 }
 
