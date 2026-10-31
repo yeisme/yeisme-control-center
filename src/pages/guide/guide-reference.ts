@@ -264,8 +264,8 @@ export const connectedTools: ConnectedTool[] = [
     kind: "任务观测",
     sees: "拉片分析和视频问答的进度、阶段，以及拉片得到的关键帧；不能在控制中心取消。",
     steps: [
-      { command: "anatomia control service-keys create --scope observer.read --scope observer.content --project project:<name> --output-file <key-dir>/anatomia-observer.key --json", note: "服务端要同时开启 ANATOMIA_MCP_ENABLED=1 和 ANATOMIA_TASK_OBSERVATION_ENABLED=1；只看进度就去掉 --scope observer.content" },
-      { command: "bun scripts/personal-config.ts connect <config-file> anatomia-main anatomia https://<anatomia-host>/mcp project:<name> <key-dir>/anatomia-observer.key --content", note: "只列出属于这个项目的分析；新登记的视频要带上项目，旧数据没有项目，不会出现" },
+      { command: "anatomia service key create --db <state-dir>/anatomia.db --key-ref service-key:<org>:control-center --observer-tenant tenant:<tenant> --observer-project project:<name> --observer-content --owner-auth-ref <owner-auth-ref> --evidence evidence:<ref> --out <key-dir>/anatomia-observer.key --json", note: "服务端要开 MCP（ANATOMIA_MCP_STREAMABLE_HTTP_ENABLED=true，控制中心访问用的 Host 要在 _ALLOWED_HOSTS 里）和 ANATOMIA_TASK_OBSERVATION_ENABLED=1；tenant 和 project 要与分析上记录的一致；--out 必须是还不存在的绝对路径；只看进度就去掉 --observer-content" },
+      { command: "bun scripts/personal-config.ts connect <config-file> anatomia-main anatomia https://<anatomia-host>/mcp project:<name> <key-dir>/anatomia-observer.key --content", note: "只列出属于这个项目的拉片分析；没有记录项目的分析和视频问答不会出现；私网 http 地址加 --private-http" },
     ],
   },
   {
@@ -274,7 +274,7 @@ export const connectedTools: ConnectedTool[] = [
     kind: "运行投影",
     sees: "服务健康、上传下载等运行的进度和失败；看不到文件名、路径和空间容量。",
     steps: [
-      { command: "drivebridge-server --config <config-file> --state <state-dir> agents create --name yeisme-control-center --space <space-id> --scopes read --days 30 --out <key-dir>/drivebridge-agent.token --json", note: "令牌最长 30 天，到期前重签；服务运行时这条命令会以 state_in_use 退出，先停服务再签" },
+      { command: "drivebridge-server --config <config-file> --state <state-dir> agents create --name yeisme-control-center --space <space-id> --scopes read --days 30 --out <key-dir>/drivebridge-agent.token --json", note: "令牌最长 30 天，到期前重签；服务运行时这条命令会以 state_in_use 退出，先停服务再签；开了治理的实例要用含签发修复的版本，否则密钥用户的空间会被拒（forbidden）" },
       { command: "bun scripts/personal-config.ts open-tool <config-file> drivebridge https://<drivebridge-host> <key-dir>/drivebridge-agent.token", note: "read 权限也能读这个空间的文件，控制中心只调用健康、能力和运行记录三个接口；私网 http 地址加 --private-http" },
     ],
   },
@@ -284,7 +284,7 @@ export const connectedTools: ConnectedTool[] = [
     kind: "运行投影",
     sees: "后端是否就绪、网关列出的工具（进「模型与工具」）、REST 运行和 7 天调用量；不会替你调用任何工具。",
     steps: [
-      { command: "mcp-gateway tokens create --tenant <tenant> --workspace <workspace> --scopes mcp:tools:read,mcp:audit:read --ttl 720h --actor-id yeisme-control-center --credential-dir <key-dir> --json", note: "要用管理令牌（MCP_GATEWAY_ADMIN_TOKEN）签发；一定带 --workspace，否则读不到后端、运行和用量；令牌写进 <key-dir>/tokens/<token-id>.token，不打印明文" },
+      { command: "mcp-gateway tokens create --tenant <tenant> --workspace <workspace> --scopes mcp:tools:read,mcp:audit:read --ttl 720h --actor-id yeisme-control-center --credential-dir <key-dir> --json", note: "要用管理令牌（MCP_GATEWAY_ADMIN_TOKEN）签发；一定带 --workspace，否则读不到后端、运行和用量；令牌写进 <key-dir>/tokens/<token-id>.token，不打印明文。个人网关没有管理令牌时，改由属主控制台用 token.create 计划签发并确认，只能签普通 scope，读不到用量，服务页显示“未授权”" },
       { command: "bun scripts/personal-config.ts open-tool <config-file> gateway https://<gateway-host> <key-dir>/tokens/<token-id>.token", note: "停用：open-tool <config-file> gateway off；改地址或换令牌加 --replace" },
     ],
   },
