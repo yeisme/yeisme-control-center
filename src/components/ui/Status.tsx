@@ -73,7 +73,7 @@ export function CoverageChip({ state, owner, reason, className }: { state: Cover
   </Pill>;
 }
 
-export const ownerNames: Record<string, string> = { eikona: "Eikona", scaena: "Scaena", sonora: "Sonora", aigora: "Aigora", gateway: "MCP Gateway", auctra: "Auctra", muweave: "MuWeave" };
+export const ownerNames: Record<string, string> = { eikona: "Eikona", scaena: "Scaena", sonora: "Sonora", aigora: "Aigora", gateway: "MCP Gateway", drivebridge: "DriveBridge", anatomia: "Anatomia", auctra: "Auctra", muweave: "MuWeave" };
 export function ownerLabel(owner: string) {
   return ownerNames[owner] || owner;
 }

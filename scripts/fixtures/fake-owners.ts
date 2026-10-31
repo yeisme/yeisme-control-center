@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { buildRequests, buildWorld, png, taskRow, type RequestRow, type Scenario, type TaskSpec } from "./world";
 import { eikonaChannels, eikonaModels, eikonaRuntimeCapabilities, providerTools, scaenaGuide, sonoraDiscovery } from "./provider-catalog";
 import { buildDramaWorld, type DramaReply } from "./drama-world";
+import { fakeOpenTool } from "./fake-open-tools";
 
 export const observerToken = "fixture-observer-token";
 export const providerToken = "fixture-provider-token";
@@ -33,6 +34,8 @@ export function startFakeOwners(options: FakeOwnerOptions) {
   const origin = `http://127.0.0.1:${options.port}`;
   /** Fixture-only owner catalog drift switch, toggled by GET /__fixture/catalog-revision?value=N. */
   let catalogRevision = 0;
+  /** Fixture-only switch: `query` makes Anatomia grants carry a query string, which the control center must refuse. */
+  let anatomiaGrantMode: "normal" | "query" = "normal";
   // Eikona's fixed-input batch contract. Inputs and plans are previews; a submit starts one operation per idempotency key,
   // which its members read reports as running once and as succeeded after that. Nothing reaches a Provider.
   const batchInputs = new Map<string, { digest: string; candidates: number; project: string }>();
@@ -115,7 +118,9 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     const requested = typeof args.project_id === "string" ? args.project_id : "";
     if (covered && requested && !covered[requested]) return json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: { error: { code: "AUTH_ACTION_DENIED" } } } });
     const connection = covered && requested ? covered[requested] : endpoint;
-    const reply = (data: unknown) => json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: owner === "sonora" ? { result: { data: { projection: data } } } : owner === "scaena" ? { data } : { result: { data } } } });
+    // Anatomia puts the answer straight into structuredContent and refuses a key without observer scope as a tool error.
+    const reply = (data: unknown) => json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: owner === "sonora" ? { result: { data: { projection: data } } } : owner === "scaena" ? { data } : owner === "anatomia" ? data : { result: { data } } } });
+    if (endpoint === "fx-anatomia-denied") return json({ jsonrpc: "2.0", id: body.id, result: { isError: true, structuredContent: { error: { code: "FORBIDDEN", message: "FORBIDDEN" } } } });
     if (options.scenario === "degraded" && owner === "scaena") return new Response("unavailable", { status: 503 });
     if (action === "control_center.capabilities") {
       const families = [...new Set((world.tasks[connection] || []).map((task) => task.family))];
@@ -152,7 +157,9 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     if (action === "control_center.tasks.artifact_access" && spec) {
       const grant = grantFor(spec, String(args.artifact_ref || ""));
       if (!grant) return json({ jsonrpc: "2.0", id: body.id, result: { isError: true, structuredContent: { error: { code: "ARTIFACT_NOT_FOUND" } } } });
-      const url = owner === "sonora"
+      const url = owner === "anatomia"
+        ? `${origin}/api/v1/control-center/artifact-grants/${grant.id}${anatomiaGrantMode === "query" ? "?download=1" : ""}`
+        : owner === "sonora"
         ? `${origin}/api/v1/artifact-access/${grant.id}?t=${randomBytes(32).toString("base64url").slice(0, 43)}`
         : `${origin}/api/v1/projects/${encodeURIComponent(spec.project)}/control-center/tasks/${encodeURIComponent(spec.ref)}/artifacts/${encodeURIComponent(grant.result.ref)}/access-grants/artifact-grant:${grant.id}?task_family=${encodeURIComponent(spec.family)}`;
       return reply({ schema_version: `${owner}.task_artifact_grant.v1`, artifact_ref: grant.result.ref, mime: grant.result.mime, bytes: grant.result.bytes, expires_at: new Date(Date.now() + 110_000).toISOString(), url });
@@ -313,8 +320,8 @@ export function startFakeOwners(options: FakeOwnerOptions) {
   }
 
   function media(path: string, request: Request) {
-    const match = path.match(/acc_([a-f0-9]{48})$|\/artifact-access\/([a-f0-9]{32})$|artifact-grant:([a-f0-9]{32})$/);
-    const id = match?.[1] || match?.[2] || match?.[3];
+    const match = path.match(/acc_([a-f0-9]{48})$|\/artifact-access\/([a-f0-9]{32})$|artifact-grant:([a-f0-9]{32})$|\/artifact-grants\/([a-f0-9]{32})$/);
+    const id = match?.[1] || match?.[2] || match?.[3] || match?.[4];
     const grant = id ? grants.get(id) : undefined;
     if (!grant || grant.expires < Date.now()) return new Response(null, { status: 404 });
     if (!path.includes("acc_") && request.headers.get("authorization") !== `Bearer ${observerToken}`) return new Response(null, { status: 403 });
@@ -338,11 +345,17 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       const path = url.pathname;
       const auth = request.headers.get("authorization");
       if (options.latencyMs) await sleep(options.latencyMs * (url.searchParams.get("project_id") === "coast-letters" || path.includes("coast") ? 3 : 1));
+      if (path === "/__fixture/anatomia-grant") {
+        anatomiaGrantMode = url.searchParams.get("mode") === "query" ? "query" : "normal";
+        return json({ mode: anatomiaGrantMode });
+      }
       if (path === "/__fixture/catalog-revision") {
         catalogRevision = Math.max(0, Math.min(1, Number(url.searchParams.get("value") || 0) || 0));
         return json({ catalog_revision: catalogRevision });
       }
-      if (path.startsWith("/api/v1/artifact-access/") || path.includes("/access-grants/")) return media(path, request);
+      const openTool = fakeOpenTool(url, request, options.scenario);
+      if (openTool) return openTool;
+      if (path.startsWith("/api/v1/artifact-access/") || path.includes("/access-grants/") || path.startsWith("/api/v1/control-center/artifact-grants/")) return media(path, request);
       const task = path.match(/^\/mcp\/([a-z0-9-]+)$/);
       if (task) {
         if (task[1] === "fx-eikona-denied" || auth !== `Bearer ${observerToken}`) return new Response(null, { status: 403 });

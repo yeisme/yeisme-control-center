@@ -6,7 +6,8 @@ import { createServer as createNetServer } from "node:net";
 import { hashPassword } from "../server/password";
 
 const root = resolve(import.meta.dirname, "..");
-const sourcePath = join(homedir(), ".config/yeisme-control-center/config.json");
+// A staged copy can be checked before it replaces the live config: YEISME_OWNER_READ_CONFIG=<copy>.
+const sourcePath = process.env.YEISME_OWNER_READ_CONFIG ? resolve(process.env.YEISME_OWNER_READ_CONFIG) : join(homedir(), ".config/yeisme-control-center/config.json");
 const id = "real-owner-read-" + new Date().toISOString().replace(/[:.]/g, "-");
 const evidence = resolve(root, "temp/integration-test-runs", id);
 const privateDir = await mkdtemp("/tmp/yeisme-real-owner-read-");
@@ -39,7 +40,7 @@ await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n")
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
   port,
-  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "drama.episodes", "work-queue"],
+  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "drama.episodes", "work-queue", "open-tools"],
   real_owner_reads: true,
   provider_calls: false,
   mutations: false,
@@ -132,9 +133,21 @@ try {
       task_rows_history: historyRows.filter((row: any) => row?.locator?.owner === owner).length,
     }];
   }));
+  // Owners that are optional here (Anatomia) are checked only when the config connects them; their state is recorded as is.
+  const optional = (connections.body?.connections || []).filter((item: any) => item.owner === "anatomia");
+  for (const owner of ["anatomia"]) {
+    const connectionsForOwner = optional.filter((item: any) => item.owner === owner);
+    if (!connectionsForOwner.length) continue;
+    ownerRows[owner] = {
+      connections: connectionsForOwner.map((item: any) => item.id),
+      state: connectionsForOwner.every((item: any) => item.state === "ready") ? "ready" : connectionsForOwner.map((item: any) => item.state).join(","),
+      task_rows_active: activeRows.filter((row: any) => row?.locator?.owner === owner).length,
+      task_rows_history: historyRows.filter((row: any) => row?.locator?.owner === owner).length,
+    };
+  }
   const taskChecks: Record<string, unknown>[] = [];
   const csrf = typeof session.body?.csrf === "string" ? session.body.csrf : "";
-  for (const owner of ["eikona", "scaena", "sonora"]) {
+  for (const owner of ["eikona", "scaena", "sonora", ...(optional.length ? ["anatomia"] : [])]) {
     const row = [...activeRows, ...historyRows].find((candidate: any) => candidate?.locator?.owner === owner && typeof candidate.task_key === "string");
     if (!row) {
       taskChecks.push({ owner, detail: "no_task_observed", events: "no_task_observed", artifact_access: "no_task_observed" });
@@ -203,6 +216,28 @@ try {
     queue_flow_items: (queueRead.body?.items || []).filter((item: any) => item.workflow_stage).length,
     queue_contract_gap_items: (queueRead.body?.items || []).filter((item: any) => item.object_kind === "creative_flow").length,
   } : { status: dramaList.response.status, route_unavailable: [404, 405].includes(dramaList.response.status), error: dramaList.body?.error || null };
+  // Open tools: states, reasons and counts only, never run refs, backend ids or tool names.
+  const openTools = (services.body?.services || []).filter((service: any) => service.integration === "operation_projection").map((service: any) => {
+    const tool = service.open_tool;
+    if (!tool) return { tool: service.id, configuration: service.configuration };
+    return {
+      tool: service.id,
+      configuration: service.configuration,
+      state: tool.state,
+      reason: tool.reason || null,
+      freshness: tool.freshness,
+      coverage: tool.coverage?.state,
+      checks: Object.fromEntries((tool.checks || []).map((check: any) => [check.id, check.reason ? `${check.state}:${check.reason}` : check.state])),
+      runs: tool.operations?.counts,
+      runs_needing_attention: tool.operations?.attention?.length || 0,
+      backends: tally((tool.backends || []).map((backend: any) => backend.state)),
+      usage_calls: tool.usage?.calls ?? null,
+    };
+  });
+  for (const entry of openTools) {
+    const body = JSON.stringify(entry);
+    if (/https?:\/\/|\/home\/|token/i.test(body)) throw new Error(`open_tool_projection_leak:${entry.tool}`);
+  }
   summary = {
     schema_version: "yeisme.integration_test_evidence.v1",
     status: "passed",
@@ -214,6 +249,7 @@ try {
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
     drama_board: dramaBoard,
+    open_tools: openTools,
     task_rows: { active: activeRows.length, history: historyRows.length },
     task_checks: taskChecks,
     boundary_checks: boundaryChecks,
@@ -228,6 +264,7 @@ try {
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
     drama_board: dramaBoard,
+    open_tools: openTools,
   }, null, 2) + "\n");
   status = "passed";
   record({ status, owners: ownerRows, provider_discovery: providerStates, task_rows: summary.task_rows, task_checks: taskChecks });

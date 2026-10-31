@@ -1,4 +1,5 @@
 import type { ControlCenterRole } from "../src/service-directory";
+import type { OpenToolKind } from "../src/shared/open-tools";
 import type {
   Owner,
   Coverage,
@@ -24,6 +25,8 @@ export interface ScopeBinding {
    * delegated reads (actor and audience); results and tasks are filtered by these pairs.
    */
   projects?: { owner: string; project_ref: string; connection_ids: string[] }[];
+  /** Open tools (DriveBridge, MCP Gateway) this scope may see; each is read with the server's own credential. */
+  open_tools?: OpenToolKind[];
 }
 export interface PrincipalBinding {
   issuer: string;
@@ -34,7 +37,7 @@ export interface PrincipalBinding {
 }
 export interface TaskConnection {
   id: string;
-  owner: "eikona" | "sonora" | "scaena";
+  owner: "eikona" | "sonora" | "scaena" | "anatomia";
   instance_id: string;
   label: string;
   environment: string;
@@ -47,6 +50,16 @@ export interface TaskConnection {
   allow_content?: boolean;
   media_origins?: string[];
   studio_origin?: string;
+}
+/** A read-only link to an open tool that is not a task owner; see `src/shared/open-tools.ts`. */
+export interface OpenToolConnection {
+  /** Base address of the tool; the server appends its own fixed GET routes. */
+  endpoint: string;
+  /** A user-level 0600 file holding a read-only bearer credential issued by the tool. */
+  credential_ref: string;
+  allow_private_http?: boolean;
+  enabled?: boolean;
+  label?: string;
 }
 export type ProviderOwner = "eikona" | "scaena" | "sonora";
 export type ProviderModality = "image" | "video" | "audio";
@@ -113,6 +126,7 @@ export interface ServerConfig {
     enabled?: boolean;
   }>>;
   providers?: Partial<Record<ProviderOwner, ProviderConnection>>;
+  open_tools?: Partial<Record<OpenToolKind, OpenToolConnection>>;
   allowInsecureLoopback?: boolean;
 }
 export interface PersonalUser {

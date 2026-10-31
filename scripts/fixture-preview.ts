@@ -15,6 +15,7 @@ import { ProviderRunManager } from "../server/provider-live";
 import { hashPassword } from "../server/password";
 import type { ServerConfig, TaskConnection } from "../server/contracts";
 import { delegationToken, observerToken, providerToken, startFakeOwners } from "./fixtures/fake-owners";
+import { openToolToken } from "./fixtures/fake-open-tools";
 import { usageSeed, type Scenario } from "./fixtures/world";
 import { buildDramaWorld } from "./fixtures/drama-world";
 import { AuctraCollectionStore } from "../server/db/auctra-collection-store";
@@ -41,6 +42,8 @@ const passwordRef = join(temp, "password");
 const observerRef = join(temp, "observer");
 await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o600 });
 await writeFile(observerRef, observerToken + "\n", { mode: 0o600 });
+const openToolRef = join(temp, "open-tool");
+await writeFile(openToolRef, openToolToken + "\n", { mode: 0o600 });
 process.env.YEISME_FIXTURE_PROVIDER_TOKEN = providerToken;
 
 let videoBytes: Buffer | null = null;
@@ -51,7 +54,7 @@ if (Bun.which("ffmpeg")) {
 }
 
 const scopes = [
-  { id: "fixture-a", tenant: "rain-studio", project: "rain-reunion", label: "Fixture · 雨夜重逢", connections: ["fx-eikona", "fx-sonora", "fx-sonora-locked", "fx-scaena", "fx-eikona-denied", "fx-eikona-teaser"] },
+  { id: "fixture-a", tenant: "rain-studio", project: "rain-reunion", label: "Fixture · 雨夜重逢", connections: ["fx-eikona", "fx-sonora", "fx-sonora-locked", "fx-scaena", "fx-eikona-denied", "fx-eikona-teaser", "fx-anatomia", "fx-anatomia-denied"] },
   { id: "fixture-b", tenant: "rain-studio", project: "coast-letters", label: "Fixture · 海岸来信", connections: ["fx-eikona-coast", "fx-sonora-coast"] },
 ];
 const owners = startFakeOwners({ port: ownerPort, requestPorts: { eikona: ownerPort + 1, sonora: ownerPort + 2 }, scenario, latencyMs, videoBytes, scopes });
@@ -82,6 +85,8 @@ const config: ServerConfig = {
       owners: Object.fromEntries(["aigora", "eikona", "scaena", "sonora"].map((owner) => [owner, { tenant: scope.tenant, project: scope.project, actor: "fixture-admin", audience: audience(owner) }])),
       // Only the first scope is connected to Auctra, so the second exercises the "no Auctra connection" state.
       ...(scope.id === "fixture-a" ? { collection: { auctra: { tenant: scope.tenant, project: scope.project, actor: "fixture-admin", audience: audience("auctra") } } } : {}),
+      // Open tools are read with the server's credential; only the first scope lists them.
+      ...(scope.id === "fixture-a" ? { open_tools: ["drivebridge" as const, "gateway" as const] } : {}),
     })),
   }],
   owners: {
@@ -92,6 +97,10 @@ const config: ServerConfig = {
   },
   collection: { auctra: { origin: owners.origin, audience: audience("auctra"), enabled: true } },
   clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
+  open_tools: {
+    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+    gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+  },
   connections: [
     connection("fx-eikona", "eikona", "rain-reunion", "Eikona · 图像生产", { allow_cancel: true }),
     connection("fx-sonora", "sonora", "rain-reunion", "Sonora · 配音与音乐"),
@@ -102,6 +111,9 @@ const config: ServerConfig = {
     // A second readable Eikona project in fixture-a that is not the scope's default project.
     connection("fx-eikona-teaser", "eikona", "rain-teaser", "Eikona · 预告片"),
     connection("fx-sonora-coast", "sonora", "coast-letters", "Sonora · 海岸来信"),
+    connection("fx-anatomia", "anatomia", "rain-reunion", "Anatomia · 拉片"),
+    // Anatomia refuses a key without observer scope with a tool error, not an HTTP status.
+    connection("fx-anatomia-denied", "anatomia", "rain-reunion-ref", "Anatomia · 参考片（未授权）"),
   ],
   providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
     owner, endpoint: `${owners.origin}/provider/${owner}`, credential_env: "YEISME_FIXTURE_PROVIDER_TOKEN", enabled: true,

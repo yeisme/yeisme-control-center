@@ -30,6 +30,9 @@ const taskFamilyLabels: Record<string, string> = {
   "music-job": "音乐生成",
   "audio-job": "音频任务",
   "local-job": "本地任务",
+  // Anatomia: a shot breakdown of a video, and a question asked about one. Not Scaena's production breakdown.
+  decompose: "拉片分析",
+  understand: "视频问答",
 };
 
 const humanize = (value: string) => value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim();

@@ -2,6 +2,7 @@ import { serviceDefinitions, type ServiceDirectory, type ServiceDirectoryEntry }
 import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "./contracts";
 import { auctraConnection } from "./auctra";
 import type { TaskConnectionState } from "../src/task-observation";
+import type { OpenToolKind, OpenToolProjection } from "../src/shared/open-tools";
 
 /**
  * Aggregates per-service freshness from live connection observations.
@@ -35,10 +36,19 @@ function freshness(
   return { coverage: { state: "not_recorded", observed_at } };
 }
 
-export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, session: Session, observations: TaskConnectionState[] = [], scopeConnections: TaskConnection[] = (config.connections || []).filter((c) => scope.connection_ids?.includes(c.id))): ServiceDirectory {
+export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, session: Session, observations: TaskConnectionState[] = [], scopeConnections: TaskConnection[] = (config.connections || []).filter((c) => scope.connection_ids?.includes(c.id)), openTools: { configured: OpenToolKind[]; projections: OpenToolProjection[] } = { configured: [], projections: [] }): ServiceDirectory {
   return {
     schema_version: "yeisme.service_directory.v1",
     services: serviceDefinitions.map((definition): ServiceDirectoryEntry => {
+      // Open tools are read with the server's own credential, like task connections, so only personal sessions see them.
+      if (session.personal && openTools.configured.includes(definition.id as OpenToolKind)) {
+        const openTool = openTools.projections.find((projection) => projection.tool === definition.id);
+        if (!openTool) return { ...definition, connections: [], configuration: "configured", observation: "not_checked", coverage: { state: "not_recorded" } };
+        const observed_at = openTool.observed_at;
+        const covered = openTool.coverage.state;
+        const state = openTool.freshness === "stale" ? "stale" as const : covered === "complete" || covered === "forbidden" || covered === "needs_contract" || covered === "unavailable" ? covered : "partial" as const;
+        return { ...definition, connections: [], configuration: "configured", observation: "not_checked", observed_at, coverage: { state, observed_at }, open_tool: openTool };
+      }
       const connections = session.personal
         ? scopeConnections.filter(c => c.owner === definition.id)
           .map(c => ({

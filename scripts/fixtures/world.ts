@@ -1,7 +1,7 @@
 import { deflateSync } from "node:zlib";
 
 export type Scenario = "rich" | "degraded" | "empty";
-type Owner = "eikona" | "scaena" | "sonora";
+type Owner = "eikona" | "scaena" | "sonora" | "anatomia";
 
 const now = Date.now();
 const minutes = (value: number) => new Date(now - value * 60_000).toISOString();
@@ -92,7 +92,33 @@ export interface TaskSpec {
   actor?: string;
 }
 
+/**
+ * Anatomia's snapshot, shaped like `sdk/contract/task_observation.go`: no prompt, question or error text, no process
+ * block, and only preview and download (it offers no cancellation). Native `complete` reads as succeeded.
+ */
+function anatomiaRow(spec: TaskSpec) {
+  const native = spec.state === "succeeded" ? "complete" : spec.state === "unknown" ? "failed" : spec.state;
+  const progress = spec.progress?.kind === "count" ? { kind: "count", completed: spec.progress.completed ?? null, total: spec.progress.total ?? null, percent: null } : { kind: "indeterminate", completed: null, total: null, percent: null };
+  return {
+    schema_version: "yeisme.task_observation.v1",
+    locator: { owner: "anatomia", project: spec.project, task_family: spec.family, task_ref: spec.ref },
+    title: spec.title,
+    state: spec.state,
+    native_state: native,
+    stage: spec.stage,
+    revision: `${spec.ref.slice(-7)}-${native}-${spec.updatedMinutes}`,
+    created_at: minutes(spec.createdMinutes),
+    updated_at: minutes(spec.updatedMinutes),
+    started_at: minutes(spec.createdMinutes - 1),
+    progress,
+    results: (spec.results || []).map(({ media: _media, thumbnail: _thumbnail, ...result }) => ({ ...result, version: "sha256:" + "c".repeat(64) })),
+    allowed_actions: spec.results?.length ? [{ action: "preview", enabled: true }, { action: "download", enabled: true }] : [],
+    coverage: spec.coverage || "complete",
+  };
+}
+
 export function taskRow(spec: TaskSpec) {
+  if (spec.owner === "anatomia") return anatomiaRow(spec);
   const stages = spec.state === "queued" ? ["accepted", "queued"] : spec.state === "running" ? ["accepted", "queued", "validating", "submitting", "generating"] : ["accepted", "queued", "validating", "submitting", "generating", "downloading", spec.stage];
   const promptState = spec.state === "queued" ? "queued" : spec.state === "running" ? "captured" : spec.results?.length ? "captured" : "not_recorded";
   const promptCapture = { state: promptState, source: "task", capture_ref: `capture-${spec.ref}`, task_ref: spec.ref, version: "prompt-v1", digest: "a".repeat(64), length: 128, locale: "zh-CN", summary: "脱敏业务提示词摘要", readable: true, observed_at: minutes(spec.updatedMinutes) };
@@ -155,8 +181,8 @@ export interface World {
 
 export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World {
   const media = new Map<string, { mime: string; bytes: Buffer }>();
-  const tasks: Record<string, TaskSpec[]> = { "fx-eikona": [], "fx-sonora": [], "fx-sonora-locked": [], "fx-scaena": [], "fx-eikona-denied": [], "fx-eikona-coast": [], "fx-sonora-coast": [], "fx-eikona-teaser": [], "fx-eikona-bts": [] };
-  const projects = { "fx-eikona": { "rain-reunion": "fx-eikona", "rain-bts": "fx-eikona-bts" } };
+  const tasks: Record<string, TaskSpec[]> = { "fx-eikona": [], "fx-sonora": [], "fx-sonora-locked": [], "fx-scaena": [], "fx-eikona-denied": [], "fx-eikona-coast": [], "fx-sonora-coast": [], "fx-eikona-teaser": [], "fx-eikona-bts": [], "fx-anatomia": [], "fx-anatomia-denied": [] };
+  const projects = { "fx-eikona": { "rain-reunion": "fx-eikona", "rain-bts": "fx-eikona-bts" }, "fx-anatomia-locked": { "rain-reunion": "fx-anatomia" } };
   if (scenario === "empty") return { tasks, events: () => [], media, projects };
 
   const image = (key: string, name: string, index: number, width = 320, height = 200): ResultSpec => {
@@ -213,6 +239,20 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
     recovery: { state: "rejected_no_generation", native_state: "InvalidApiKey", submission_ref: "vt_5521aa0c", binding_id: "seedance-1080p-9x16", error_code: "InvalidApiKey", blocker: "Provider 凭据无效，未产生生成", safe_to_resubmit: false },
   });
 
+  // Anatomia: shot breakdowns (decompose) and questions about a video (understand). Results are still frames.
+  const frame = (key: string, operation: string, index: number): ResultSpec => {
+    const [from, to] = colorFor(index + 2);
+    const bytes = png(320, 180, from, to);
+    media.set(key, { mime: "image/png", bytes });
+    return { ref: `artifact:${operation}:frame-${index + 1}`, name: `frame-${String(index + 1).padStart(3, "0")}.png`, mime: "image/png", bytes: bytes.length, width: 320, height: 180, state: "ready", media: key };
+  };
+  tasks["fx-anatomia"].push(
+    { owner: "anatomia", connection: "fx-anatomia", project: "rain-reunion", family: "decompose", ref: "operation:an-0907", title: "拉片分析：重逢-粗剪-v3.mp4", state: "running", stage: "shot_detection", createdMinutes: 14, updatedMinutes: 1, progress: { kind: "count", completed: 2, total: 5 } },
+    { owner: "anatomia", connection: "fx-anatomia", project: "rain-reunion", family: "decompose", ref: "operation:an-0902", title: "拉片分析：参考片-雨夜.mp4", state: "succeeded", stage: "", createdMinutes: 160, updatedMinutes: 132, results: [0, 1, 2].map((index) => frame(`an-0902-${index}`, "operation:an-0902", index)) },
+    { owner: "anatomia", connection: "fx-anatomia", project: "rain-reunion", family: "understand", ref: "operation:an-0899", title: "视频问答：参考片-雨夜.mp4", state: "unknown", stage: "inference", createdMinutes: 210, updatedMinutes: 190 },
+    { owner: "anatomia", connection: "fx-anatomia", project: "rain-reunion", family: "decompose", ref: "operation:an-0871", title: "拉片分析：预告-初版.mp4", state: "partial", stage: "", createdMinutes: 900, updatedMinutes: 860, coverage: "partial", results: [frame("an-0871-0", "operation:an-0871", 3)] },
+  );
+
   tasks["fx-eikona-coast"].push(
     { owner: "eikona", connection: "fx-eikona-coast", project: "coast-letters", family: "run", ref: "run-c-12", title: "海岸来信 · 封面候选", state: "succeeded", stage: "completed", createdMinutes: 400, updatedMinutes: 390, results: [image("coast-cover", "海岸来信 封面.png", 3)] },
     { owner: "eikona", connection: "fx-eikona-coast", project: "coast-letters", family: "run", ref: "run-c-13", title: "灯塔 · 夜景", state: "running", stage: "generating", createdMinutes: 12, updatedMinutes: 2, progress: { kind: "percent", percent: 28 } },
@@ -222,6 +262,12 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
   tasks["fx-sonora-coast"].push({ owner: "sonora", connection: "fx-sonora-coast", project: "coast-letters", family: "voice-render-job", ref: "sonora://voice-render-job/coast-1", title: "海岸来信 · 旁白", state: "succeeded", stage: "completed", createdMinutes: 500, updatedMinutes: 480, results: [audio("coast-narration", "海岸来信 旁白.wav", 2, 196)] });
 
   const events = (spec: TaskSpec) => {
+    if (spec.owner === "anatomia") {
+      // Operation and analysis-stage events in Anatomia's fixed vocabulary; no prompt or question is ever attached.
+      const steps = [["queued", "request_received", "Operation queued"], ["running", "provider_running", "Worker started processing"], ["shot_detection", "provider_running", "Stage started"], ...(spec.state === "running" ? [] : [[spec.state === "succeeded" || spec.state === "partial" ? "completed" : "failed", spec.state === "succeeded" || spec.state === "partial" ? "artifact_ready" : "failed", spec.state === "succeeded" || spec.state === "partial" ? "Operation completed" : "Operation failed"]])];
+      const span = Math.max(1, spec.createdMinutes - spec.updatedMinutes);
+      return steps.map(([stage, kind, summary], index) => ({ id: `op:${spec.ref}:${stage}`, sequence: index + 1, occurred_at: minutes(spec.createdMinutes - (span * index) / Math.max(1, steps.length - 1)), kind, stage, state: index === steps.length - 1 ? spec.state : "running", summary })).reverse();
+    }
     const stages = spec.state === "queued" ? ["accepted", "queued"] : spec.state === "running" ? ["accepted", "queued", "validating", "submitting", "generating"] : ["accepted", "queued", "validating", "submitting", "generating", "downloading", spec.stage];
     const span = Math.max(1, spec.createdMinutes - spec.updatedMinutes);
     return stages.map((stage, index) => ({

@@ -1,6 +1,6 @@
 import type { ProcessObservation, PromptCaptureObservation, ProcessProgress } from "./observation-contract";
 
-export const taskOwners = ["eikona", "sonora", "scaena"] as const;
+export const taskOwners = ["eikona", "sonora", "scaena", "anatomia"] as const;
 export type TaskOwner = (typeof taskOwners)[number];
 export interface TaskLocator {
   owner: TaskOwner;

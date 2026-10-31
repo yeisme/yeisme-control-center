@@ -10,12 +10,13 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
-import { connectionURL } from "../server/task-connections";
+import { connectionURL, endpointURL } from "../server/task-connections";
+import { isOpenToolKind } from "../src/shared/open-tools";
 import { clientOrigin } from "../src/task-links";
 import type { ServerConfig, TaskConnection, ProviderOwner } from "../server/contracts";
 const [command, file, ...args] = process.argv.slice(2);
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|studio|cancel|content|disable|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|studio|cancel|content|disable|status <config-file> [arguments]";
 if (
   !file ||
   ![
@@ -26,6 +27,7 @@ if (
     "connect",
     "auctra",
     "provider",
+    "open-tool",
     "studio",
     "cancel",
     "disable",
@@ -193,12 +195,12 @@ if (command === "init") {
     if (
       !id ||
       !/^[-a-zA-Z0-9_]{1,80}$/.test(id) ||
-      !["eikona", "sonora", "scaena"].includes(owner) ||
+      !["eikona", "sonora", "scaena", "anatomia"].includes(owner) ||
       !project ||
       !credential_ref
     )
       throw Error(
-        "connect requires <id> <owner> <endpoint> <owner-project> <credential-file> [--private-http] [--content]",
+        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content]",
       );
     const c: TaskConnection = {
       id,
@@ -227,8 +229,9 @@ if (command === "init") {
     // The scope pins one default project per owner (delegated reads). Connecting another project of the same owner
     // used to replace that pin silently; it now stays unless --default is given. Every connected project can be bound
     // to shared projects either way.
-    const pinned = scope.owners[c.owner]?.project;
-    if (!pinned || flags.includes("--default"))
+    // Anatomia has no request projection, so there is no delegated-read default to pin.
+    const pinned = c.owner === "anatomia" ? project : scope.owners[c.owner]?.project;
+    if (c.owner !== "anatomia" && (!pinned || flags.includes("--default")))
       scope.owners[c.owner] = {
         tenant: project,
         project,
@@ -239,7 +242,7 @@ if (command === "init") {
     console.log(
       "Registered endpoint and credential reference; no network call or permission change.",
     );
-    if (pinned && pinned !== project && !flags.includes("--default"))
+    if (c.owner !== "anatomia" && pinned && pinned !== project && !flags.includes("--default"))
       console.log(`Kept ${c.owner} default project ${pinned}; pass --default to make ${project} the default.`);
   } else if (command === "auctra") {
     // Auctra refuses collection.* to every key but a service-collector one, and refuses everything else to that key, so the
@@ -282,6 +285,32 @@ if (command === "init") {
     config.providers = { ...(config.providers || {}), [owner]: connection };
     save(config);
     console.log(JSON.stringify({ owner, endpoint, project, model_ref, submit, status: status === "-" ? null : status, credential_configured: true, network_called: false }, null, 2));
+  } else if (command === "open-tool") {
+    // A read-only open tool (DriveBridge, MCP Gateway) for the personal scope; `off` disables it and keeps the entry.
+    const [tool, endpoint, credentialRef, ...flags] = args;
+    const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
+    if (!scope) throw Error("Personal scope missing.");
+    if (!isOpenToolKind(tool) || !endpoint) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace], or <drivebridge|gateway> off");
+    if (endpoint === "off" && args.length === 2) {
+      const existing = config.open_tools?.[tool];
+      if (!existing) throw Error("Open tool not configured.");
+      existing.enabled = false;
+      scope.open_tools = (scope.open_tools || []).filter((kind) => kind !== tool);
+      save(config);
+      console.log(JSON.stringify({ tool, enabled: false, network_called: false, next: "restart the control center to reload" }, null, 2));
+    } else {
+      const unknown = flags.filter((flag) => !["--private-http", "--replace"].includes(flag));
+      if (!credentialRef || unknown.length) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace]");
+      const allowPrivateHttp = flags.includes("--private-http");
+      endpointURL(endpoint, allowPrivateHttp, "open_tool_endpoint_denied");
+      const credential_ref = resolve(credentialRef);
+      if (!existsSync(credential_ref) || (statSync(credential_ref).mode & 0o077)) throw Error("Open tool credential file must exist and be 0600.");
+      if (config.open_tools?.[tool] && !flags.includes("--replace")) throw Error("Open tool already configured; pass --replace to change it.");
+      config.open_tools = { ...config.open_tools, [tool]: { endpoint, credential_ref, ...(allowPrivateHttp ? { allow_private_http: true } : {}), enabled: true } };
+      scope.open_tools = [...new Set([...(scope.open_tools || []), tool])];
+      save(config);
+      console.log(JSON.stringify({ tool, scope: scope.id, credential_configured: true, private_http: allowPrivateHttp, network_called: false, next: "restart the control center, then check Services" }, null, 2));
+    }
   } else if (command === "studio") {
     const c = config.connections?.find((c) => c.id === args[0]);
     if (!c || c.owner !== "scaena" || args.length !== 2)
@@ -313,7 +342,7 @@ if (command === "init") {
     const c = config.connections?.find((connection) => connection.id === args[0]);
     if (
       !c ||
-      !["eikona", "sonora", "scaena"].includes(c.owner) ||
+      !["eikona", "sonora", "scaena", "anatomia"].includes(c.owner) ||
       !["on", "off"].includes(args[1]) ||
       args.length !== 2
     )
@@ -356,6 +385,11 @@ if (command === "init") {
             model_refs: p.model_refs,
             credential_configured: !!p.credential_ref && existsSync(p.credential_ref),
             action_manifest: p.action_manifest,
+          }])),
+          open_tools: Object.fromEntries(Object.entries(config.open_tools || {}).map(([tool, entry]) => [tool, {
+            enabled: entry?.enabled !== false,
+            private_http: entry?.allow_private_http === true,
+            credential_configured: !!entry?.credential_ref && existsSync(entry.credential_ref),
           }])),
           // Like connections, the address stays out of status output; only whether each piece is in place.
           auctra: config.collection?.auctra ? {

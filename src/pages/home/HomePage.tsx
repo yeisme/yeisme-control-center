@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useOverlayParams } from "../../app/overlay-history";
-import { Activity, ArrowRight, CircleAlert, CircleHelp, ClipboardCheck, Clock3, Eye, Images, ListTodo, Plug, Route, ScrollText, ServerCog, ShieldQuestion, Unplug, Wallet } from "../../icons";
+import { Activity, ArrowRight, CircleAlert, CircleHelp, ClipboardCheck, Clock3, Eye, Images, ListTodo, Plug, Route, ScrollText, ServerCog, ShieldQuestion, TriangleAlert, Unplug, Wallet } from "../../icons";
 import { api, type UsageProjection } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace, type ScopedRead } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
@@ -12,6 +12,7 @@ import { progressLabel, taskIsActive, taskStateLabels } from "../../task-observa
 import { useNotifications } from "../../app/notifications-context";
 import { countsAsHomeAttention, reminderStateLabels } from "../../notifications";
 import { SourceCoverage } from "../../components/SourceCoverage";
+import { openToolStateLabels, type OpenToolProjection } from "../../shared/open-tools";
 import { SourceStatusLine } from "../../components/SourceStatusLine";
 import { WorkQueueInspector, WorkStatePill, workQueueKindLabels, workQueueOwnerLabel, workQueuePriorityLabels, workQueueReasonLabel } from "./WorkQueueInspector";
 import type { WorkQueueItem, WorkQueueKind } from "../../shared/work-queue";
@@ -34,9 +35,33 @@ const queueKindIcons: Record<WorkQueueKind, ReactNode> = {
   handoff_ready: <Route />,
   service_blocked: <Unplug />,
   contract_gap: <Plug />,
+  operation_failure: <TriangleAlert />,
 };
 const stateText: Record<string, string> = { success: "text-success", danger: "text-danger", warning: "text-warning", neutral: "text-muted" };
 const sourceDownStatuses = ["forbidden", "unavailable", "unknown", "needs_contract", "login_required"];
+
+/** An open tool on the workbench: its state, then what needs attention or what is running. */
+function OpenToolRow({ tool }: { tool: OpenToolProjection }) {
+  const tone: Tone = tool.state === "ready" ? "success" : tool.state === "degraded" || tool.state === "rate_limited" ? "warning" : tool.state === "needs_contract" ? "neutral" : "danger";
+  const counts = tool.operations.counts;
+  const down = (tool.backends || []).filter((backend) => backend.enabled && backend.state === "down").length;
+  const summary = tool.state !== "ready" && tool.state !== "degraded" ? "—"
+    : tool.operations.attention.length ? `${tool.operations.attention.length} 个运行要处理`
+      : down ? `${down} 个后端不可用`
+        : tool.backends?.length ? `${tool.backends.length} 个后端`
+          : `${counts.running + counts.queued} 个进行中`;
+  return <li className="flex items-center gap-3 px-5 py-3" data-open-tool={tool.tool}>
+    <Dot tone={tone} />
+    <span className="min-w-0 flex-1">
+      <span className="block truncate text-body-sm font-medium text-ink">{tool.label}</span>
+      <span className="block truncate text-2xs text-muted">开放工具{tool.freshness === "stale" ? ` · 显示 ${formatRelative(tool.observed_at)} 的读数` : ""}</span>
+    </span>
+    <span className="shrink-0 text-right text-2xs text-muted">
+      <span className={cx("block font-medium", stateText[tone] || "text-muted")}>{openToolStateLabels[tool.state]}</span>
+      <span className="tabular">{summary}</span>
+    </span>
+  </li>;
+}
 
 function greeting() {
   const hour = new Date().getHours();
@@ -53,6 +78,7 @@ export default function HomePage() {
   const usage = useScopedRead((scopeId, signal) => api.usage(scopeId, signal));
   const services = useScopedRead((scopeId, signal) => api.services(scopeId, signal));
   const queue = useScopedRead((scopeId, signal) => api.workQueue(scopeId, {}, undefined, 50, signal), { poll: (data) => data ? 30_000 : 15_000 });
+  const openTools = (services.data?.services || []).flatMap((service) => service.open_tool ? [service.open_tool] : []);
   const [params] = useSearchParams();
   const [, writeOverlay] = useOverlayParams(workOverlays);
   const [queueKind, setQueueKind] = useState<QueueFilter>("all");
@@ -195,7 +221,8 @@ export default function HomePage() {
           </Panel>
 
           <Panel title="服务状态" actions={<Button size="sm" variant="ghost" onClick={() => navigate("/services")}>服务与连接<ArrowRight className="size-3.5" /></Button>} bodyClassName="p-0">
-            {loading && !tasks.connections.length ? <SkeletonRows rows={3} /> : tasks.connections.length ? <ul className="divide-y divide-line">
+            {loading && !tasks.connections.length && !openTools.length ? <SkeletonRows rows={3} /> : tasks.connections.length || openTools.length ? <ul className="divide-y divide-line">
+              {openTools.map((tool) => <OpenToolRow key={tool.tool} tool={tool} />)}
               {tasks.connections.map((connection) => {
                 const count = tasks.rows.filter((task) => task.connection_id === connection.id).length;
                 const tone = connectionTone(connection.state);

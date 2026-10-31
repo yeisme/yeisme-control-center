@@ -24,6 +24,7 @@ import {
   startFakeOwners,
 } from "./fixtures/fake-owners";
 import type { ServerConfig, TaskConnection } from "../server/contracts";
+import { openToolToken } from "./fixtures/fake-open-tools";
 
 const root = path.resolve(import.meta.dirname, "..");
 const ownerPort = Number(process.env.CONTRACT_OWNER_PORT || 4330);
@@ -68,6 +69,8 @@ const serviceRef = join(temp, "service-credential");
 await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o600 });
 await writeFile(observerRef, observerToken + "\n", { mode: 0o600 });
 await writeFile(serviceRef, serviceToken + "\n", { mode: 0o600 });
+const openToolRef = join(temp, "open-tool");
+await writeFile(openToolRef, openToolToken + "\n", { mode: 0o600 });
 
 const scopeIds = ["contract-a"];
 const owners = startFakeOwners({
@@ -76,7 +79,7 @@ const owners = startFakeOwners({
   scenario: "rich",
   latencyMs: 0,
   videoBytes: null,
-  scopes: [{ id: scopeIds[0], tenant: "rain-studio", project: "rain-reunion", label: "Contract", connections: ["fx-eikona", "fx-sonora"] }],
+  scopes: [{ id: scopeIds[0], tenant: "rain-studio", project: "rain-reunion", label: "Contract", connections: ["fx-eikona", "fx-sonora", "fx-anatomia", "fx-anatomia-locked"] }],
 });
 
 const connection = (id: string, owner: TaskConnection["owner"], project: string, extra: Partial<TaskConnection> = {}): TaskConnection => ({
@@ -94,9 +97,10 @@ const config: ServerConfig = {
     issuer: "fixture", subject: username, name: "Contract Admin",
     scopes: scopeIds.map((id) => ({
       id, tenant: "rain-studio", team: "rain-studio", project: "rain-reunion", label: "Contract scope",
-      connection_ids: ["fx-eikona", "fx-sonora"],
+      connection_ids: ["fx-eikona", "fx-sonora", "fx-anatomia", "fx-anatomia-locked"],
       owners: Object.fromEntries(["aigora", "eikona", "scaena", "sonora"].map((owner) => [owner, { tenant: "rain-studio", project: "rain-reunion", actor: username, audience: audience(owner) }])),
       collection: { auctra: { tenant: "rain-studio", project: "rain-reunion", actor: username, audience: audience("auctra") } },
+      open_tools: ["drivebridge" as const, "gateway" as const],
     })),
   }],
   owners: {
@@ -107,7 +111,17 @@ const config: ServerConfig = {
   },
   collection: { auctra: { origin: owners.origin, audience: audience("auctra"), credential_ref: serviceRef, enabled: true } },
   clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
-  connections: [connection("fx-eikona", "eikona", "rain-reunion"), connection("fx-sonora", "sonora", "rain-reunion")],
+  open_tools: {
+    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+    gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+  },
+  connections: [
+    connection("fx-eikona", "eikona", "rain-reunion"),
+    connection("fx-sonora", "sonora", "rain-reunion"),
+    connection("fx-anatomia", "anatomia", "rain-reunion", { allow_cancel: true }),
+    // The same Anatomia project read by a connection that was never allowed content: frames stay closed.
+    connection("fx-anatomia-locked", "anatomia", "rain-reunion", { allow_content: false }),
+  ],
   providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
     owner, endpoint: `${owners.origin}/provider/${owner}`, credential_env: "YEISME_CONTRACT_PROVIDER_TOKEN", enabled: true,
     ...(owner === "scaena" ? { project: "rain-reunion" } : {}),
@@ -342,13 +356,13 @@ try {
     const { response, json } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`);
     assert.equal(response.status, 200);
     assert.equal(json.schema_version, "yeisme.tool_catalog.v1");
-    assert.deepEqual(json.servers.map((server: { owner: string; coverage: string }) => `${server.owner}:${server.coverage}`), ["eikona:readable", "scaena:readable", "sonora:readable", "aigora:needs_contract", "gateway:needs_contract", "auctra:needs_contract"]);
+    assert.deepEqual(json.servers.map((server: { owner: string; coverage: string }) => `${server.owner}:${server.coverage}`), ["eikona:readable", "scaena:readable", "sonora:readable", "gateway:readable", "aigora:needs_contract", "auctra:needs_contract"]);
     assert.equal(json.tools.filter((tool: { owner: string }) => tool.owner === "eikona").length, 3, "paginated tools/list was followed");
     assert.ok(json.models.some((model: { status: string }) => model.status === "historical"));
     assert.ok(json.actions.some((action: { name: string; risk: string }) => action.name === "music.generate" && action.risk === "paid_external"));
     assert.deepEqual(json.changes, []);
     const body = JSON.stringify(json);
-    for (const secret of [providerToken, observerToken, serviceToken, delegationToken]) assert.equal(body.includes(secret), false);
+    for (const secret of [providerToken, observerToken, serviceToken, delegationToken, openToolToken]) assert.equal(body.includes(secret), false);
     const { json: capabilities } = await call(`/api/control-center/v1/capabilities?scope=${scopeIds[0]}`);
     const video = capabilities.capabilities.find((row: { owner: string }) => row.owner === "scaena");
     assert.deepEqual(video.input_modes, ["text_to_video", "image_to_video", "keyframe_video"]);
@@ -367,6 +381,76 @@ try {
     const { response } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`, "POST", {});
     assert.equal(response.status, 405);
     await fetch(`${owners.origin}/__fixture/catalog-revision?value=0`);
+  });
+
+  await check("anatomia: breakdowns list with stages, frames open through a bound grant, and cancellation is refused", async () => {
+    const active = await call(`/api/control-center/v1/tasks?mode=active&scope=${scopeIds[0]}`);
+    const running = active.json.rows.find((row: { locator: { owner: string; task_ref: string }; connection_id: string }) => row.locator.owner === "anatomia" && row.connection_id === "fx-anatomia");
+    assert.equal(running?.locator.task_family, "decompose");
+    assert.deepEqual(running.progress, { kind: "count", completed: 2, total: 5, percent: null });
+    const done = await call(`/api/control-center/v1/tasks?mode=history&scope=${scopeIds[0]}`);
+    const rows = done.json.rows.filter((row: { connection_id: string }) => row.connection_id === "fx-anatomia");
+    assert.deepEqual(rows.map((row: { locator: { task_ref: string }; state: string }) => `${row.locator.task_ref}:${row.state}`).sort(), ["operation:an-0871:partial", "operation:an-0899:unknown", "operation:an-0902:succeeded"]);
+    const breakdown = rows.find((row: { locator: { task_ref: string } }) => row.locator.task_ref === "operation:an-0902");
+    assert.equal(breakdown.results.length, 3);
+    const events = await call(`/api/control-center/v1/tasks/${encodeURIComponent(breakdown.task_key)}/events?scope=${scopeIds[0]}`);
+    assert.deepEqual(events.json.events.map((event: { kind: string }) => event.kind).sort(), ["artifact_ready", "provider_running", "provider_running", "request_received"]);
+    const access = await call(`/api/control-center/v1/tasks/${encodeURIComponent(breakdown.task_key)}/artifacts/artifact-1/access?scope=${scopeIds[0]}`, "POST", { purpose: "preview" });
+    assert.equal(access.response.status, 200);
+    assert.equal(access.json.mime, "image/png");
+    const bytes = await app(new Request(origin + access.json.url, { headers: { Cookie: cookie } }));
+    assert.equal(bytes.status, 200);
+    assert.equal(bytes.headers.get("content-type"), "image/png");
+    assert.equal(new Uint8Array(await bytes.arrayBuffer())[1], 0x50);
+    const locked = done.json.rows.find((row: { connection_id: string; locator: { task_ref: string } }) => row.connection_id === "fx-anatomia-locked" && row.locator.task_ref === "operation:an-0902");
+    const refused = await call(`/api/control-center/v1/tasks/${encodeURIComponent(locked.task_key)}/artifacts/artifact-0/access?scope=${scopeIds[0]}`, "POST", { purpose: "preview" });
+    assert.equal(refused.response.status, 403);
+    assert.equal(refused.json.error, "content_not_authorized");
+    const cancel = await call(`/api/control-center/v1/tasks/${encodeURIComponent(running.task_key)}/cancel?scope=${scopeIds[0]}`, "POST", { confirm: true, expected_revision: running.revision, idempotency_key: "anatomia-cancel-check-0001" });
+    assert.equal(cancel.response.status, 409);
+    assert.equal(cancel.json.error, "cancel_not_supported");
+  });
+
+  await check("anatomia: a grant that points anywhere but its own grant route is refused", async () => {
+    await fetch(`${owners.origin}/__fixture/anatomia-grant?mode=query`);
+    try {
+      const { json } = await call(`/api/control-center/v1/tasks?mode=history&scope=${scopeIds[0]}`);
+      const breakdown = json.rows.find((row: { connection_id: string; locator: { task_ref: string } }) => row.connection_id === "fx-anatomia" && row.locator.task_ref === "operation:an-0902");
+      const access = await call(`/api/control-center/v1/tasks/${encodeURIComponent(breakdown.task_key)}/artifacts/artifact-2/access?scope=${scopeIds[0]}`, "POST", { purpose: "preview" });
+      assert.equal(access.response.status, 403);
+      assert.equal(access.json.error, "media_address_denied");
+    } finally {
+      await fetch(`${owners.origin}/__fixture/anatomia-grant?mode=normal`);
+    }
+  });
+
+  await check("open tools: services carry DriveBridge and Gateway readings without paths, addresses or owner text", async () => {
+    const { json } = await call(`/api/control-center/v1/services?scope=${scopeIds[0]}&observe=1`);
+    const drive = json.services.find((v: { id: string }) => v.id === "drivebridge");
+    const gateway = json.services.find((v: { id: string }) => v.id === "gateway");
+    assert.equal(drive.integration, "operation_projection");
+    assert.equal(drive.open_tool.state, "ready");
+    assert.equal(drive.open_tool.coverage.state, "partial");
+    assert.deepEqual(drive.open_tool.operations.attention.map((run: { ref: string; label: string }) => `${run.ref}:${run.label}`), ["op_fx_failed:导出", "op_fx_interrupted:上传"]);
+    assert.equal(gateway.open_tool.state, "ready");
+    assert.deepEqual(gateway.open_tool.backends.map((backend: { id: string; state: string; tool_count: number }) => `${backend.id}:${backend.state}:${backend.tool_count}`), ["eikona:ready:2", "sonora:ready:1", "blender:disabled:0"]);
+    assert.equal(gateway.open_tool.usage.calls, 1204);
+    const body = JSON.stringify(json);
+    for (const leaked of ["/fixture/", "permission denied", "files.fixture.invalid", "eikona.fixture.invalid", "sonora.fixture.invalid", "SONORA_FIXTURE_TOKEN", "backend-leak.example.test", "upstream 502", openToolToken, "credential_ref", owners.origin]) assert.equal(body.includes(leaked), false, leaked);
+  });
+
+  await check("open tools: the work queue raises failed runs and reports both tools as sources", async () => {
+    const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}&kind=operation_failure`);
+    assert.deepEqual(json.items.map((item: { owner: string; title: string }) => `${item.owner}:${item.title}`).sort(), ["drivebridge:DriveBridge 上传失败", "drivebridge:DriveBridge 导出失败", "gateway:MCP Gateway 工具调用失败"]);
+    const sources = json.coverage.sources.map((source: { owner: string; state: string }) => `${source.owner}:${source.state}`);
+    assert.ok(sources.includes("drivebridge:partial"), sources.join(","));
+    assert.ok(sources.includes("gateway:complete"), sources.join(","));
+  });
+
+  await check("open tools: the catalog lists the Gateway's tools and none is callable", async () => {
+    const { json } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`);
+    assert.deepEqual(json.tools.filter((tool: { owner: string }) => tool.owner === "gateway").map((tool: { name: string }) => tool.name), ["eikona_search", "eikona_execute", "sonora_execute", "gateway_tools_search"]);
+    assert.equal(json.actions.some((action: { owner: string }) => action.owner === "gateway"), false);
   });
 
   await check("episode board: explicit Auctra sync, then rails built from live Auctra + Scaena reads", async () => {

@@ -1,6 +1,7 @@
 import type { ProviderOwner, ScopeBinding } from "./contracts";
 import type { OwnerObservation, OwnerObservationResult, ProviderRunManager } from "./provider-live";
 import type { ToolCatalogStore } from "./db/tool-catalog-store";
+import type { OpenToolResult, OpenToolService } from "./open-tools/service";
 import { digestOf } from "./tool-catalog-normalize";
 import {
   toolCatalogSchemaVersion,
@@ -32,11 +33,13 @@ const entryDigests = (observation: OwnerObservation): Record<CatalogEntryKind, {
 
 /** Read-only cross-owner catalog; presence in the catalog never implies the Control Center may call an entry. */
 export class ToolCatalogService {
-  constructor(private readonly providers: ProviderRunManager, private readonly store: ToolCatalogStore) {}
+  constructor(private readonly providers: ProviderRunManager, private readonly store: ToolCatalogStore, private readonly openTools?: OpenToolService) {}
 
-  async snapshot(scope: ScopeBinding, options: { refresh?: boolean } = {}): Promise<ToolCatalog> {
+  /** `openTools`: whether this session may see open tools read with the server's credential (personal sessions). */
+  async snapshot(scope: ScopeBinding, options: { refresh?: boolean; openTools?: boolean } = {}): Promise<ToolCatalog> {
     const bound = providerOwners.filter((owner) => scope.owners[owner]);
-    const results = await Promise.all(bound.map(async (owner) => [owner, await this.providers.observeOwner(owner, { force: options.refresh })] as const));
+    const gatewayRead = options.openTools && this.openTools?.inScope(scope).includes("gateway") ? this.openTools.observe("gateway", { force: options.refresh }) : Promise.resolve(null);
+    const [results, gateway] = await Promise.all([Promise.all(bound.map(async (owner) => [owner, await this.providers.observeOwner(owner, { force: options.refresh })] as const)), gatewayRead]);
     const catalog: ToolCatalog = {
       schema_version: toolCatalogSchemaVersion,
       scope: scope.id,
@@ -54,7 +57,14 @@ export class ToolCatalogService {
         catalog.refresh.throttled ||= result.throttled;
       }
     }
+    if (gateway) {
+      this.addGateway(catalog, scope, gateway);
+      freshness.push(gateway.freshness);
+      catalog.refresh.forced ||= gateway.forced;
+      catalog.refresh.throttled ||= gateway.throttled;
+    }
     for (const pending of pendingOwners) {
+      if (pending.owner === "gateway" && gateway) continue;
       catalog.servers.push(this.server(pending.owner, pending.transport, "needs_contract", pending.reason, null, "unknown"));
       catalog.coverage.push({ owner: pending.owner, state: "needs_contract", reason: pending.reason, observed_at: null, freshness: "unknown" });
     }
@@ -93,6 +103,24 @@ export class ToolCatalogService {
     if (result.freshness !== "fresh") return;
     const digests = entryDigests(observation);
     for (const kind of new Set(observation.complete_kinds)) this.store.record(scope.id, owner, kind, digests[kind], observation.observed_at);
+  }
+
+  /** The Gateway lists the tools of every backend it fronts; the catalog shows them, never calls them. */
+  private addGateway(catalog: ToolCatalog, scope: ScopeBinding, result: OpenToolResult) {
+    const { projection, tools } = result.observation;
+    const toolsCheck = projection.checks.find((check) => check.id === "tools");
+    const state: CatalogCoverage["state"] = projection.state === "ready" ? "readable"
+      : projection.state === "degraded" ? "partial"
+        : projection.state === "forbidden" ? "forbidden" : projection.state === "needs_contract" ? "needs_contract" : "unavailable";
+    const reason = toolsCheck && toolsCheck.state !== "ok" ? toolsCheck.reason || projection.reason || null : projection.state === "ready" ? null : projection.reason || null;
+    catalog.coverage.push({ owner: "gateway", state, reason, observed_at: projection.observed_at, freshness: result.freshness });
+    const server = this.server("gateway", "http", state, reason, projection.observed_at, result.freshness);
+    server.server_version = projection.facts.find((fact) => fact.label === "版本")?.value || null;
+    server.counts.tools = tools?.length || 0;
+    catalog.servers.push(server);
+    if (tools) catalog.tools.push(...tools);
+    if (result.freshness !== "fresh" || !tools || toolsCheck?.state !== "ok") return;
+    this.store.record(scope.id, "gateway", "tool", tools.map((tool) => ({ id: tool.id, digest: digestOf({ input: tool.input.digest, annotations: tool.annotations, title: tool.title, description: tool.description }) })), projection.observed_at);
   }
 
   private server(owner: CatalogOwner, transport: CatalogServer["transport"], coverage: CatalogServer["coverage"], reason: string | null, observedAt: string | null, freshness: CatalogFreshness): CatalogServer {

@@ -2,12 +2,16 @@ import { CircleAlert, CircleDashed, CheckCircle2, Clock3, Network, RefreshCw } f
 import type { TaskConnectionState } from "../task-observation";
 import type { ServiceDirectoryEntry } from "../service-directory";
 import { formatRelative } from "../shared/read-model/format";
+import { reasonLabel } from "../shared/read-model/labels";
 import { readErrorMessage, type ReadStatus } from "../shared/read-model/read-state";
 import { Button, Pill, Tooltip, cx, type Tone } from "./ui";
 
 type SourceState = "ready" | "partial" | "unavailable" | "forbidden" | "stale" | "needs_contract" | "not_observed";
 const sourceOwners = ["aigora", "scaena", "eikona", "sonora"] as const;
-const sourceLabels: Record<typeof sourceOwners[number], string> = { aigora: "Aigora", scaena: "Scaena", eikona: "Eikona", sonora: "Sonora" };
+const sourceLabels: Record<string, string> = { aigora: "Aigora", scaena: "Scaena", eikona: "Eikona", sonora: "Sonora", anatomia: "Anatomia", drivebridge: "DriveBridge", gateway: "MCP Gateway" };
+/** Shown only once configured, so a tool someone does not use never reads as a gap. */
+const optionalSources = ["anatomia", "drivebridge", "gateway"];
+const openToolStates = { ready: "ready", degraded: "partial", unavailable: "unavailable", rate_limited: "unavailable", forbidden: "forbidden", needs_contract: "needs_contract" } as const;
 const stateMeta: Record<SourceState, { label: string; tone: Tone }> = {
   ready: { label: "可读", tone: "success" },
   partial: { label: "部分可读", tone: "warning" },
@@ -24,6 +28,8 @@ function statusFor(service: ServiceDirectoryEntry | undefined, connections: Task
   if (readStatus === "stale") return "stale" as const;
   if (readStatus === "needs_contract") return "needs_contract" as const;
   if (readStatus === "loading") return "not_observed" as const;
+  // Open tools have no task connections; their own reading decides.
+  if (service?.open_tool) return service.open_tool.freshness === "stale" ? "stale" as const : openToolStates[service.open_tool.state];
   const states = [
     ...(service?.connections || []).map((connection) => connection.runtime?.state),
     ...connections.filter((connection) => connection.owner === service?.id).map((connection) => connection.state),
@@ -51,18 +57,18 @@ export function SourceCoverage({ services, connections = [], readStatus = "ready
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
       <h2 className="shrink-0 text-body-sm font-semibold text-ink">来源覆盖<span className="ml-2 text-2xs font-normal text-muted">只读观察</span></h2>
       <ul className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        {sourceOwners.map((owner) => {
+        {[...sourceOwners, ...services.filter((service) => optionalSources.includes(service.id) && service.configuration === "configured").map((service) => service.id)].map((owner) => {
           const service = services.find((item) => item.id === owner);
           const state = statusFor(service, connections, readStatus);
           const meta = stateMeta[state];
           const observedAt = service?.observed_at || service?.coverage?.observed_at || service?.connections.find((connection) => connection.runtime)?.runtime?.checked_at;
-          const explicitReason = service?.connections.find((connection) => connection.runtime?.reason)?.runtime?.reason;
+          const explicitReason = service?.open_tool ? (service.open_tool.state === "ready" ? undefined : reasonLabel(service.open_tool.reason) || undefined) : service?.connections.find((connection) => connection.runtime?.reason)?.runtime?.reason;
           const reason = explicitReason || (state === "ready" ? undefined : service?.gap);
           const detail = reason || (state === "ready" ? "owner 返回了当前范围的只读观察。" : "没有用本地任务或演示数据补齐来源状态。");
           return <li key={owner}>
             <Tooltip content={<><span className="block">{detail}</span><span className="mt-0.5 block opacity-75">{observedAt ? `观察于 ${formatRelative(observedAt)}` : "观察时间未提供"}</span></>}>
               <span tabIndex={0} className="inline-flex rounded-chip outline-none focus-visible:ring-2 focus-visible:ring-focus">
-                <Pill tone={meta.tone} icon={statusIcon(state)}><span className="font-semibold">{sourceLabels[owner]}</span><span className="font-normal"> · {meta.label}</span></Pill>
+                <Pill tone={meta.tone} icon={statusIcon(state)}><span className="font-semibold">{sourceLabels[owner] || owner}</span><span className="font-normal"> · {meta.label}</span></Pill>
               </span>
             </Tooltip>
           </li>;

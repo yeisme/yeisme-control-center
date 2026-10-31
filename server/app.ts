@@ -34,6 +34,7 @@ import { GenerationBatches, parseBatchQuery } from "./generation-batches";
 import { CollaborationService, identityOf } from "./collaboration";
 import { isCollaborationAction, type DirectoryQuery, type GenerationBatch } from "../src/shared/collaboration";
 import { buildWorkQueue, filterAndPageWorkQueue } from "./work-queue";
+import { OpenToolService } from "./open-tools/service";
 import { workQueueKinds } from "../src/shared/work-queue";
 import { DramaService, dramaLimits, validDramaRef } from "./drama";
 import { collectionSyncLimits, syncCollection } from "./auctra-sync";
@@ -120,6 +121,7 @@ export function createApp(
     providers?: ProviderRunManager;
     auctra?: AuctraCollectionReader;
     scaenaStoryboard?: ScaenaStoryboardReader;
+    openTools?: OpenToolService;
     db?: ControlDB;
   } = {},
 ) {
@@ -141,7 +143,8 @@ export function createApp(
     projectMetadata = new ProjectMetadataStore(db),
     audit = new AuditStore(db),
     notifications = new NotificationStore(db),
-    catalog = new ToolCatalogService(providers, new ToolCatalogStore(db)),
+    openTools = deps.openTools || new OpenToolService(config),
+    catalog = new ToolCatalogService(providers, new ToolCatalogStore(db), openTools),
     media = new MediaBridge(tasks, undefined, audit),
     actions = new ActionService(db),
     collaboration = new CollaborationService(db, config, auth, connectionCatalog),
@@ -966,14 +969,16 @@ export function createApp(
         audit.record({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.receipt_read", targetRef: receipt.receipt_ref, meta: { action: receipt.action } }, "succeeded");
         return json(withEpoch(session, receipt));
       }
-      if (r.method === "GET" && path === "/services")
-        return json(withEpoch(session, serviceDirectory(config, scope, session,
-          session.personal && url.searchParams.get("observe") === "1" ? await tasks.observe(scope) : [], connectionCatalog.inScope(scope))));
+      if (r.method === "GET" && path === "/services") {
+        const observe = session.personal && url.searchParams.get("observe") === "1";
+        const [observations, projections] = await Promise.all([observe ? tasks.observe(scope) : [], observe ? openTools.projections(scope) : []]);
+        return json(withEpoch(session, serviceDirectory(config, scope, session, observations, connectionCatalog.inScope(scope), { configured: openTools.inScope(scope), projections })));
+      }
       if (r.method === "GET" && path === "/capabilities")
         return json(withEpoch(session, { scope: scope.id, capabilities: await providers.capabilities(scope) }));
       if (path === "/tool-catalog") {
         if (r.method !== "GET") return methodNotAllowed(["GET"]);
-        return json(withEpoch(session, await catalog.snapshot(scope, { refresh: url.searchParams.get("refresh") === "1" })));
+        return json(withEpoch(session, await catalog.snapshot(scope, { refresh: url.searchParams.get("refresh") === "1", openTools: !!session.personal })));
       }
       if (r.method === "GET" && path === "/usage")
         return json(withEpoch(session, {
@@ -1125,11 +1130,12 @@ export function createApp(
         const cursorState = cursor(url.searchParams.get("cursor"), fp);
         const offset = cursorState.offset ? Number(cursorState.offset) : 0;
         if (!Number.isInteger(offset) || offset < 0) throw new AuthError("cursor_invalid", 400);
-        const [active, history, observed, creativeFlow] = await Promise.all([
+        const [active, history, observed, creativeFlow, openToolProjections] = await Promise.all([
           session.personal ? tasks.list(scope, "active") : Promise.resolve({ rows: [], connections: [], next_cursors: {} }),
           session.personal ? tasks.list(scope, "history") : Promise.resolve({ rows: [], connections: [], next_cursors: {} }),
           session.personal ? tasks.observe(scope) : Promise.resolve([]),
           drama.attentionFlows(scope, session),
+          session.personal ? openTools.projections(scope) : Promise.resolve([]),
         ]);
         const taskRows = [...active.rows, ...history.rows].filter((task, index, rows) => rows.findIndex((candidate) => candidate.task_key === task.task_key) === index);
         const connections = observed.length ? observed : [...active.connections, ...history.connections].filter((connection, index, rows) => rows.findIndex((candidate) => candidate.id === connection.id) === index);
@@ -1141,6 +1147,7 @@ export function createApp(
           notifications: notifications.list(scope.id, session.id, subject),
           creativeFlows: creativeFlow.flows,
           flowSample: { checked: creativeFlow.checked, total: creativeFlow.total },
+          openTools: openToolProjections,
           clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin },
         });
         const page = filterAndPageWorkQueue(full, filters, offset, limitRaw) as typeof full & { next_offset?: number };

@@ -6,7 +6,7 @@ export type CatalogTab = (typeof catalogTabs)[number];
 export const parseCatalogTab = (value: string | null): CatalogTab => (catalogTabs as readonly string[]).includes(value || "") ? value as CatalogTab : "overview";
 
 export type OwnerFilter = "all" | CatalogOwner;
-export const parseOwnerFilter = (value: string | null): OwnerFilter => (["eikona", "scaena", "sonora"] as const).includes(value as "eikona") ? value as CatalogOwner : "all";
+export const parseOwnerFilter = (value: string | null): OwnerFilter => (["eikona", "scaena", "sonora", "gateway"] as const).includes(value as "eikona") ? value as CatalogOwner : "all";
 
 export type CatalogEntry =
   | { kind: "server"; value: CatalogServer }

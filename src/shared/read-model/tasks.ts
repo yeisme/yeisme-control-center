@@ -3,7 +3,8 @@ import { taskIsActive, taskNeedsAttention, taskStageLabels } from "../../task-ob
 import { kindOf, type MediaKind } from "../../components/ui/Kind";
 import { formatBytes, formatDurationMs } from "./format";
 
-export const ownerModality: Record<string, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio" };
+// Anatomia analyses videos; its results are still frames, which their own mime type marks as images.
+export const ownerModality: Record<string, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio", anatomia: "video" };
 
 export function taskKind(task: TaskSnapshot): MediaKind {
   const first = task.results.find((result) => result.mime);

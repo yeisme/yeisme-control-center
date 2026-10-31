@@ -59,8 +59,9 @@ function checkedURL(value: string, code: string) {
     throw new AuthError(code, 403);
   }
 }
-export function connectionURL(c: TaskConnection) {
-  const u = checkedURL(c.endpoint, "connection_endpoint_denied");
+/** An owner address from server config: https, or http only to a private IP when the config allows it. */
+export function endpointURL(endpoint: string, allowPrivateHttp: boolean | undefined, code = "connection_endpoint_denied") {
+  const u = checkedURL(endpoint, code);
   const host = u.hostname.replace(/^\[|\]$/g, "");
   const privateIP =
     host === "::1" ||
@@ -73,10 +74,13 @@ export function connectionURL(c: TaskConnection) {
     u.hash ||
     u.search ||
     !["https:", "http:"].includes(u.protocol) ||
-    (u.protocol === "http:" && !(c.allow_private_http && privateIP))
+    (u.protocol === "http:" && !(allowPrivateHttp && privateIP))
   )
-    throw new AuthError("connection_endpoint_denied", 403);
+    throw new AuthError(code, 403);
   return u;
+}
+export function connectionURL(c: TaskConnection) {
+  return endpointURL(c.endpoint, c.allow_private_http);
 }
 const safeText = (v: unknown, max = 300) =>
   typeof v === "string" ? v.slice(0, max) : "";
@@ -854,7 +858,7 @@ export class TaskConnections {
     }
     const allowed = task.allowed_actions.find((item) => item.action === (action === "thumbnail" ? "preview" : action));
     if (allowed && !allowed.enabled && allowed.reason !== "owner_result_access_requested") throw new AuthError(allowed.reason || "content_not_authorized", 403);
-    if (c.owner === "sonora" || c.owner === "scaena") {
+    if (c.owner === "sonora" || c.owner === "scaena" || c.owner === "anatomia") {
       const grant = await this.call(c, "control_center.tasks.artifact_access", {
         task_ref: task.locator.task_ref,
         task_family: task.locator.task_family,
@@ -880,6 +884,10 @@ export class TaskConnections {
           [...url.searchParams.keys()].join(",") !== "t" ||
           !/^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("t") || "")
         )
+          throw new AuthError("media_address_denied", 403);
+      } else if (c.owner === "anatomia") {
+        // Anatomia's grant is a bare path bound to the observer key; the key goes with the request, nothing in the query.
+        if (!/^\/api\/v1\/control-center\/artifact-grants\/[a-f0-9]{32}$/.test(url.pathname) || url.search)
           throw new AuthError("media_address_denied", 403);
       } else {
         const parts = url.pathname.split("/").map(decodeURIComponent);

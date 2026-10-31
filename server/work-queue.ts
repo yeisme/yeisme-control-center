@@ -17,6 +17,7 @@ import { priorityForWorkItem, sortWorkQueueItems, summarizeWorkQueue } from "../
 import { dramaStageLabels } from "../src/shared/read-model/drama";
 import type { CoverageState } from "../src/request-visibility";
 import type { CreativeFlowProjection, CreativeFlowStageProjection } from "../src/shared/creative-flow";
+import type { OpenToolProjection } from "../src/shared/open-tools";
 
 const staleAfterMs = 5 * 60 * 1000;
 const text = (value: unknown, max = 512) => typeof value === "string" ? value.slice(0, max) : "";
@@ -221,6 +222,73 @@ function itemFromConnection(connection: TaskConnectionState, scopeId: string): W
   };
 }
 
+/** At most this many failed runs per open tool reach the queue; the services page lists the rest. */
+const openToolRunLimit = 10;
+const openToolTitles: Record<string, string> = { forbidden: "拒绝了读取", needs_contract: "缺少要读的接口", rate_limited: "暂时限流", unavailable: "暂时读不到" };
+
+/**
+ * An open tool adds one item when it cannot be read, one per backend it reports down, and one per run that failed or
+ * ended unknown in the last 7 days. Open tools have no projects of their own; items carry the scope's project.
+ */
+function itemsFromOpenTool(tool: OpenToolProjection, scope: ScopeBinding): WorkQueueItem[] {
+  const items: WorkQueueItem[] = [];
+  const base = { owner: tool.tool, project: scope.project, scope_id: scope.id, revision: "", allowed_actions: [], preview_state: "not_applicable" as const, safe_links: [controlLink("查看服务与连接", "services", tool.tool)] };
+  if (tool.state !== "ready" && tool.state !== "degraded") {
+    const kind: WorkQueueKind = tool.state === "needs_contract" ? "contract_gap" : "service_blocked";
+    const observedAt = validTime(tool.observed_at);
+    items.push({
+      ...base,
+      work_ref: opaqueRef({ kind, owner: tool.tool, ref: `${scope.id}:${tool.tool}` }),
+      kind,
+      title: `${tool.label} ${openToolTitles[tool.state] || openToolTitles.unavailable}`,
+      state: tool.state,
+      native_state: tool.state,
+      priority: priorityForWorkItem(kind, tool.state, tool.coverage.state),
+      attention_reason: tool.reason || tool.state,
+      observed_at: observedAt,
+      freshness: tool.freshness === "stale" ? "stale" : freshness(observedAt),
+      coverage: tool.coverage.state,
+      source_ref: tool.tool,
+    });
+  }
+  for (const backend of (tool.backends || []).filter((candidate) => candidate.enabled && candidate.state === "down").slice(0, 5)) {
+    const observedAt = validTime(backend.checked_at || tool.observed_at);
+    items.push({
+      ...base,
+      work_ref: opaqueRef({ kind: "service_blocked", owner: tool.tool, ref: `${scope.id}:${tool.tool}:${backend.id}` }),
+      kind: "service_blocked",
+      title: `${tool.label} 后端 ${backend.id} 不可用`,
+      state: "unavailable",
+      native_state: backend.native_state,
+      priority: priorityForWorkItem("service_blocked", "unavailable", "unavailable"),
+      attention_reason: "open_tool_backend_down",
+      observed_at: observedAt,
+      freshness: freshness(observedAt),
+      coverage: "unavailable",
+      source_ref: `${tool.tool}:${backend.id}`,
+    });
+  }
+  for (const run of tool.operations.attention.slice(0, openToolRunLimit)) {
+    const observedAt = validTime(run.updated_at);
+    items.push({
+      ...base,
+      work_ref: opaqueRef({ kind: "operation_failure", owner: tool.tool, ref: run.ref }),
+      kind: "operation_failure",
+      title: `${tool.label} ${run.label}${run.state === "unknown" ? "结果未知" : "失败"}`,
+      state: run.state,
+      native_state: run.native_state,
+      priority: priorityForWorkItem("operation_failure", run.state, "complete"),
+      attention_reason: run.error_code || run.native_state,
+      observed_at: observedAt,
+      freshness: tool.freshness === "stale" ? "stale" : "fresh",
+      coverage: tool.operations.coverage,
+      source_ref: run.ref,
+      operation_ref: run.ref,
+    });
+  }
+  return items;
+}
+
 function sourceCoverage(owner: WorkQueueOwner, state: CoverageState, observedAt: string, reason?: string) {
   return { owner, state, observed_at: observedAt, ...(reason ? { reason } : {}) };
 }
@@ -236,6 +304,8 @@ export interface WorkQueueInput {
   creativeFlows?: CreativeFlowProjection[];
   /** The queue reads only the most recently updated episodes; the response must say so instead of claiming full coverage. */
   flowSample?: { checked: number; total: number };
+  /** Open tools in scope (DriveBridge, MCP Gateway), read by the server. */
+  openTools?: OpenToolProjection[];
   clientOrigins?: { muweave?: string };
 }
 
@@ -364,6 +434,7 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     const item = itemFromConnection(connection, input.scope.id);
     if (item) items.push(item);
   }
+  for (const tool of input.openTools || []) items.push(...itemsFromOpenTool(tool, input.scope));
   const flows = [...(input.creativeFlows || []), ...(input.creativeFlow ? [input.creativeFlow] : [])];
   const flowKeys = new Set<string>();
   let gapEmitted = false;
@@ -452,6 +523,7 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     for (const source of flow.source_coverage) mergeSource(source.owner, { state: source.state, observed_at: source.observed_at, ...(source.reason ? { reason: source.reason } : {}) });
     for (const stage of flow.stages) mergeSource(stage.owner, { state: stage.coverage, observed_at: stage.observed_at, ...(stage.blockers[0] ? { reason: stage.blockers[0] } : {}) });
   }
+  for (const tool of input.openTools || []) mergeSource(tool.tool, { state: tool.freshness === "stale" ? "expired" : tool.coverage.state, observed_at: validTime(tool.observed_at), ...(tool.reason ? { reason: tool.reason } : {}) });
   if (input.flowSample && input.flowSample.total > input.flowSample.checked) mergeSource("auctra", { state: "partial", observed_at: new Date(now).toISOString(), reason: "episodes_sampled" });
   const sorted = sortWorkQueueItems(items);
   const observedAt = new Date(now).toISOString();

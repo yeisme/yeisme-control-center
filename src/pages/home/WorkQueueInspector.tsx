@@ -35,6 +35,7 @@ export const workQueueKindLabels: Record<WorkQueueKind, string> = {
   handoff_ready: "可交接",
   service_blocked: "来源受阻",
   contract_gap: "合同缺口",
+  operation_failure: "运行失败",
 };
 export const workQueuePriorityLabels: Record<WorkQueuePriority, string> = { critical: "紧急", high: "较高", normal: "普通", low: "较低" };
 export const workQueuePriorityTone: Record<WorkQueuePriority, Tone> = { critical: "danger", high: "warning", normal: "neutral", low: "neutral" };

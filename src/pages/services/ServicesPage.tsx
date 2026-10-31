@@ -13,12 +13,13 @@ import { connectionStateLabel, connectionTone } from "../../shared/read-model/ta
 import { taskStateLabels } from "../../task-observation";
 import { createIdempotencyKey, runAction } from "../../shared/action-runner";
 import { blockerLabel, collectionSyncMessage, universeGapText } from "../../shared/read-model/drama";
+import { OpenToolCard } from "./OpenToolCard";
 
 type Filter = "all" | "integrated" | "configured" | "gaps";
 
 const kindLabels: Record<string, string> = { service: "服务", local_tool: "本地工具", workspace: "工作区", design: "设计原型" };
 const kindIcons: Record<string, ReactNode> = { service: <Server />, local_tool: <Terminal />, workspace: <LayoutGrid />, design: <Palette /> };
-const integrationLabels: Record<string, string> = { task_observation: "任务观测", request_projection: "请求投影", collection_projection: "收集投影", not_integrated: "未接入" };
+const integrationLabels: Record<string, string> = { task_observation: "任务观测", request_projection: "请求投影", collection_projection: "收集投影", operation_projection: "运行投影", not_integrated: "未接入" };
 const configurationLabels: Record<string, { label: string; tone: Tone }> = {
   configured: { label: "已配置", tone: "success" },
   not_configured: { label: "未配置", tone: "neutral" },
@@ -44,6 +45,7 @@ export default function ServicesPage() {
   const integrated = services.filter((service) => service.integration !== "not_integrated");
   const connections = integrated.flatMap((service) => service.connections.map((connection) => ({ service, connection })));
   const readyCount = connections.filter(({ connection }) => connection.runtime?.state === "ready").length;
+  const openTools = services.flatMap((service) => service.open_tool ? [{ service, tool: service.open_tool }] : []);
 
   const visible = useMemo(() => services.filter((service) => {
     if (filter === "integrated" && service.integration === "not_integrated") return false;
@@ -101,6 +103,13 @@ export default function ServicesPage() {
           ]} />)}
         </div> : <Panel><EmptyState icon={<Plug />} title="当前范围没有任务连接" body="管理员需要在服务端配置 owner 观测连接；页面不会接受浏览器提交的地址。" /></Panel>}
       </section>
+
+      {openTools.length > 0 && <section aria-label="开放工具" className="space-y-3">
+        <h2 className="text-title-sm font-semibold text-ink">开放工具<span className="ml-2 text-2xs font-normal text-muted tabular">{openTools.length} 个</span></h2>
+        <div className="grid gap-3 md:grid-cols-2">
+          {openTools.map(({ service, tool }) => <OpenToolCard key={service.id} name={service.name} purpose={service.purpose} tool={tool} onQueue={() => navigate("/")} onCatalog={tool.tool === "gateway" ? () => navigate("/capabilities?tab=tools&owner=gateway") : undefined} />)}
+        </div>
+      </section>}
 
       {services.some((service) => service.id === "auctra") && <AuctraCollectionPanel />}
 

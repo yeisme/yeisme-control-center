@@ -1,4 +1,5 @@
 import type { ConnectionObservation } from "./task-observation";
+import type { OpenToolProjection } from "./shared/open-tools";
 // Product metadata only. Registration is not proof of deployment or authorization.
 export type ServiceKind = "service" | "local_tool" | "workspace" | "design";
 export interface ServiceDefinition {
@@ -7,7 +8,7 @@ export interface ServiceDefinition {
   kind: ServiceKind;
   owner_path: string;
   purpose: string;
-  integration: "task_observation" | "request_projection" | "collection_projection" | "not_integrated";
+  integration: "task_observation" | "request_projection" | "collection_projection" | "operation_projection" | "not_integrated";
   gap: string;
 }
 export interface ServiceConnectionProjection {
@@ -34,6 +35,8 @@ export interface ServiceDirectoryEntry extends ServiceDefinition {
     state: "complete" | "partial" | "needs_contract" | "not_recorded" | "unavailable" | "forbidden" | "stale";
     observed_at?: string;
   };
+  /** Open tools only: the live reading of health, runs, backends and usage. */
+  open_tool?: OpenToolProjection;
 }
 export interface ServiceDirectory {
   schema_version: "yeisme.service_directory.v1";
@@ -61,11 +64,11 @@ export const serviceDefinitions: readonly ServiceDefinition[] = [
   { id: "scaena", name: "Scaena", kind: "service", owner_path: "agent/scaena", purpose: "视频与制作任务、结果和交接", integration: "task_observation", gap: "需独立项目观测授权；媒体与有限取消另外授权。" },
   { id: "eikona", name: "Eikona", kind: "service", owner_path: "cli/eikona", purpose: "图像任务、视觉结果与审阅引用", integration: "task_observation", gap: "需独立项目观测授权；媒体与有限取消另外授权。" },
   { id: "sonora", name: "Sonora", kind: "service", owner_path: "cli/sonora", purpose: "声音任务、音频结果与权利引用", integration: "task_observation", gap: "需独立项目观测授权；媒体与有限取消另外授权。" },
-  { id: "gateway", name: "个人 MCP Gateway", kind: "service", owner_path: "mcp/gateway", purpose: "个人工具目录、连接与调用事实", integration: "not_integrated", gap: "尚无控制中心适配；不复用 Agent 管理凭据。" },
+  { id: "gateway", name: "个人 MCP Gateway", kind: "service", owner_path: "mcp/gateway", purpose: "个人工具目录、后端健康、调用与用量", integration: "operation_projection", gap: "需 Gateway 签发的只读令牌；只读工具目录、后端和用量，不调用工具，不复用 Agent 管理凭据。" },
   { id: "aigora", name: "Aigora", kind: "service", owner_path: "apigateway/aigora", purpose: "企业网关请求、调查与用量引用", integration: "request_projection", gap: "需独立 OIDC 用户委托；不与个人网关合并权限。" },
-  { id: "drivebridge", name: "DriveBridge", kind: "service", owner_path: "cli/drivebridge", purpose: "文件空间、传输与交付引用", integration: "not_integrated", gap: "控制中心传输、容量和授权投影尚未接入。" },
+  { id: "drivebridge", name: "DriveBridge", kind: "service", owner_path: "cli/drivebridge", purpose: "文件传输运行、进度与失败", integration: "operation_projection", gap: "需空间级只读 Agent 令牌（最长 30 天，到期前续期）；只读健康、能力和运行记录，不读文件内容和路径。" },
   { id: "auctra", name: "Auctra", kind: "service", owner_path: "cli/auctra", purpose: "文本创作记录、候选、审阅、版本与运行证据收集", integration: "collection_projection", gap: "需要服务端 collection binding；只收集 refs、状态、摘要和时间，不保存正文。" },
-  { id: "anatomia", name: "Anatomia", kind: "service", owner_path: "agent/anatomia", purpose: "拉片进度、证据覆盖与快照", integration: "not_integrated", gap: "任务和诊断投影尚未接入。" },
+  { id: "anatomia", name: "Anatomia", kind: "service", owner_path: "agent/anatomia", purpose: "拉片进度、证据覆盖与快照", integration: "task_observation", gap: "需 Anatomia 签发绑定项目的观察密钥（observer.read），预览关键帧另需 observer.content；服务要开启任务观测。只列出带项目的分析，不支持取消。" },
   { id: "pinax", name: "Pinax", kind: "local_tool", owner_path: "cli/pinax", purpose: "笔记库、索引状态与知识引用", integration: "not_integrated", gap: "远程管理 backing 未确认；不读取私有 vault。" },
   { id: "capsa", name: "Capsa", kind: "service", owner_path: "backend-server/capsa", purpose: "设备、同步积压与冲突摘要", integration: "not_integrated", gap: "只读摘要待适配；不解密用户内容。" },
   { id: "manju", name: "Manju", kind: "service", owner_path: "backend-server/manju", purpose: "项目知识与证据检索", integration: "not_integrated", gap: "当前部署及公开观测合同待核验。" },

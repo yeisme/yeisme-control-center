@@ -8,13 +8,14 @@ export const workQueueKinds = [
   "handoff_ready",
   "service_blocked",
   "contract_gap",
+  "operation_failure",
 ] as const;
 export type WorkQueueKind = (typeof workQueueKinds)[number];
 
 export const workQueuePriorities = ["critical", "high", "normal", "low"] as const;
 export type WorkQueuePriority = (typeof workQueuePriorities)[number];
 
-export type WorkQueueOwner = "aigora" | "eikona" | "sonora" | "scaena" | "auctra" | "muweave" | "control-center";
+export type WorkQueueOwner = "aigora" | "eikona" | "sonora" | "scaena" | "anatomia" | "auctra" | "muweave" | "drivebridge" | "gateway" | "control-center";
 export type WorkQueuePreviewState = "available" | "needs_contract" | "forbidden" | "unavailable" | "not_applicable";
 
 export interface WorkQueueLaunchContext {

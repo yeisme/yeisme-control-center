@@ -234,6 +234,43 @@ try {
     await page.getByRole("heading", { name: "服务目录" }).waitFor();
     await shot(page, "services");
   });
+  await check("Anatomia breakdowns show as tasks with stages, frames and an unknown answer on the workbench", async () => {
+    await page.goto(`${ui}/#/tasks?owner=anatomia`, { waitUntil: "domcontentloaded" });
+    const main = page.locator("#main");
+    await main.getByText("拉片分析：重逢-粗剪-v3.mp4").first().waitFor({ timeout: 20_000 });
+    await main.getByText("视频问答：参考片-雨夜.mp4").first().waitFor();
+    if (await main.getByText("旧车站 · 重逢镜头关键帧").count()) throw new Error("anatomia_filter_kept_other_owners");
+    const text = await main.innerText();
+    if (!text.includes("拉片分析") || /breakdown|拆解/.test(text)) throw new Error("anatomia_family_words");
+    await shot(page, "tasks-anatomia");
+    await page.goto(`${ui}/#/services`, { waitUntil: "domcontentloaded" });
+    const card = page.locator('[data-connection="fx-anatomia"]');
+    await card.waitFor({ timeout: 20_000 });
+    await card.getByText("可读").first().waitFor({ timeout: 20_000 });
+    await page.locator('[data-connection="fx-anatomia-denied"]').getByText("需要 owner 授权").first().waitFor({ timeout: 20_000 });
+    await page.goto(`${ui}/#/`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("region", { name: "来源覆盖" }).getByText("Anatomia").waitFor({ timeout: 20_000 });
+  });
+  await check("services and the workbench show open tools without paths or owner text", async () => {
+    await page.goto(`${ui}/#/services`, { waitUntil: "domcontentloaded" });
+    const tools = page.getByRole("region", { name: "开放工具" });
+    const drive = tools.locator('[data-open-tool="drivebridge"]');
+    await drive.getByText("运行：进行中 1 · 失败 2 · 结果未知 0", { exact: false }).waitFor({ timeout: 20_000 });
+    const gateway = tools.locator('[data-open-tool="gateway"]');
+    await gateway.getByText("后端 2/2 可用 · 停用 1").waitFor();
+    await gateway.getByText("近 7 天调用 1,204 次", { exact: false }).waitFor();
+    const text = await page.locator('[data-page="services"]').innerText();
+    for (const leaked of ["/fixture/", "permission denied", "fixture.invalid", "SONORA_FIXTURE_TOKEN", "upstream 502", "backend-leak.example.test"]) if (text.includes(leaked)) throw new Error(`open_tool_leak:${leaked}`);
+    await shot(page, "services-open-tools");
+    await gateway.getByRole("button", { name: "工具目录" }).click();
+    await page.waitForURL(/#\/capabilities\?tab=tools&owner=gateway/);
+    await page.getByRole("table", { name: "MCP Gateway MCP 工具" }).getByText("eikona_execute").waitFor({ timeout: 20_000 });
+    if (await page.getByRole("table", { name: "Eikona MCP 工具" }).count()) throw new Error("gateway_filter_kept_other_owners");
+    await page.goto(`${ui}/#/`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-open-tool="drivebridge"]').getByText("2 个运行要处理").waitFor({ timeout: 20_000 });
+    await page.locator('[data-open-tool="gateway"]').getByText("1 个运行要处理").waitFor();
+    await page.getByRole("region", { name: "来源覆盖" }).getByText("MCP Gateway").waitFor();
+  });
   await check("guide replaces AI creation, moves between chapters from its top bar and switches commands per tool and client", async () => {
     await page.goto(`${ui}/#/creation`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-page="guide"]').waitFor();
@@ -1558,7 +1595,8 @@ try {
     await degradedPage.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
     await degradedPage.locator("[data-source-status]").click();
     const popover = degradedPage.getByRole("dialog").filter({ hasText: "任务连接" });
-    await popover.getByText("需要 owner 授权").waitFor();
+    // Two connections are refused in this scope (an old Eikona project and an Anatomia key without observer scope).
+    await popover.getByText("需要 owner 授权").first().waitFor();
     await shot(degradedPage, "degraded-source-status");
     await popover.getByRole("button", { name: "查看服务与连接" }).click();
     await degradedPage.locator('[data-page="services"]').waitFor({ timeout: 15_000 });

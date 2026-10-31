@@ -458,6 +458,54 @@ describe("task observation transport", () => {
     );
     expect(() => t.mediaHeaders(key, scope)).toThrow("content_not_authorized");
   });
+  it("reads Anatomia's bare structured content and limits frames to its own bearer-bound grant route", async () => {
+    const connection: TaskConnection = { ...c, owner: "anatomia", allow_content: true, allow_cancel: true };
+    const artifactRef = "artifact:operation:one:frame";
+    const task = {
+      ...row,
+      locator: { ...row.locator, owner: "anatomia", task_family: "decompose", task_ref: "operation:one" },
+      results: [{ ref: artifactRef, name: "frame.png", mime: "image/png", bytes: 63, state: "ready" }],
+      allowed_actions: [{ action: "preview", enabled: true }, { action: "download", enabled: true }],
+    };
+    const goodURL = "http://127.0.0.1:1234/api/v1/control-center/artifact-grants/" + "b".repeat(32);
+    let url = goodURL;
+    let schema = "anatomia.task_artifact_grant.v1";
+    const fetcher = async (_url: unknown, init?: RequestInit) => {
+      const b = JSON.parse(String(init?.body));
+      if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } });
+      expect(b.params.name).toBe("anatomia.execute");
+      const { action, args } = b.params.arguments;
+      expect(args.project_id).toBe("p");
+      // Anatomia answers straight in structuredContent, with no result or data envelope.
+      let answer: unknown = task;
+      if (action.endsWith(".list")) answer = { rows: [task] };
+      if (action === "control_center.tasks.artifact_access") answer = { schema_version: schema, artifact_ref: artifactRef, url, mime: "image/png", bytes: 63, expires_at: new Date(Date.now() + 100_000).toISOString() };
+      return Response.json({ id: b.id, result: { structuredContent: answer } });
+    };
+    const t = new TaskConnections({ ...cfg, connections: [connection] }, fetcher as typeof fetch);
+    const listed = (await t.list(scope, "history")).rows[0];
+    expect(listed.locator).toMatchObject({ owner: "anatomia", task_family: "decompose" });
+    const key = listed.task_key!;
+    expect((await t.artifact(key, scope, artifactRef)).url.href).toBe(goodURL);
+    expect(t.mediaHeaders(key, scope).Authorization).toBe("Bearer test-service-credential");
+    for (const bad of [
+      goodURL + "?download=1",
+      goodURL + "#frame",
+      goodURL.replace("127.0.0.1", "127.0.0.2"),
+      goodURL.replace("artifact-grants", "artifact-access"),
+      goodURL.slice(0, -1),
+      goodURL + "/extra",
+    ]) {
+      url = bad;
+      await expect(t.artifact(key, scope, artifactRef)).rejects.toThrow("media_address_denied");
+    }
+    url = goodURL;
+    schema = "scaena.task_artifact_grant.v1";
+    await expect(t.artifact(key, scope, artifactRef)).rejects.toThrow("media_needs_contract");
+    // Anatomia offers no cancellation, whatever the local preference says.
+    await expect(t.cancel(key, scope, listed.revision || "", "anatomia-cancel-0001")).rejects.toThrow("cancel_not_supported");
+  });
+
   it("binds Scaena grant paths to the exact project, task, artifact and family", async () => {
     const connection: TaskConnection = {
       ...c,

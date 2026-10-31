@@ -29,7 +29,7 @@ type CatalogRead = (ToolCatalog & Epoch) | { route_unavailable: true };
 const inspectorPreferenceKey = "yeisme.control.catalog.inspector-mode";
 const catalogOverlays = ["entry"] as const;
 const ownerKind: Record<CatalogOwner, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio", aigora: "text", gateway: "text", auctra: "text" };
-const ownerOptions: { id: OwnerFilter; label: string }[] = [{ id: "all", label: "全部" }, { id: "eikona", label: "Eikona" }, { id: "scaena", label: "Scaena" }, { id: "sonora", label: "Sonora" }];
+const ownerOptions: { id: OwnerFilter; label: string }[] = [{ id: "all", label: "全部" }, { id: "eikona", label: "Eikona" }, { id: "scaena", label: "Scaena" }, { id: "sonora", label: "Sonora" }, { id: "gateway", label: "MCP Gateway" }];
 const riskOptions: { id: RiskFilter; label: string }[] = [{ id: "all", label: "全部风险" }, { id: "read_only", label: "只读" }, { id: "mutation", label: "写入" }, { id: "paid_external", label: "付费外部" }, { id: "human_gate", label: "人工门" }];
 
 export default function CapabilityHub() {

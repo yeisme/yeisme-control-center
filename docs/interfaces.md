@@ -49,9 +49,32 @@
 
 - 每个 owner 的发现结果缓存 60 秒，`refresh=1` 每 15 秒最多强制刷新一次；
 - 瞬时失败时返回上次成功结果，标为 `stale`；
-- Aigora、MCP Gateway 和 Auctra 在获得只读合同前显示 `needs_contract`。
+- Aigora 和 Auctra 在获得只读合同前显示 `needs_contract`；MCP Gateway 在当前范围配置了开放工具时，换成它 `/v1/tools` 列出的工具（见下节），否则仍是 `needs_contract`。
 
 旧服务端没有该路由时会返回 405 `operation_not_allowed` 且不带允许方法，页面据此降级显示 `/capabilities` 的基础投影。
+
+### 开放工具（yeisme.open_tool_projection.v1）
+
+DriveBridge 与个人 MCP Gateway 不是任务 owner，控制中心只读它们的“运行投影”。配置在 `ServerConfig.open_tools.{drivebridge,gateway}`（`endpoint`、0600 `credential_ref`、`allow_private_http`、`enabled`、`label`），范围用 `ScopeBinding.open_tools` 列出；只对个人会话可见，由 `personal-config open-tool` 写入。
+
+| 工具 | 只调用的 GET | 保留 | 丢弃 |
+| --- | --- | --- | --- |
+| DriveBridge（空间级 Agent 令牌，`read`） | `/healthz`（不带凭据）、`/api/v1/capabilities`、`/api/v1/operations?limit=50` | 接口版本、分块、单文件上限；运行的 id、类型、状态、时间、大小或进度、snake_case 错误码 | 公开地址、路径、文件名、摘要、错误文本 |
+| MCP Gateway（`mcp:tools:read,mcp:audit:read`，必须绑定工作区） | `/readyz`（不带凭据）、`/v1/tenants/current`、`/v1/backends`、`/v1/tools`、`/v1/operations`、`/v1/usage?group_by=backend` | 后端 id、命名空间、启用、状态（就绪由 `/readyz` 决定）、工具数；工具摘要；REST 运行的 id、类型、状态、时间；7 天调用、失败、p95 | 后端地址、`last_error`、缺失的环境变量名、运行结果；不读 `/healthz` 与 `/v1/runtime/state` |
+
+- 每次调用 5 秒超时、拒绝重定向、响应上限 1 MiB；401/403 → 无权限，404/405 → 待补齐接口，429 → 限流，其余 → 不可用，不透传 owner 文本。
+- 缓存：DriveBridge 120 秒（它每次鉴权调用都写审计行），Gateway 60 秒；并发共享；强刷每 15 秒一次；读不到时保留上次读数并标 `stale`，同时写明当前不可用。
+- 出现在：`GET /services?observe=1` 的 `services[].open_tool`；`GET /work-queue` 的 `operation_failure`（近 7 天失败或结果未知，每个工具最多 10 条）与 `service_blocked`（工具读不到、后端不可用）；`GET /tool-catalog` 的 Gateway 工具。
+
+### Anatomia 任务观测
+
+Anatomia 按 `yeisme.task_observation.v1` 接入任务连接（`owner: "anatomia"`），由 Anatomia 侧变更 `anatomia-control-center-task-observation-v1` 提供（开关 `ANATOMIA_TASK_OBSERVATION_ENABLED`，另需 `ANATOMIA_MCP_ENABLED`）。
+
+- 观察密钥：`observer.read`（必须绑定项目），预览关键帧另需 `observer.content`；`anatomia control service-keys create --scope observer.read [--scope observer.content] --project project:<name> --output-file <file> --json`。
+- 回复直接放在 `structuredContent`，没有 `result` / `data` 包装；工具层 `FORBIDDEN` 显示为“需要 owner 授权”。
+- 任务族：`decompose`（拉片分析）、`understand`（视频问答）；只列出带项目的分析，存量没有项目的分析不出现。
+- 媒体：`anatomia.task_artifact_grant.v1`，地址必须同源、恰为 `/api/v1/control-center/artifact-grants/<32 位十六进制>`、无 query 与 fragment、125 秒内过期，取媒体时带同一个观察凭据。
+- 取消：一律 `cancel_not_supported`。
 
 ### Auctra collection owner
 
