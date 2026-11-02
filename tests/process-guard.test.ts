@@ -10,7 +10,7 @@ describe("the unhandled-rejection guard", () => {
     guardRejections({ on: (event: string, handler: (reason: unknown) => void) => { handlers.push([event, handler]); return process; } } as never, (line) => lines.push(line));
     expect(handlers.map(([event]) => event)).toEqual(["unhandledRejection"]);
     const rejected = handlers[0][1];
-    rejected(Object.assign(new Error("open /home/someone/.config/secret-token: denied"), { code: "EACCES" }));
+    rejected(Object.assign(new Error("open /home/a/.config/secret-token: denied"), { code: "EACCES" }));
     rejected(new AuthError("provider_not_configured", 503));
     rejected(new TypeError("Bearer abc.def.ghi"));
     rejected("plain text with a secret");
