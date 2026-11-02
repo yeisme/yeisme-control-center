@@ -39,7 +39,7 @@ bun scripts/run-provider-canary.ts --confirm-live --modality audio --run-label <
 | --- | --- | --- | --- |
 | 渠道与模型 | `eikona://models/readiness` 与 `eikona://channels` 标为可用的模型 | 启用 binding 的 `task_mode` 与渠道（`scaena://video-tasks/guide`） | `sonora://capabilities` 中 `voice.audition` 就绪的 provider 与音色 |
 | 授权 | Eikona provider 连接；owner 凭据只在服务端 | Scaena Provider API key（10-14 曾报 `InvalidApiKey`） | Sonora provider 凭据与条款版本（10-14 曾报 `credential_missing`） |
-| 预算上限（owner 执行） | `max_cost_usd`，等于请求的 USD 上限。Eikona 会静默忽略动作没声明的参数，所以先确认 `generate` 声明了它再提交；每次提交前重新读取一次。没声明时能力显示待接入（`owner_cost_cap_undeclared`），提交返回 `provider_cost_cap_unsupported`；读不到合同时返回 `provider_cost_cap_unverified` | `max_cost_micro_usd`，等于请求的 USD 上限 × 10⁶ | `max_cost_usd`，等于请求的 USD 上限 |
+| 预算上限（owner 执行） | `max_cost_usd`，等于请求的 USD 上限。Eikona 会静默忽略动作没声明的参数，所以先确认 `generate` 声明了它再提交；每次提交前重新读取一次。没声明时能力显示待补齐接口（`owner_cost_cap_undeclared`），提交返回 `provider_cost_cap_unsupported`；读不到合同时返回 `provider_cost_cap_unverified` | `max_cost_micro_usd`，等于请求的 USD 上限 × 10⁶ | `max_cost_usd`，等于请求的 USD 上限 |
 | 已知费用 | owner 估价 | **缺**：等待共享项目的固定视频计划与 known-cost 报价合同（[前端接口补齐](frontend-api-completion.md) A3），之前不准入 | owner 估价 |
 | 原键 | `live-canary-20261014-eikona`（已成功，`waiting_review`） | `live-canary-20261014-scaena`（`rejected_no_generation`） | `live-canary-20261030c-sonora`（2026-10-30 通过） |
 | 交付证据 | 下载结果能解码出图像尺寸 | 下载结果能播放：有时长、编码与分辨率 | 下载结果能解码：有时长与采样率 |
@@ -72,11 +72,11 @@ bun scripts/run-provider-canary.ts --confirm-live --modality audio --run-label <
   - owner 报告实际费用 0 USD；上限 $0.5 由 Sonora 执行。
   - 声音用的是 `sonora://voice/fish-audio/zh-hero`。真实配置里的 `sonora://voice/openai-tts/alloy` 在 Sonora 没有 openai-tts 凭据，用它提交会失败。真实配置要么改用 fish-audio 声音，要么在 Sonora 配上 openai-tts 凭据。
   - 同日经用户要求，真实配置已改用 `sonora://voice/fish-audio/zh-hero`，并重启了服务。改前的配置另存在 `~/.local/state/yeisme-control-center/backups/`。
-- **图像：未准入。**
-  - Eikona 的 MCP `generate` 原来不接收费用上限。
-    - Eikona 已实现 `max_cost_usd`（owner 变更 `eikona-mcp-submit-cost-cap-v1`）：上限只能收紧，估价超过上限或无法换算成 USD 时，在 provider 提交前拒绝。这一版还没部署到 Eikona 服务。
-    - 控制中心这一侧（发送上限；Eikona 没声明时不提交）已实现，未发布。发布后、Eikona 部署前，图像能力显示待接入。
-  - 真实配置里 Eikona provider 钉的项目，与范围绑定的 Eikona 项目不是同一个，请求会被 `provider_project_mismatch` 拒绝。
+- **图像：可以提交，尚未做过真实生图。**
+  - Eikona 的 MCP `generate`、`edit`、`upscale` 已声明 `max_cost_usd`（owner 变更 `eikona-mcp-submit-cost-cap-v1`，2026-11-02 部署到 Eikona 服务）：上限只能收紧，估价超过上限或无法换算成 USD 时，在 provider 提交前拒绝。
+  - 控制中心这一侧（发送上限；Eikona 没声明时不提交）已随 2026-11-02 的发布上线，能力目录里图像能力不再有阻断。
+  - 范围绑定的 Eikona 项目已改成与 Provider 钉的项目一致；之前两者不同，请求会被 `provider_project_mismatch` 拒绝。
+  - `openai/gpt-image-2.5-sunburst` 单张按 Eikona 的美元价目估价约 0.12 USD。第一次真实生图按单次确认执行，预算、模型和提示词先给用户看。
   - 走共享项目批量生成需要 Eikona 委托令牌，即真实组织委托，目前没有。
 - **视频：未准入**，等待 Scaena 的 known-cost 报价合同。
 

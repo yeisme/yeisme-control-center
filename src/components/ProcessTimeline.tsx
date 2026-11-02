@@ -2,7 +2,7 @@ import { Clock3, LoaderCircle, LockKeyhole, Plug, ShieldQuestion } from "../icon
 import type { ProcessCheckpoint, ProcessObservation } from "../observation-contract";
 import { Button, InlineNotice, NoticeStack, Pill, cx } from "./ui";
 import { formatDurationMs, formatFullTime } from "../shared/read-model/format";
-import { reasonLabel } from "../shared/read-model/labels";
+import { needsContractLabel, reasonLabel } from "../shared/read-model/labels";
 import { readErrorMessage } from "../shared/read-model/read-state";
 import { taskStageLabels, taskStateLabels } from "../task-observation";
 import { PromptCaptureSummary, readableReason } from "./PromptCaptureSummary";
@@ -30,7 +30,7 @@ const stateLabels: Record<string, string> = {
   capturing: "采集中",
   redacted: "已脱敏",
   not_recorded: "未记录",
-  needs_contract: "待接入",
+  needs_contract: needsContractLabel,
 };
 
 const humanize = (value: string) => value.replace(/[_-]+/g, " ").trim();

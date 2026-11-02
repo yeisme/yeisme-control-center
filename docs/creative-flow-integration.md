@@ -66,7 +66,7 @@ scope_id + owner + object_kind + source_ref + revision
 - Scaena 读取一页（`limit=3`，每次拆解都带完整场景树，页大小要留出响应上限的余量），按更新时间倒序，第一项是当前拆解；还有更早尝试时标 `truncated`，不降级 coverage。没有 source 的集是“未开始”，拆解引用了 source 而响应缺 `source` 才是合同缺口。
 - 阶段链永远五个节点；缺失阶段由其 owner 的 coverage 解释。Auctra 在阶段全部通过前把流程 coverage 报为 `partial`，读取器把它归一化为数据完整，进度由各阶段的 state 表达。
 - 成本：列表零 owner 调用地列出全集，每次最多实时读取 8 集，有界并发 4；读取按“会话 + epoch + 范围 + 绑定 + 集”缓存 45 秒、在途去重、强制刷新 10 秒限一次。`/work-queue` 读最近更新的 ≤3 集并共用同一缓存。
-- 展示的结构只含场景标题和镜头景别/角度/运镜/时长；`action_summary`、媒体绑定、prompt 和候选正文不进入投影。生成、审阅、交付没有 owner 读取合同，阶段链标“待合同”。
+- 展示的结构只含场景标题和镜头景别/角度/运镜/时长；`action_summary`、媒体绑定、prompt 和候选正文不进入投影。生成、审阅、交付没有 owner 读取合同，阶段链标“待补齐接口”。
 - 拆解基于旧版剧本：Scaena 导入 Auctra 交接时会校验 `source.digest` 等于 Auctra 的 `SourceDigest`，并在 `source.safe_refs` 里带上 Auctra 的交接引用和版本。所以两侧有共同引用而 digest 不同，就说明剧本在拆解之后又改过；此时该拆解标 `screenplay_revision_mismatch`、不算当前，也不再让“可交接”消失。不是从 Auctra 导入的来源没有共同引用，永远不比较。
 - 工作队列的覆盖度：每个 owner 取各集读取里最差的状态；owner 读不到时给出一条“暂时读不到剧集流程”的队列项；只检查了最近更新的 3 集而总数更多时，覆盖度标 `partial`（原因 `episodes_sampled`）。
 
@@ -74,7 +74,7 @@ scope_id + owner + object_kind + source_ref + revision
 
 - 全集只来自已连接范围的 Auctra 收集索引。没连上时页面按原因分别说明：服务端没有 `collection.auctra`（`collection_target_missing`）、范围没有绑定（`collection_binding_missing`）、没有可用密钥（`delegation_unavailable`）。`/drama/episodes` 的 `sources` 同时给出 Auctra 与 Scaena 拆解读取的配置状态，判断不调用 owner。Scaena 拆解读取用服务端 `owners.scaena`，Scaena 任务连接不等于它。
 - 没连上时列表只含三类：最近任务里提到的集（按任务更新时间取最近 12 集，并说明总数）、本标签页打开过的集（最近打开列表里的 `episode` 类，退出登录即清空）、在搜索框输入的完整引用（直接打开）。不再提示用地址栏 `?episode=`。
-- 两个 owner 都没连上时，行内显示中性的“未连接来源”（`read_reason=sources_not_connected`），真实失败优先于它；阶段节点和详情里的来源同样写“未连接”，不写“待合同”。
+- 两个 owner 都没连上时，行内显示中性的“未连接来源”（`read_reason=sources_not_connected`），真实失败优先于它；阶段节点和详情里的来源同样写“未连接”，不写“待补齐接口”。
 
 ### 同步读完所有页
 

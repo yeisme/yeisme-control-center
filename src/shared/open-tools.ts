@@ -1,4 +1,5 @@
 import type { CoverageState } from "../request-visibility";
+import { needsContractLabel } from "./read-model/labels";
 
 /**
  * yeisme.open_tool_projection.v1 — what the control center reads from open tools that are not task owners: the file
@@ -93,7 +94,7 @@ export const openToolStateLabels: Record<OpenToolState, string> = {
   degraded: "部分异常",
   unavailable: "来源不可用",
   forbidden: "无读取权限",
-  needs_contract: "待补齐接口",
+  needs_contract: needsContractLabel,
   rate_limited: "被限流",
 };
 

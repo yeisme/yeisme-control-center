@@ -9,7 +9,7 @@ import { projection, summarizeOperations } from "../server/open-tools/projection
 import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "../server/contracts";
 import type { OpenToolCheck, OpenToolProjection } from "../src/shared/open-tools";
 import type { TaskConnectionState } from "../src/task-observation";
-import { dayMs, type CredentialStatus } from "../src/shared/credentials";
+import { dayMs, isNeverExpires, neverExpires, parseRfc3339, type CredentialStatus } from "../src/shared/credentials";
 
 const now = Date.parse("2026-11-02T00:00:00Z");
 const at = (days: number) => new Date(now + days * dayMs).toISOString();
@@ -426,6 +426,64 @@ describe("who is given credential rows", () => {
     }
     // A server that is not in personal mode has no personal administrator.
     expect(isPersonalAdmin({ ...cfg, auth_mode: "oidc" }, personal({ subject: "head" }))).toBe(false);
+  });
+});
+
+describe("a credential recorded as never expiring", () => {
+  // The Auctra service keys and some observer keys do not expire, so there is no date to record for them.
+  const bound: ScopeBinding = { ...scope, collection: { auctra: { tenant: "a", project: "a", actor: "u", audience: "au" } } };
+  const auctra = (patch: Record<string, unknown> = {}) => config({ collection: { auctra: { origin: "https://auctra.example.test", audience: "au", credential_ref: "/keys/collector.key", flow_credential_ref: "/keys/reader.key", enabled: true, ...patch } } });
+
+  it("is ok with no date and no days left, and says so on the row, however far away now is", () => {
+    const cfg = config();
+    cfg.connections![0].credential_expires_at = neverExpires;
+    for (const later of [0, 400, 20_000]) {
+      const row = only(statuses(cfg, { now: now + later * dayMs }), "connection:eikona-main");
+      expect(row, `${later} days on`).toMatchObject({ state: "ok", never_expires: true });
+      for (const absent of ["expires_at", "days_left", "stage", "reason"]) expect(row, absent).not.toHaveProperty(absent);
+    }
+    // A slot with no record at all is still a gap, and does not claim to be never expiring.
+    expect(only(statuses(cfg), "connection:anatomia-main")).toMatchObject({ state: "unknown_expiry" });
+    expect(only(statuses(cfg), "connection:anatomia-main")).not.toHaveProperty("never_expires");
+  });
+
+  it("is judged by everything else as before: an unreadable file, a refusal or a limited read still show", () => {
+    const cfg = config();
+    cfg.connections![0].credential_expires_at = neverExpires;
+    expect(only(statuses(cfg, { stat: statOf({ "/keys/eikona.key": file(0o100644) }) }), "connection:eikona-main")).toMatchObject({ state: "unreadable", reason: "permissions", never_expires: true });
+    expect(only(statuses(cfg, { stat: statOf({ "/keys/eikona.key": null }) }), "connection:eikona-main")).toMatchObject({ state: "unreadable", reason: "missing" });
+    expect(only(statuses(cfg, { connections: [observation("eikona-main", { authorization: "denied" })] }), "connection:eikona-main")).toMatchObject({ state: "rejected", reason: "owner_denied" });
+    expect(only(statuses(cfg, { connections: [observation("eikona-main", { content: "denied" })] }), "connection:eikona-main")).toMatchObject({ state: "limited", reason: "content_denied", never_expires: true });
+    // Healthy and seen: ok, with the time the owner last accepted it.
+    expect(only(statuses(cfg, { connections: [observation("eikona-main", { last_success_at: at(-1) })] }), "connection:eikona-main")).toMatchObject({ state: "ok", never_expires: true, last_accepted_at: at(-1) });
+  });
+
+  it("is recorded for each Auctra key on its own, so a dated reader key beside a never-expiring collector key keeps its warning", () => {
+    const cfg = auctra({ credential_expires_at: neverExpires, flow_credential_expires_at: at(3) });
+    const rows = credentialStatuses(cfg, bound, { now, stat: statOf() });
+    expect(only(rows, "collection:auctra")).toMatchObject({ state: "ok", never_expires: true });
+    expect(only(rows, "collection:auctra:flow")).toMatchObject({ state: "expiring", stage: "7d", days_left: 3 });
+    expect(only(rows, "collection:auctra:flow")).not.toHaveProperty("never_expires");
+    const both = credentialStatuses(auctra({ credential_expires_at: neverExpires, flow_credential_expires_at: neverExpires }), bound, { now, stat: statOf() });
+    expect(both.filter((row) => row.id.startsWith("collection:")).map((row) => [row.id, row.state, row.never_expires])).toEqual([["collection:auctra", "ok", true], ["collection:auctra:flow", "ok", true]]);
+    // The command line reads the same literal back as the slot's expiry.
+    expect(credentialSlots(cfg).find((slot) => slot.id === "collection:auctra")).toMatchObject({ expires_at: "never" });
+  });
+
+  it("reads only the exact word: every other value that is not a time is still an expiry to correct", () => {
+    expect(isNeverExpires("never")).toBe(true);
+    for (const other of ["Never", "NEVER", " never", "never ", "never\n", "forever", "none", "no", "0", "null", "true", "", undefined, null, 0, false]) expect(isNeverExpires(other), String(other)).toBe(false);
+    // The date parser is the strict one it was: a word is no time, whatever the word.
+    expect(parseRfc3339("never")).toBeUndefined();
+    const cfg = config();
+    for (const bad of ["Never", "NEVER", " never", "never ", "forever", "none", "9999-12-31", "9999-12-31T23:59:59"]) {
+      cfg.open_tools!.gateway!.credential_expires_at = bad;
+      const row = only(statuses(cfg), "open_tool:gateway");
+      expect(row, bad).toMatchObject({ state: "unknown_expiry", reason: "invalid_expiry" });
+      expect(row, bad).not.toHaveProperty("never_expires");
+    }
+    cfg.open_tools!.gateway!.credential_expires_at = "9999-12-31T23:59:59Z";
+    expect(only(statuses(cfg), "open_tool:gateway")).toMatchObject({ state: "ok", expires_at: "9999-12-31T23:59:59.000Z" });
   });
 });
 

@@ -1,4 +1,7 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { CredentialLine, CredentialsPanel } from "../src/pages/services/CredentialsPanel";
 import {
   credentialChipText, credentialDetail, credentialNeedsAttention, credentialReasonLabels, credentialStateLabels, credentialStates, credentialTone, formatCredentialExpiry, isCredentialProblem, parseRfc3339, renewSection, sortCredentials,
   type CredentialState, type CredentialStatus,
@@ -90,5 +93,41 @@ describe("credential wording", () => {
     expect(credentialDetail(bad)).toBe(credentialReasonLabels.invalid_expiry);
     expect(credentialDetail(row("a", "unreadable", { reason: "read_failed" }))).toBe(credentialReasonLabels.read_failed);
     expect(sortCredentials([row("ok", "ok"), bad, row("lim", "limited")]).map((item) => item.id)).toEqual(["lim", "a", "ok"]);
+  });
+
+  it("says 不过期 for a credential recorded as never expiring, and still names a fault that outranks it", () => {
+    const now = local(11, 1);
+    const never = row("a", "ok", { never_expires: true });
+    expect(credentialChipText(never, now)).toBe("不过期");
+    expect(credentialTone(never)).toBe("neutral");
+    expect(credentialNeedsAttention(never)).toBe(false);
+    // A refused, unreadable or limited credential is described by that, not by how long it would have lasted.
+    expect(credentialChipText(row("a", "rejected", { never_expires: true }), now)).toBe("凭据被拒");
+    expect(credentialChipText(row("a", "unreadable", { never_expires: true, reason: "permissions" }), now)).toBe("凭据读不到");
+    expect(credentialChipText(row("a", "limited", { never_expires: true }), now)).toBe("部分读取被拒");
+    // A date that is recorded still reads as a date, and a gap still reads as a gap.
+    expect(credentialChipText(row("a", "ok", { expires_at: iso(local(11, 30)) }), now)).toBe("11-30 到期 · 还剩 29 天");
+    expect(credentialChipText(row("a", "unknown_expiry"), now)).toBe("未记录到期时间");
+    expect(sortCredentials([row("ok", "ok", { never_expires: true }), row("gap", "unknown_expiry"), row("soon", "expiring", { days_left: 3 })]).map((item) => item.id)).toEqual(["soon", "gap", "ok"]);
+  });
+
+  it("shows 不过期 on a card footer and in the panel, and no longer counts it as a missing record", () => {
+    const now = local(11, 1);
+    const never = row("open_tool:gateway", "ok", { owner: "gateway", label: "我的网关", never_expires: true });
+    const gap = row("connection:a", "unknown_expiry", { owner: "eikona", label: "Eikona 主库" });
+    const line = renderToStaticMarkup(createElement(CredentialLine, { row: never, now }));
+    expect(line).toContain("不过期");
+    expect(line).not.toContain("续签方法");
+    // Only the gap is a missing record; the never-expiring row sits among the quiet ones, saying 不过期.
+    const panel = renderToStaticMarkup(createElement(CredentialsPanel, { rows: [never, gap], now }));
+    expect(panel).toContain("不过期");
+    expect(panel).toContain("有 1 项凭据没有记录到期时间");
+    expect(panel).toContain("（其中 1 项没有记录到期时间）");
+    expect(panel).toContain("expiry &lt;slot&gt; never");
+    // With every row dated or marked never, there is no hint to add a record.
+    const done = renderToStaticMarkup(createElement(CredentialsPanel, { rows: [never, row("connection:b", "ok", { expires_at: iso(local(11, 30)) })], now }));
+    expect(done).not.toContain("没有记录到期时间");
+    expect(done).not.toContain("data-credential-backfill");
+    expect(done).toContain("其余 2 项正常");
   });
 });

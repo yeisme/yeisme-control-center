@@ -2,7 +2,8 @@
  * The public guide, end to end against the real server and the production build: it opens without a session, walks
  * every chapter through its top bar (Back included), never calls the control-center API, breaks no content policy,
  * keeps its place and choices in the address, is reached from a signed-out in-app link, serves media with byte
- * ranges, marks the section being read in its outline, and passes axe on every chapter in both themes and on a phone.
+ * ranges, marks the section being read in its outline, drives its radio groups (the tool and client pickers and the
+ * theme switch) from the keyboard, and passes axe on every chapter in both themes and on a phone.
  * Evidence lands in temp/integration-test-runs/public-guide-<run-id>/. Run `bun run build` first.
  */
 import { spawn } from "node:child_process";
@@ -138,6 +139,67 @@ try {
     await page.locator('[data-page="public-guide"]').waitFor();
     if (await page.getByRole("radiogroup", { name: "选择 Agent 客户端" }).getByRole("radio", { checked: true }).innerText() !== "Codex") throw new Error("client_not_restored");
     if (await page.getByRole("link", { name: "登录控制中心", exact: true }).getAttribute("href") !== "./") throw new Error("login_link");
+  });
+  await check("the pickers and the theme switch are radio groups the keyboard drives: one tab stop, arrows, Home and End, wrapping", async () => {
+    await openChapter(page, "start");
+    // One radio group's radios as the page has them now: the tab index and whether each is checked.
+    const radios = (label: string) => page.evaluate((name) => [...document.querySelectorAll<HTMLElement>(`[role="radiogroup"][aria-label="${name}"] [role="radio"]`)]
+      .map((item) => ({ tab: item.getAttribute("tabindex"), checked: item.getAttribute("aria-checked") === "true", focused: item === document.activeElement })), label);
+    // Waits for the choice to be at `index`, with the focus on it and the group's only tab stop there too.
+    const settle = async (label: string, index: number) => {
+      await page.waitForFunction(([name, want]) => {
+        const items = [...document.querySelectorAll<HTMLElement>(`[role="radiogroup"][aria-label="${name}"] [role="radio"]`)];
+        const at = items.findIndex((item) => item.getAttribute("aria-checked") === "true");
+        return at === want && items[at] === document.activeElement && items[at].getAttribute("tabindex") === "0" && items.filter((item) => item.getAttribute("tabindex") === "0").length === 1;
+      }, [label, index] as const, { timeout: 3_000 }).catch(async () => { throw new Error(`${label}: wanted ${index}, page has ${JSON.stringify(await radios(label))}`); });
+    };
+    const themeChoice = () => page.evaluate(() => document.documentElement.dataset.theme);
+    for (const label of ["选择工具", "选择 Agent 客户端", "主题"]) {
+      const group = page.getByRole("radiogroup", { name: label });
+      await group.scrollIntoViewIfNeeded();
+      const before = await radios(label);
+      const count = before.length;
+      if (count < 2) throw new Error(`${label}: only ${count} radios`);
+      const start = before.findIndex((radio) => radio.checked);
+      // Tab enters the group once, on the checked radio.
+      if (before.filter((radio) => radio.tab === "0").length !== 1 || before[start]?.tab !== "0" || before.some((radio) => radio.tab !== "0" && radio.tab !== "-1")) throw new Error(`${label}: tab stops ${JSON.stringify(before)}`);
+      await group.getByRole("radio", { checked: true }).focus();
+      await page.keyboard.press("ArrowRight");
+      await settle(label, (start + 1) % count);
+      // The pickers keep the choice in the address, as a click does; the first option is the default and is not written.
+      if (label !== "主题" && !new URL(page.url()).searchParams.get(label === "选择工具" ? "tool" : "client")) throw new Error(`${label}: choice not in ${page.url()}`);
+      await page.keyboard.press("ArrowLeft");
+      await settle(label, start);
+      await page.keyboard.press("End");
+      await settle(label, count - 1);
+      await page.keyboard.press("ArrowDown");
+      await settle(label, 0);
+      await page.keyboard.press("ArrowUp");
+      await settle(label, count - 1);
+      await page.keyboard.press("Home");
+      await settle(label, 0);
+      // A key with a modifier is the browser's, and does not move the choice.
+      await page.keyboard.press("Shift+ArrowRight");
+      await settle(label, 0);
+      if (label === "主题") {
+        // The switch applies each choice as it lands on it: 浅色, then 深色, then back to following the system.
+        if (await themeChoice() !== "light") throw new Error(`theme_light:${await themeChoice()}`);
+        await page.keyboard.press("ArrowRight");
+        await settle(label, 1);
+        if (await themeChoice() !== "dark") throw new Error(`theme_dark:${await themeChoice()}`);
+        await page.keyboard.press("End");
+        await settle(label, count - 1);
+        if (await page.evaluate(() => localStorage.getItem("yeisme.v18.theme")) !== null) throw new Error("theme_preference_not_cleared");
+      }
+      // Tab leaves the group; it does not walk through its other radios.
+      await page.keyboard.press("Tab");
+      if (await page.evaluate((name) => document.activeElement?.closest('[role="radiogroup"]')?.getAttribute("aria-label") === name, label)) throw new Error(`${label}: Tab stayed in the group`);
+    }
+    // The chapter bar is a row of links, every one an ordinary tab stop.
+    const tabs = await page.getByRole("navigation", { name: "指南章节" }).getByRole("link").evaluateAll((links) => links.map((link) => link.getAttribute("tabindex")));
+    if (tabs.length < 5 || tabs.some((value) => value !== null)) throw new Error(`chapter_links_tab_stops:${tabs.join(",")}`);
+    const found = await axe(page);
+    if (found.length) throw new Error(`axe_pickers:${found.join(" | ")}`);
   });
   await check("a signed-out visit to the in-app guide lands on the same place of the public page", async () => {
     await page.goto(`${base}/#/guide?tool=sonora&client=codex`, { waitUntil: "domcontentloaded" });

@@ -10,7 +10,7 @@ import { OwnerLinkRow } from "../../components/OwnerLinkRow";
 import { Button, CopyRef, CoverageChip, Facts, InlineNotice, Pill, TaskStatePill, Unknown, ownerLabel, useToast, type Tone } from "../../components/ui";
 import { createIdempotencyKey } from "../../shared/action-runner";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
-import { freshnessLabels, reasonLabel } from "../../shared/read-model/labels";
+import { freshnessLabels, needsContractLabel, reasonLabel } from "../../shared/read-model/labels";
 import { actionReasonLabel, connectionStateLabel, connectionTone } from "../../shared/read-model/tasks";
 import { taskStateLabels } from "../../task-observation";
 
@@ -40,7 +40,7 @@ export const workQueueKindLabels: Record<WorkQueueKind, string> = {
 export const workQueuePriorityLabels: Record<WorkQueuePriority, string> = { critical: "紧急", high: "较高", normal: "普通", low: "较低" };
 export const workQueuePriorityTone: Record<WorkQueuePriority, Tone> = { critical: "danger", high: "warning", normal: "neutral", low: "neutral" };
 
-const previewStateLabels: Record<WorkQueuePreviewState, string> = { available: "可预览", needs_contract: "待合同", forbidden: "无权限", unavailable: "不可用", not_applicable: "不适用" };
+const previewStateLabels: Record<WorkQueuePreviewState, string> = { available: "可预览", needs_contract: needsContractLabel, forbidden: "无权限", unavailable: "不可用", not_applicable: "不适用" };
 const freshnessTone: Record<WorkQueueItem["freshness"], Tone> = { fresh: "success", stale: "warning", unknown: "neutral" };
 const stageLabels: Record<string, string> = {
   screenplay: "剧本",

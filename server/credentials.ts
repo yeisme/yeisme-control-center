@@ -5,13 +5,14 @@ import { openToolChecks } from "./open-tools/projection";
 import { serviceDefinitions } from "../src/service-directory";
 import type { TaskConnectionState } from "../src/task-observation";
 import { openToolKinds, openToolNames, type OpenToolProjection } from "../src/shared/open-tools";
-import { dayMs, expiringDays, parseRfc3339, type CredentialReason, type CredentialStage, type CredentialState, type CredentialStatus } from "../src/shared/credentials";
+import { dayMs, expiringDays, isNeverExpires, parseRfc3339, type CredentialReason, type CredentialStage, type CredentialState, type CredentialStatus } from "../src/shared/credentials";
 
 /**
  * Credential slots and their status. Owners do not report when a credential expires, so whoever issues one records the
- * expiry next to its `credential_ref` in config.json (`personal-config credential …`), and this module turns that
- * record, the file's metadata and the latest observations into one row per slot. Pure: it reads file metadata through
- * `stat`, never a file's content, makes no network call and keeps paths, addresses and tokens out of every row.
+ * expiry next to its `credential_ref` in config.json (`personal-config credential …`), or `never` for a credential that
+ * does not expire, and this module turns that record, the file's metadata and the latest observations into one row
+ * per slot. Pure: it reads file metadata through `stat`, never a file's content, makes no network call and keeps
+ * paths, addresses and tokens out of every row.
  */
 
 const providerOwners = ["eikona", "scaena", "sonora"] as const;
@@ -169,7 +170,9 @@ export function credentialStatuses(config: ServerConfig, scope: ScopeBinding | u
     const observed = slot.id.startsWith("connection:") ? observeConnection(input.connections?.find((observation) => observation.id === slot.id.slice("connection:".length)))
       : slot.id.startsWith("open_tool:") ? observeOpenTool(input.openTools?.find((projection) => projection.tool === slot.owner))
       : {};
-    const expiresAt = slot.expires_at ? parseRfc3339(slot.expires_at) : undefined;
+    // A credential recorded as never expiring has no date: it is fine as long as nothing else is wrong with it.
+    const never = isNeverExpires(slot.expires_at);
+    const expiresAt = slot.expires_at && !never ? parseRfc3339(slot.expires_at) : undefined;
     const remaining = expiresAt === undefined ? undefined : expiresAt - now;
     const problem = credentialFileProblem(slot.ref, stat);
     let state: CredentialState;
@@ -193,9 +196,9 @@ export function credentialStatuses(config: ServerConfig, scope: ScopeBinding | u
       state = "limited";
       reason = observed.limited;
     } else {
-      state = remaining !== undefined ? "ok" : "unknown_expiry";
+      state = remaining !== undefined || never ? "ok" : "unknown_expiry";
       // A recorded expiry that cannot be read (no zone, not a date) is a mistake to fix, not the same as none.
-      if (remaining === undefined && slot.expires_at) reason = "invalid_expiry";
+      if (remaining === undefined && !never && slot.expires_at) reason = "invalid_expiry";
     }
     return {
       id: slot.id,
@@ -206,6 +209,7 @@ export function credentialStatuses(config: ServerConfig, scope: ScopeBinding | u
       ...(stage ? { stage } : {}),
       ...(remaining !== undefined && expiresAt !== undefined ? { expires_at: new Date(expiresAt).toISOString() } : {}),
       ...(remaining !== undefined && remaining > 0 ? { days_left: Math.ceil(remaining / dayMs) } : {}),
+      ...(never ? { never_expires: true as const } : {}),
       ...(observed.accepted ? { last_accepted_at: observed.accepted } : {}),
       shared_with: (byFile.get(fileOf(slot)) || []).filter((id) => id !== slot.id),
     };

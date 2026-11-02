@@ -4,6 +4,7 @@ import { Check, Copy } from "../../icons";
 import { cx } from "../../components/ui/cx";
 import { copyReference } from "../../shared/clipboard";
 import { Reveal } from "./guide-motion";
+import { moveBetweenRadios, radioTabIndex } from "./radio-keys";
 
 /** One copyable command; the copied text is exactly what is shown. `block` keeps line breaks for config files. */
 export function CommandLine({ command, note, dark = false, block = false, label = "命令" }: { command: string; note?: string; dark?: boolean; block?: boolean; label?: string }) {
@@ -48,9 +49,11 @@ export function SectionHeading({ eyebrow, title, body, id }: { eyebrow: string; 
   </Reveal>;
 }
 
+/** A radio group: Tab enters it once, on the checked option, and the arrow keys, Home and End move and choose inside it. */
 export function Picker<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { id: T; label: ReactNode }[]; onChange: (value: T) => void }) {
-  return <div role="radiogroup" aria-label={label} className="guide-picker">
-    {options.map((option) => <button key={option.id} type="button" role="radio" aria-checked={option.id === value} data-active={option.id === value || undefined} onClick={() => onChange(option.id)}>{option.label}</button>)}
+  const checked = options.findIndex((option) => option.id === value);
+  return <div role="radiogroup" aria-label={label} className="guide-picker" onKeyDown={(event) => moveBetweenRadios(event, (index) => onChange(options[index].id))}>
+    {options.map((option, index) => <button key={option.id} type="button" role="radio" aria-checked={index === checked} tabIndex={radioTabIndex(index, checked)} data-active={index === checked || undefined} onClick={() => onChange(option.id)}>{option.label}</button>)}
   </div>;
 }
 

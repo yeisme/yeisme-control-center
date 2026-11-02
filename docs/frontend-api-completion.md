@@ -122,7 +122,7 @@ POST /projects/{project}/reference-bindings/{binding}/access
 - collection 继续现有 body-free API、显式 sync 和本地元数据 action；`interfaces.md` 旧的 authoring 正文/候选写入描述不再适用。事件 source 未发布时保留 pending；SSE 不是只读收集切片的隐藏前置门。
 - request/content/attachment 不另开 BFF 副本。按 owner、任务族列输入/输出/上传清单/附件的 coverage、可读用途和拒绝码；`not_recorded`、`forbidden`、`needs_contract` 分开。Scaena/Sonora 缺附件时，服务端/页面不能通过原 Provider URL 补齐。
 - work-queue/creative-flow 保留原 schema、episode、revision/digest、coverage 和受控 LaunchContext；跳转返回地址只允许已有路由。MuWeave direct read 缺合同继续显示 `needs_contract`。
-- tool-catalog 的模型/渠道资源由 owner 发布后才可读；Aigora、个人 MCP Gateway、Auctra Pi 等未接入源维持原能力要求和 `needs_contract`，不能在收尾时删掉或虚构目录。
+- tool-catalog 的模型/渠道资源由 owner 发布后才可读；Aigora、Auctra Pi 等未接入源维持原能力要求和 `needs_contract`，不能在收尾时删掉或虚构目录（个人 MCP Gateway 的工具自 2026-10-31 起读自它的 `/v1/tools`，只在配置了开放工具的范围里出现）。
 - 审阅、交付、owner 配置与成员管理已登记 action descriptor，但领域写 adapter 尚缺；逐项的 owner 与缺失合同见下文 A5。本地 collection confirm 不得替代 owner review。
 
 ## A5：领域写入与额外工具来源的 owner 交接（2026-10-30）
@@ -130,8 +130,8 @@ POST /projects/{project}/reference-bindings/{binding}/access
 以下能力在控制中心里都已有入口或目录条目，但对应 owner 还没有可调用的合同。控制中心保持现状：
 
 - 动作描述符登记为 `availability: needs_contract`（`server/actions.ts`）：预览返回这个状态，拒绝码作为 blocker；确认只得到 `state: needs_contract`、`error_code` 为该拒绝码的回执，不调用 owner，也不写入任何东西；
-- 工作队列 Inspector 显示“待合同”；
-- 服务目录显示“待合同”。
+- 工作队列 Inspector 和其他状态标签用同一个短词“待补齐接口”（`needsContractLabel`，`src/shared/read-model/labels.ts`），解释缺口的长句不动；“未接入”只留给服务目录里控制中心没有合同的条目；
+- 服务目录把 `not_integrated` 的条目折叠在一个默认收起的“未接入”分组里，不逐行写状态。
 
 本轮不在控制中心实现任何领域写入。下表写明每项由谁负责，以及 owner 发布什么之后才能做适配。
 
@@ -146,13 +146,10 @@ POST /projects/{project}/reference-bindings/{binding}/access
 
 ### 额外工具来源
 
-服务目录（`src/service-directory.ts`）中 `integration: not_integrated` 的条目保持“待合同”，不编造任务、目录或连接数据。每个 owner 先发布只读观察合同：连接状态、任务或条目列表、游标、来源覆盖与拒绝码。之后控制中心才按 A1 的分页与来源规则接入。
+服务目录（`src/service-directory.ts`）中 `integration: not_integrated` 的条目保持“未接入”（服务页折叠成一个分组），不编造任务、目录或连接数据。个人 MCP Gateway、DriveBridge、Anatomia 已在第四轮接入（开放工具运行投影、任务观测），不再在下表里。每个 owner 先发布只读观察合同：连接状态、任务或条目列表、游标、来源覆盖与拒绝码。之后控制中心才按 A1 的分页与来源规则接入。
 
 | 来源 | owner 路径 | 缺口（服务目录原文） |
 | --- | --- | --- |
-| 个人 MCP Gateway | `mcp/gateway` | 尚无控制中心适配；不复用 Agent 管理凭据。 |
-| DriveBridge | `cli/drivebridge` | 控制中心传输、容量和授权投影尚未接入。 |
-| Anatomia | `agent/anatomia` | 任务和诊断投影尚未接入。 |
 | Pinax | `cli/pinax` | 远程管理 backing 未确认；不读取私有 vault。 |
 | Capsa | `backend-server/capsa` | 只读摘要待适配；不解密用户内容。 |
 | Manju | `backend-server/manju` | 当前部署及公开观测合同待核验。 |

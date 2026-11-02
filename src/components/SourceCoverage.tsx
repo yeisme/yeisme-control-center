@@ -2,7 +2,7 @@ import { CircleAlert, CircleDashed, CheckCircle2, Clock3, Network, RefreshCw } f
 import type { TaskConnectionState } from "../task-observation";
 import type { ServiceDirectoryEntry } from "../service-directory";
 import { formatRelative } from "../shared/read-model/format";
-import { reasonLabel } from "../shared/read-model/labels";
+import { needsContractLabel, reasonLabel } from "../shared/read-model/labels";
 import { readErrorMessage, type ReadStatus } from "../shared/read-model/read-state";
 import { Button, Pill, Tooltip, cx, type Tone } from "./ui";
 
@@ -18,7 +18,7 @@ const stateMeta: Record<SourceState, { label: string; tone: Tone }> = {
   unavailable: { label: "来源不可用", tone: "danger" },
   forbidden: { label: "无权限", tone: "danger" },
   stale: { label: "数据过期", tone: "warning" },
-  needs_contract: { label: "待合同", tone: "review" },
+  needs_contract: { label: needsContractLabel, tone: "review" },
   not_observed: { label: "尚未观测", tone: "neutral" },
 };
 

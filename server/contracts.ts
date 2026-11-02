@@ -37,9 +37,10 @@ export interface PrincipalBinding {
 }
 /**
  * When a credential stops working, as recorded by whoever issued it: owners do not report expiry over their APIs,
- * so `personal-config` writes these next to the `credential_ref` they describe. RFC 3339 with seconds and a zone. The
- * configuration itself never reaches a client; personal administrators receive the resulting `expires_at` in the
- * credential rows of the service directory.
+ * so `personal-config` writes these next to the `credential_ref` they describe. The expiry is an RFC 3339 time with
+ * seconds and a zone, or the literal `never` for a credential that does not expire (an Auctra service key, an observer
+ * key); nothing else is read as a date. The configuration itself never reaches a client; personal administrators receive
+ * the resulting `expires_at` (or `never_expires`) in the credential rows of the service directory.
  */
 export interface CredentialLifecycle {
   credential_expires_at?: string;

@@ -1,4 +1,5 @@
 import type { ControlCenterErrorClass } from "../types";
+import { needsContractLabel } from "./labels";
 
 export type ReadStatus = "loading" | "ready" | "empty" | "stale" | "forbidden" | "unavailable" | "unknown" | "needs_contract" | "login_required";
 
@@ -29,7 +30,7 @@ export const readStatusLabels: Record<ReadStatus, string> = {
   forbidden: "无读取权限",
   unavailable: "来源不可用",
   unknown: "尚未确认",
-  needs_contract: "待补齐接口",
+  needs_contract: needsContractLabel,
   login_required: "需要重新登录",
 };
 

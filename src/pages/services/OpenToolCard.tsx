@@ -1,7 +1,7 @@
 import { ArrowRight, Clock3 } from "../../icons";
 import { Button, Dot, InlineNotice, Pill, cx, type Tone } from "../../components/ui";
 import { formatBytes, formatCount, formatDurationMs, formatRelative } from "../../shared/read-model/format";
-import { reasonLabel } from "../../shared/read-model/labels";
+import { needsContractLabel, reasonLabel } from "../../shared/read-model/labels";
 import type { CredentialStatus } from "../../shared/credentials";
 import { CredentialLine } from "./CredentialsPanel";
 import {
@@ -62,7 +62,7 @@ export function OpenToolCard({ name, purpose, tool, credential, now, onQueue, on
         return <li key={check.id} className="inline-flex items-center gap-1.5" title={check.reason ? reasonLabel(check.reason) || check.reason : check.label}>
         <Dot tone={tone} />
         <span>{check.label}</span>
-        {check.state !== "ok" && <span className={cx("font-medium", toneText[tone])}>{check.state === "needs_contract" ? "待接口" : check.state === "forbidden" ? (tool.state === "ready" ? "未授权" : "无权限") : check.state === "rate_limited" ? "限流" : "失败"}</span>}
+        {check.state !== "ok" && <span className={cx("font-medium", toneText[tone])}>{check.state === "needs_contract" ? needsContractLabel : check.state === "forbidden" ? (tool.state === "ready" ? "未授权" : "无权限") : check.state === "rate_limited" ? "限流" : "失败"}</span>}
       </li>;
       })}
     </ul>

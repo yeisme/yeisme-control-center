@@ -1,6 +1,14 @@
 import type { ActionAvailability, CatalogCoverageState, CatalogEntryKind, CatalogFreshness, ChannelStatus, ModelSnapshotStatus, RiskTier } from "../tool-catalog";
 import type { Tone } from "../../components/ui/Status";
 
+/**
+ * The one short label for a source that is known to exist but whose owner has not published an interface the control
+ * center can use (`needs_contract`): the fix is on the owner's side, so it does not say "integrate" (that is 未接入, the
+ * directory group of entries the control center has no contract for at all). Chips, pills and column values take it from
+ * here; sentences that explain the gap keep their own words.
+ */
+export const needsContractLabel = "待补齐接口";
+
 /** One place that turns owner/catalog enums into user-facing Chinese; raw codes are never rendered. */
 export const modelStatusLabels: Record<ModelSnapshotStatus, string> = {
   latest_ready: "最新可用",
@@ -57,7 +65,7 @@ export const catalogCoverageLabels: Record<CatalogCoverageState, string> = {
   readable: "可读",
   partial: "部分可读",
   forbidden: "无权限",
-  needs_contract: "待接入",
+  needs_contract: needsContractLabel,
   unavailable: "不可用",
   not_configured: "未配置",
 };

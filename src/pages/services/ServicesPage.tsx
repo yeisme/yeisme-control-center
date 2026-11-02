@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Archive, ArrowRight, CircleCheck, Clock3, Copy, FolderKanban, LayoutGrid, ListTodo, Palette, Plug, RefreshCw, Server, Terminal } from "../../icons";
+import { Archive, ArrowRight, CircleCheck, Clock3, Copy, FolderKanban, ListTodo, Plug, RefreshCw } from "../../icons";
 import { useCopy } from "../../app/item-actions";
 import { api, errorCode, type ServiceDirectoryEntry } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import type { ConnectionObservation } from "../../task-observation";
 import type { ServiceConnectionProjection } from "../../service-directory";
-import { ActionsContextMenu, Button, CoverageChip, DataTable, Dot, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, SkeletonRows, StaleNotice, ToggleGroup, cx, narrowMainColumn, useToast, type Column, type ItemAction, type Tone } from "../../components/ui";
+import { ActionsContextMenu, Button, CoverageChip, Dot, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SkeletonRows, StaleNotice, cx, useToast, type ItemAction, type Tone } from "../../components/ui";
 import { formatRelative } from "../../shared/read-model/format";
 import { freshnessLabels, labelFrom, reasonLabel } from "../../shared/read-model/labels";
 import { connectionStateLabel, connectionTone } from "../../shared/read-model/tasks";
@@ -15,18 +15,9 @@ import { createIdempotencyKey, runAction } from "../../shared/action-runner";
 import { blockerLabel, collectionSyncMessage, universeGapText } from "../../shared/read-model/drama";
 import { OpenToolCard } from "./OpenToolCard";
 import { CredentialLine, CredentialsPanel } from "./CredentialsPanel";
+import { ServiceDirectoryPanel } from "./ServiceDirectory";
 import type { CredentialStatus } from "../../shared/credentials";
 
-type Filter = "all" | "integrated" | "configured" | "gaps";
-
-const kindLabels: Record<string, string> = { service: "服务", local_tool: "本地工具", workspace: "工作区", design: "设计原型" };
-const kindIcons: Record<string, ReactNode> = { service: <Server />, local_tool: <Terminal />, workspace: <LayoutGrid />, design: <Palette /> };
-const integrationLabels: Record<string, string> = { task_observation: "任务观测", request_projection: "请求投影", collection_projection: "收集投影", operation_projection: "运行投影", not_integrated: "未接入" };
-const configurationLabels: Record<string, { label: string; tone: Tone }> = {
-  configured: { label: "已配置", tone: "success" },
-  not_configured: { label: "未配置", tone: "neutral" },
-  needs_contract: { label: "待合同", tone: "review" },
-};
 const toneText: Record<Tone, string> = { success: "text-success", info: "text-info", warning: "text-warning", danger: "text-danger", review: "text-review", neutral: "text-muted" };
 const readableToken = /^[a-z][a-z0-9]*(?:[_.:-][a-z0-9]+)*$/;
 
@@ -40,9 +31,8 @@ function reasonText(reason: string) {
 export default function ServicesPage() {
   const navigate = useNavigate();
   const copy = useCopy();
+  const [params] = useSearchParams();
   const read = useScopedRead((scope, signal) => api.services(scope, signal), { isEmpty: (data) => data.services.length === 0 });
-  const [filter, setFilter] = useState<Filter>("all");
-  const [query, setQuery] = useState("");
   const services = read.data?.services || [];
   const integrated = services.filter((service) => service.integration !== "not_integrated");
   const connections = integrated.flatMap((service) => service.connections.map((connection) => ({ service, connection })));
@@ -52,34 +42,6 @@ export default function ServicesPage() {
   const credentials = read.data?.credentials ?? [];
   const credentialOf = (id: string): CredentialStatus | undefined => credentials.find((row) => row.id === id);
   const now = Date.now();
-
-  const visible = useMemo(() => services.filter((service) => {
-    if (filter === "integrated" && service.integration === "not_integrated") return false;
-    if (filter === "configured" && service.configuration !== "configured") return false;
-    if (filter === "gaps" && service.integration !== "not_integrated" && service.configuration === "configured") return false;
-    const needle = query.trim().toLocaleLowerCase();
-    return !needle || `${service.name} ${service.purpose} ${service.owner_path} ${service.gap}`.toLocaleLowerCase().includes(needle);
-  }), [services, filter, query]);
-
-  const columns: Column<ServiceDirectoryEntry>[] = [
-    { id: "service", header: "服务", className: narrowMainColumn, cell: (service) => <div className="flex min-w-0 items-center gap-3">
-      <span aria-hidden="true" className="grid size-9 shrink-0 place-items-center rounded-control bg-panel-sunken text-muted [&>svg]:size-[17px]">{kindIcons[service.kind] || <Server />}</span>
-      <div className="min-w-0">
-        <p className="truncate text-body-sm font-semibold text-ink">{service.name}</p>
-        <p className="truncate font-mono text-2xs text-faint">{service.owner_path}</p>
-        <p className="mt-0.5 line-clamp-2 text-2xs text-muted @2xl:hidden">{service.purpose}</p>
-      </div>
-    </div> },
-    { id: "purpose", header: "用途 / 缺口", priority: 2, cell: (service) => <div className="max-w-md min-w-0 text-body-sm">
-      <p className="line-clamp-2 text-ink-soft">{service.purpose}</p>
-      <p className="mt-0.5 line-clamp-2 text-2xs text-muted" title={service.gap}>{service.gap}</p>
-    </div> },
-    { id: "kind", header: "类型 · 接入", priority: 3, cell: (service) => <div className="whitespace-nowrap">
-      <p className="text-body-sm text-ink-soft">{kindLabels[service.kind] || service.kind}</p>
-      <p className="text-2xs text-muted">{labelFrom(integrationLabels, service.integration)}</p>
-    </div> },
-    { id: "status", header: "状态", align: "end", cell: (service) => <DirectoryStatus service={service} /> },
-  ];
 
   return <div className="page-enter space-y-5" data-page="services">
     <h1 className="sr-only">服务与连接</h1>
@@ -117,49 +79,13 @@ export default function ServicesPage() {
         </div>
       </section>}
 
-      {credentials.length > 0 && <CredentialsPanel rows={credentials} now={now} />}
+      {credentials.length > 0 && <CredentialsPanel rows={credentials} now={now} focusRef={params.get("ref")} />}
 
       {services.some((service) => service.id === "auctra") && <AuctraCollectionPanel />}
 
-      <Panel
-        title="服务目录"
-        actions={<span className="text-2xs text-muted tabular">{visible.length} / {services.length}</span>}
-        bodyClassName="p-0"
-      >
-        <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
-          <ToggleGroup label="目录筛选" value={filter} onChange={setFilter} options={[
-            { id: "all", label: "全部", count: services.length },
-            { id: "integrated", label: "已接入", count: integrated.length },
-            { id: "configured", label: "已配置", count: services.filter((service) => service.configuration === "configured").length },
-            { id: "gaps", label: "缺口", count: services.filter((service) => service.integration === "not_integrated" || service.configuration !== "configured").length },
-          ]} />
-          <SearchField value={query} onChange={setQuery} placeholder="名称、用途、路径" label="搜索服务" className="ml-auto w-full sm:w-64" />
-        </div>
-        <DataTable label="服务目录列表" columns={columns} rows={visible} rowKey={(service) => service.id} empty={<EmptyState compact title="没有匹配的服务" />} />
-      </Panel>
+      <ServiceDirectoryPanel services={services} />
     </ReadStateView>
   </div>;
-}
-
-function Quiet({ tone = "neutral", children }: { tone?: Tone; children: ReactNode }) {
-  return <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-meta text-muted"><Dot tone={tone} />{children}</span>;
-}
-
-/** Pills only mark problems or open gaps; healthy and not-integrated rows stay quiet. */
-function DirectoryStatus({ service }: { service: ServiceDirectoryEntry }) {
-  const isIntegrated = service.integration !== "not_integrated";
-  const coverage = service.coverage?.state;
-  const items: ReactNode[] = [];
-  if (isIntegrated) {
-    if (coverage && coverage !== "complete" && coverage !== "not_recorded") items.push(<CoverageChip key="coverage" state={coverage === "stale" ? "expired" : coverage} />);
-    else items.push(<Quiet key="coverage" tone={coverage === "complete" ? "success" : "neutral"}>{coverage === "complete" ? "可读" : coverage === "not_recorded" ? "未采集" : "尚未观测"}</Quiet>);
-  }
-  if (service.configuration !== "configured") {
-    const configuration = configurationLabels[service.configuration] || configurationLabels.not_configured;
-    items.push(<Pill key="configuration" tone={configuration.tone}>{configuration.label}</Pill>);
-  }
-  if (!items.length) items.push(<Quiet key="none">未接入</Quiet>);
-  return <span className="inline-flex flex-wrap items-center justify-end gap-1.5">{items}</span>;
 }
 
 const collectionStateLabels: Record<string, string> = { active: "待确认", confirmed: "已确认", archived: "已归档" };

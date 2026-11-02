@@ -108,7 +108,7 @@ describe("creative flow projection", () => {
       .items.find((value) => value.workflow_stage === "creative_storyboard")?.safe_links.find((value) => value.target === "muweave")?.launch;
     for (const origin of ["http://muweave.example.test", "https://user:secret@muweave.example.test", "https://muweave.example.test/?next=https://elsewhere.test", "javascript:alert(1)", "not a url"]) {
       const launch = launchFor(origin);
-      // The hand-off stays (as a disabled "待合同" row), but nothing can be opened.
+      // The hand-off stays (as a disabled "待补齐接口" row), but nothing can be opened.
       expect(launch, origin).toBeDefined();
       expect(launch?.url, origin).toBeUndefined();
     }

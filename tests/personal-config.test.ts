@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkPassword } from "../server/password";
+import { observationBounds, observationProblems } from "../server/observation-config";
 
 const dir = mkdtempSync(join(tmpdir(), "control-config-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -354,6 +355,100 @@ describe("personal configuration CLI: observation", () => {
     expect(run("observe", file, "on", "--interval-minutes", "5", "--open-tools-every", "1").status).toBe(0);
     expect(observation(file)).toMatchObject({ interval_minutes: 5, open_tools_every: 1 });
   });
+
+  it("refuses recipients the server would treat as invalid, and writes only what it would accept", () => {
+    const file = join(dir, "observe-recipients.json");
+    expect(run("init", file).status).toBe(0);
+    const list = (count: number) => Array.from({ length: count }, (_, index) => `config|admin-${index}`).join(",");
+    // The most the server accepts is written and passes the server's own check; one more is refused with the file as it was.
+    const most = run("observe", file, "on", "--recipients", list(observationBounds.maxRecipients));
+    expect(most.status, most.stderr).toBe(0);
+    expect(observation(file).recipients).toHaveLength(observationBounds.maxRecipients);
+    expect(observationProblems(observation(file))).toEqual([]);
+    const afterMost = readFileSync(file, "utf8");
+    const inode = statSync(file).ino;
+    const tooMany = run("observe", file, "on", "--recipients", list(observationBounds.maxRecipients + 1));
+    expect(tooMany.status).not.toBe(0);
+    expect(tooMany.stderr).toContain(`at most ${observationBounds.maxRecipients}`);
+    expect(readFileSync(file, "utf8")).toBe(afterMost);
+    expect(statSync(file).ino).toBe(inode);
+    // An entry of exactly the longest length is accepted, one character more is not.
+    const entry = (length: number) => "i|" + "x".repeat(length - 2);
+    const longest = run("observe", file, "on", "--recipients", entry(observationBounds.maxRecipientLength));
+    expect(longest.status, longest.stderr).toBe(0);
+    expect(observation(file).recipients).toEqual([entry(observationBounds.maxRecipientLength)]);
+    expect(observationProblems(observation(file))).toEqual([]);
+    const afterLongest = readFileSync(file, "utf8");
+    const tooLong = run("observe", file, "on", "--recipients", entry(observationBounds.maxRecipientLength + 1));
+    expect(tooLong.status).not.toBe(0);
+    expect(tooLong.stderr).toContain(`${observationBounds.maxRecipientLength} characters`);
+    expect(readFileSync(file, "utf8")).toBe(afterLongest);
+  });
+
+  it("refuses an existing block that is not an object, by its code, and writes nothing", () => {
+    const file = join(dir, "observe-not-object.json");
+    expect(run("init", file).status).toBe(0);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    // Spreading a string would have made `{"0":"y","1":"e","2":"s"}` of "yes"; none of these may become a block.
+    for (const bad of ["yes", 5, true, ["enabled"]]) {
+      config.observation = bad;
+      writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+      const before = readFileSync(file, "utf8");
+      const inode = statSync(file).ino;
+      expect(observationProblems(observation(file)), JSON.stringify(bad)).toEqual(["observation_not_an_object"]);
+      for (const args of [["on"], ["off"], ["on", "--interval-minutes", "10"], ["on", "--recipients", "config|personal"]]) {
+        const refused = run("observe", file, ...args);
+        expect(refused.status, `${JSON.stringify(bad)} ${args.join(" ")}`).not.toBe(0);
+        expect(refused.stderr).toContain("observation_not_an_object");
+        expect(refused.stderr).toContain("nothing was written");
+        expect(readFileSync(file, "utf8")).toBe(before);
+        expect(statSync(file).ino).toBe(inode);
+      }
+    }
+    // `null` is no block, as on the server, so it is replaced like a missing one.
+    config.observation = null;
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    const fresh = run("observe", file, "on");
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(observation(file)).toEqual({ enabled: true, interval_minutes: 10, open_tools_every: 3 });
+  });
+
+  it("takes its bounds from the server's observation rules, so a block the server would read as off is never written", () => {
+    const file = join(dir, "observe-bounds.json");
+    expect(run("init", file).status).toBe(0);
+    for (const [flag, low, high] of [["--interval-minutes", observationBounds.minIntervalMinutes, observationBounds.maxIntervalMinutes], ["--open-tools-every", observationBounds.minOpenToolsEvery, observationBounds.maxOpenToolsEvery]] as const) {
+      for (const value of [low, high]) {
+        expect(run("observe", file, "on", flag, String(value)).status, `${flag} ${value}`).toBe(0);
+        expect(observationProblems(observation(file)), `${flag} ${value}`).toEqual([]);
+      }
+      const before = readFileSync(file, "utf8");
+      for (const value of [low - 1, high + 1]) {
+        expect(run("observe", file, "on", flag, String(value)).status, `${flag} ${value}`).not.toBe(0);
+        expect(readFileSync(file, "utf8")).toBe(before);
+      }
+    }
+  });
+
+  it("refuses to carry a block the server would treat as invalid, saying which part, and lets a flag repair it", () => {
+    const file = join(dir, "observe-carried.json");
+    expect(run("init", file).status).toBe(0);
+    // A hand edit left an interval below the lower bound; the server reads such a block as off, and says why in its log.
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    config.observation = { enabled: true, interval_minutes: 3, recipients: ["config|personal"] };
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    expect(observationProblems(observation(file))).toEqual(["observation_interval_out_of_range"]);
+    const before = readFileSync(file, "utf8");
+    const refused = run("observe", file, "on", "--recipients", "config|other");
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("observation_interval_out_of_range");
+    expect(refused.stderr).toContain("nothing was written");
+    expect(readFileSync(file, "utf8")).toBe(before);
+    // Naming the bad part in the same command repairs it.
+    const repaired = run("observe", file, "on", "--interval-minutes", "10", "--recipients", "config|other");
+    expect(repaired.status, repaired.stderr).toBe(0);
+    expect(observation(file)).toEqual({ enabled: true, interval_minutes: 10, open_tools_every: 3, recipients: ["config|other"] });
+    expect(observationProblems(observation(file))).toEqual([]);
+  });
 });
 
 
@@ -622,5 +717,106 @@ describe("personal configuration CLI: credential expiry", () => {
     expect(run("credential", file, "expiry", "collection:auctra", "none").status).toBe(0);
     expect(read(file).collection.auctra).not.toHaveProperty("credential_expires_at");
     expect(read(file).collection.auctra.flow_credential_expires_at).toBe("2027-06-01T00:00:00.000Z");
+  });
+
+  it("records `never` for a credential that does not expire, in every command that takes an expiry", () => {
+    const file = init("expiry-never.json");
+    const a = key("never-a.key"), b = key("never-b.key"), c = key("never-c.key");
+    const connected = run("connect", file, "anat", "anatomia", "https://anatomia.example.test/mcp", "project:x", a, "--expires-at", "never");
+    expect(connected.status, connected.stderr).toBe(0);
+    expect(connected.stdout).toContain("never expires for connection:anat");
+    expect(read(file).connections[0]).toMatchObject({ credential_ref: a, credential_expires_at: "never" });
+    const tool = run("open-tool", file, "gateway", "https://gateway.example.test", b, "--expires-at", "never", "--issued-at", "2026-11-01T00:00:00Z");
+    expect(tool.status, tool.stderr).toBe(0);
+    expect(JSON.parse(tool.stdout)).toMatchObject({ expires_at: "never", issued_at: "2026-11-01T00:00:00.000Z" });
+    expect(read(file).open_tools.gateway).toMatchObject({ credential_expires_at: "never", credential_issued_at: "2026-11-01T00:00:00.000Z" });
+    expect(run("provider", file, "eikona", "https://eikona.example.test/mcp", "p", a, "m", "generate", "-", "--expires-at", "never").status).toBe(0);
+    expect(read(file).providers.eikona.credential_expires_at).toBe("never");
+    // Auctra: the one option gives both keys the same record, and each can be changed on its own afterwards.
+    const auctra = run("auctra", file, "https://auctra.example.test", "project:rain", a, b, "--expires-at", "never");
+    expect(auctra.status, auctra.stderr).toBe(0);
+    expect(read(file).collection.auctra).toMatchObject({ credential_expires_at: "never", flow_credential_expires_at: "never" });
+    expect(JSON.parse(auctra.stdout)).toMatchObject({ expires_at: "never" });
+    expect(JSON.parse(auctra.stdout)).not.toHaveProperty("reader_expires_at");
+    expect(run("credential", file, "expiry", "collection:auctra:flow", "2027-06-01T00:00:00Z").status).toBe(0);
+    expect(read(file).collection.auctra).toMatchObject({ credential_expires_at: "never", flow_credential_expires_at: "2027-06-01T00:00:00.000Z" });
+    // By slot, and through replace.
+    const set = run("credential", file, "expiry", "open_tool:gateway", "never");
+    expect(set.status, set.stderr).toBe(0);
+    expect(JSON.parse(set.stdout)).toMatchObject({ slot: "open_tool:gateway", expires_at: "never" });
+    const replaced = run("credential", file, "replace", "connection:anat", c, "--expires-at", "never");
+    expect(replaced.status, replaced.stderr).toBe(0);
+    expect(JSON.parse(replaced.stdout)).toMatchObject({ slot: "connection:anat", expires_at: "never" });
+    expect(JSON.parse(replaced.stdout)).not.toHaveProperty("notice");
+    expect(read(file).connections[0]).toMatchObject({ credential_ref: c, credential_expires_at: "never" });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("lists a never-expiring credential as ok with `never` for its expiry and no days left", () => {
+    const file = init("expiry-never-list.json");
+    const a = key("never-list-a.key"), b = key("never-list-b.key");
+    expect(run("connect", file, "anat", "anatomia", "https://anatomia.example.test/mcp", "project:x", a, "--expires-at", "never").status).toBe(0);
+    expect(run("open-tool", file, "drivebridge", "https://drive.example.test", b).status).toBe(0);
+    const { credentials } = JSON.parse(run("credential", file, "list").stdout);
+    expect(credentials.map((row: { slot: string; state: string }) => [row.slot, row.state])).toEqual([["connection:anat", "ok"], ["open_tool:drivebridge", "unknown_expiry"]]);
+    expect(credentials[0]).toMatchObject({ expires_at: "never" });
+    expect(credentials[0]).not.toHaveProperty("days_left");
+    // A gap stays a gap: nothing is claimed for the slot without a record.
+    expect(credentials[1]).not.toHaveProperty("expires_at");
+    // Clearing the record turns it back into a gap.
+    expect(run("credential", file, "expiry", "connection:anat", "none").status).toBe(0);
+    expect(JSON.parse(run("credential", file, "list").stdout).credentials[0]).toMatchObject({ slot: "connection:anat", state: "unknown_expiry" });
+  });
+
+  it("keeps `never` while the same file stays, and drops it with the file like any other record", () => {
+    const file = init("expiry-never-kept.json");
+    const a = key("never-kept-a.key"), b = key("never-kept-b.key");
+    expect(run("open-tool", file, "gateway", "https://gateway.example.test", a, "--expires-at", "never", "--issued-at", "2026-11-01T00:00:00Z").status).toBe(0);
+    const moved = run("open-tool", file, "gateway", "https://other.example.test", a, "--replace");
+    expect(JSON.parse(moved.stdout)).toMatchObject({ expires_at: "never", expiry_kept: true });
+    expect(read(file).open_tools.gateway).toMatchObject({ credential_expires_at: "never", credential_issued_at: "2026-11-01T00:00:00.000Z" });
+    // A new date replaces it, and `never` replaces a date; an issue time never makes `never` invalid.
+    expect(run("open-tool", file, "gateway", "https://other.example.test", a, "--replace", "--expires-at", "2027-01-01T00:00:00Z").status).toBe(0);
+    expect(read(file).open_tools.gateway.credential_expires_at).toBe("2027-01-01T00:00:00.000Z");
+    expect(run("open-tool", file, "gateway", "https://other.example.test", a, "--replace", "--expires-at", "never").status).toBe(0);
+    expect(read(file).open_tools.gateway.credential_expires_at).toBe("never");
+    expect(run("credential", file, "expiry", "open_tool:gateway", "never").status).toBe(0);
+    const changed = run("open-tool", file, "gateway", "https://other.example.test", b, "--replace");
+    expect(JSON.parse(changed.stdout)).toMatchObject({ expiry_recorded: false, expiry_cleared: true });
+    expect(read(file).open_tools.gateway).toEqual({ endpoint: "https://other.example.test", credential_ref: b, enabled: true });
+  });
+
+  it("accepts nothing but the exact word `never` besides a strict RFC 3339 time, and leaves the file alone when refusing", () => {
+    const file = init("expiry-never-reject.json");
+    const a = key("never-reject-a.key");
+    expect(run("open-tool", file, "gateway", "https://gateway.example.test", a).status).toBe(0);
+    const before = readFileSync(file, "utf8");
+    const inode = statSync(file).ino;
+    for (const word of ["Never", "NEVER", " never", "never ", "forever", "none", "no", "0", "infinite", "2026-11-30", "9999-12-31", ""]) {
+      for (const args of [
+        ["connect", file, "c", "anatomia", "https://anatomia.example.test/mcp", "project:x", a, "--expires-at", word],
+        ["open-tool", file, "gateway", "https://gateway.example.test", a, "--replace", "--expires-at", word],
+        // `none` is the word that clears an expiry there, so it is the one value that command takes beyond a time and `never`.
+        ...(word === "none" ? [] : [["credential", file, "expiry", "open_tool:gateway", word]]),
+        ["credential", file, "replace", "open_tool:gateway", a, "--expires-at", word],
+      ]) {
+        const result = run(...args);
+        expect(result.status, `${args[0]} ${JSON.stringify(word)}`).not.toBe(0);
+        expect(readFileSync(file, "utf8")).toBe(before);
+        expect(statSync(file).ino).toBe(inode);
+      }
+    }
+    // The word belongs to an expiry only: it is no issue time, no duration, and not for two options at once.
+    for (const args of [["--issued-at", "never"], ["--expires-in", "never"], ["--expires-at", "never", "--expires-in", "5d"], ["--expires-at", "never", "--expires-at", "never"]]) {
+      expect(run("open-tool", file, "gateway", "https://gateway.example.test", a, "--replace", ...args).status, args.join(" ")).not.toBe(0);
+      expect(readFileSync(file, "utf8")).toBe(before);
+    }
+    // The message says what is accepted, including the word, for an expiry only. (Bun also prints the source line, so read the message itself.)
+    const message = (stderr: string) => /error: (.+)/.exec(stderr)?.[1] ?? "";
+    const refused = run("credential", file, "expiry", "open_tool:gateway", "Never");
+    expect(message(refused.stderr)).toContain("or never for a credential that does not expire");
+    const issued = run("open-tool", file, "gateway", "https://gateway.example.test", a, "--replace", "--issued-at", "never");
+    expect(message(issued.stderr)).toContain("RFC 3339");
+    expect(message(issued.stderr)).not.toContain("never");
   });
 });

@@ -7,6 +7,7 @@ import { Button, CopyRef, CoverageChip, EmptyState, Facts, InlineNotice, Input, 
 import { api, isRouteUnavailable } from "../../shared/api/control-center-client";
 import { unconnectedReasons, type DramaEpisodeDetail } from "../../shared/drama";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
+import { needsContractLabel } from "../../shared/read-model/labels";
 import { blockerLabel, currentStage, dramaOwnerNames, dramaStageLabels, isUnconnectedNode, nextStepText, railNodeInfo, tasksForEpisode, type EpisodeOrigin } from "../../shared/read-model/drama";
 import type { TaskSnapshot } from "../../task-observation";
 import { OutlineSection, TaskSection } from "./OutlineSection";
@@ -147,7 +148,7 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
               </li>;
             })}
             {pending.map((name) => <li key={name} className="flex items-center gap-2 rounded-control border border-dashed border-line px-3 py-2">
-              <Pill tone="review" size="sm" icon={railShapeIcons.plug}>待合同</Pill>
+              <Pill tone="review" size="sm" icon={railShapeIcons.plug}>{needsContractLabel}</Pill>
               <span className="text-body-sm text-muted">{name}</span>
               <span className="ml-auto text-2xs text-faint">owner 尚未提供读取合同，不在此推断</span>
             </li>)}

@@ -2,6 +2,7 @@ import type { CreativeFlowStage } from "../creative-flow";
 import { creativeFlowStages } from "../creative-flow";
 import { dramaNextStep, isNeutralNode, isProblemNode, neutralBlockers, unconnectedReasons, validDramaRef, type DramaEpisodeRow, type DramaFlowSummary, type DramaRailStage, type DramaRailState, type DramaSource, type DramaSourceState } from "../drama";
 import type { TaskSnapshot } from "../../task-observation";
+import { needsContractLabel } from "./labels";
 
 export const dramaStageLabels: Record<CreativeFlowStage, string> = {
   screenplay: "剧本",
@@ -26,7 +27,7 @@ export const railStateInfo: Record<DramaRailState, { label: string; tone: RailTo
   stale: { label: "已过期", tone: "warning", shape: "clock" },
   missing: { label: "未开始", tone: "neutral", shape: "dashed" },
   not_started: { label: "未开始", tone: "neutral", shape: "dashed" },
-  needs_contract: { label: "待合同", tone: "review", shape: "plug" },
+  needs_contract: { label: needsContractLabel, tone: "review", shape: "plug" },
   unavailable: { label: "不可用", tone: "warning", shape: "slash" },
   forbidden: { label: "无权限", tone: "danger", shape: "lock" },
   unknown: { label: "未确认", tone: "neutral", shape: "question" },

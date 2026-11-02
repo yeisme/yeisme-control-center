@@ -130,7 +130,9 @@ bun scripts/personal-config.ts observe <配置文件> on [--interval-minutes N] 
 bun scripts/personal-config.ts observe <配置文件> off
 ```
 
-`--interval-minutes` 至少 5（默认 10，上限 1440）；`--open-tools-every` 至少 1（默认 3）；`--recipients` 缺省是每个已启用的管理员，`--recipients default` 恢复缺省。`off` 保留已设的参数。设置后需重启服务。
+`--interval-minutes` 至少 5（默认 10，上限 1440）；`--open-tools-every` 至少 1（默认 3，上限 1000）；`--recipients` 缺省是每个已启用的管理员，至多 100 个、每个不超过 200 个字符，`--recipients default` 恢复缺省。`off` 保留已设的参数。设置后需重启服务。
+
+服务启动时检查整块 `observation`：`enabled` 要是布尔值，`interval_minutes` 是 5 到 1440 的数，`open_tools_every` 是 1 到 1000 的整数，`recipients` 是至多 100 个、每个不超过 200 个字符的非空字符串；缺省的可选键不算问题。任何一项不合格，**整块按未启用处理**，并按问题代码写一行日志（只写代码，不写值，例如 `observation_recipients_invalid`），`GET /observation/status` 也会标出配置无效；越界的值不会被悄悄夹进范围。`observe` 命令用的是同一份界限，并且写之前检查整块：它拒绝的，就是服务端会当作无效的。只有手改配置文件才写得出无效的块，这时下一次 `observe` 会列出问题代码、什么也不写，直到改正：数值或接收人越界的，用参数改正（例如 `observe <配置文件> on --interval-minutes 10`）；整块根本不是对象（比如被改成了字符串 `"yes"`）的，参数改不了，`observe` 以 `observation_not_an_object` 拒绝，不会把它展开进新块，要在文件里改正或删掉 `observation` 再运行（`null` 和没有这一项一样）。
 
 ## 账号管理不改别的配置
 
@@ -146,13 +148,35 @@ bun scripts/personal-config.ts open-tool <配置文件> drivebridge https://<主
 bun scripts/personal-config.ts open-tool <配置文件> gateway https://<主机> <令牌文件> --expires-at 2026-11-30T00:00:00Z
 
 bun scripts/personal-config.ts credential <配置文件> list                                  # 槽位、状态、到期时间；不含路径和地址
-bun scripts/personal-config.ts credential <配置文件> expiry <槽位> <RFC3339|none>            # 给已在用的凭据补记，或清除
+bun scripts/personal-config.ts credential <配置文件> expiry <槽位> <RFC3339|never|none>      # 给已在用的凭据补记，记成不过期，或清除
 bun scripts/personal-config.ts credential <配置文件> replace <槽位> <新文件> --expires-in 30d  # 换上新凭据文件
 ```
 
-槽位 id：`connection:<连接 id>`、`open_tool:<drivebridge|gateway>`、`provider:<owner>`、`owner:<owner>`、`collection:auctra`（收集密钥）、`collection:auctra:flow`（读取密钥）。`--expires-in` 接受 `<N>d` 或 `<N>h`；`--expires-at` 要带秒和时区。`connect`、`open-tool`、`provider`、`auctra` 和 `credential replace` 都先用服务端读凭据的同一个函数检查文件：必须存在（所以先签发凭据，再登记）、是普通文件、0600、运行命令的账号读得了、不是空白，不满足就拒绝、什么也不写。`credential replace` 总当作新凭据，不给日期就清掉旧日期并提示，同一个旧文件上的其他槽位会列出来，它们要各自 `replace`；`open-tool --replace`、`provider` 与 `auctra --replace` 重跑时文件没变（只改地址或模型）就保留已记录的日期，文件变了才清掉。`credential expiry` 会点名共用同一文件的其他槽位，每个槽位各记各的到期时间。改完后重启服务。各工具的续签步骤见使用指南「接入」章节的「续签凭据」。
+槽位 id：`connection:<连接 id>`、`open_tool:<drivebridge|gateway>`、`provider:<owner>`、`owner:<owner>`、`collection:auctra`（收集密钥）、`collection:auctra:flow`（读取密钥）。`--expires-in` 接受 `<N>d` 或 `<N>h`；`--expires-at` 要带秒和时区。本来就不会过期的凭据（Auctra 的服务密钥，以及一些观察密钥）把到期时间记成 `never`（`--expires-at never` 或 `credential … expiry <槽位> never`）：配置里存的就是这个词，「服务」页写“不过期”，状态为正常、没有剩余天数，也不再永远提示“未记录到期时间”。只认全小写的 `never`；它不是日期，不能当 `--issued-at` 或 `--expires-in` 用，别的写法（`Never`、`forever`、只有日期）都会被拒绝，`credential … expiry` 另外认 `none`，用来清除记录。**先升级服务端，再记 `never`**：只有运行这份配置的控制中心已带上这项改动（第五轮 W5），才认这个词；旧服务端会把它读成“到期时间读不了”（`invalid_expiry`，一个要更正的记录），在服务页显示警告。`connect`、`open-tool`、`provider`、`auctra` 和 `credential replace` 都先用服务端读凭据的同一个函数检查文件：必须存在（所以先签发凭据，再登记）、是普通文件、0600、运行命令的账号读得了、不是空白，不满足就拒绝、什么也不写。`credential replace` 总当作新凭据，不给日期就清掉旧日期并提示，同一个旧文件上的其他槽位会列出来，它们要各自 `replace`；`open-tool --replace`、`provider` 与 `auctra --replace` 重跑时文件没变（只改地址或模型）就保留已记录的日期，文件变了才清掉。`credential expiry` 会点名共用同一文件的其他槽位，每个槽位各记各的到期时间。改完后重启服务。各工具的续签步骤见使用指南「接入」章节的「续签凭据」。
 
 控制中心不签发、不续签凭据，也不会因为快到期就自行动作；这里只记录和提示。
+
+## 剧集看板的 Auctra 服务
+
+剧集制作看板的剧集和阶段来自一台 Auctra 服务，一部作品一台。Auctra 不允许一把密钥兼做两件事，所以要两把：`service-collector` 读收集库，`service-consumer` 读每集的阶段。形态如下，尖括号都是占位符：
+
+```bash
+# Auctra 一侧：监听控制中心服务器够得到的非本机地址，开启 HTTP 创作接口并确认远程 MCP
+auctra serve --path <作品目录> --listen <非本机地址>:<端口> --http-authoring --mcp-remote-ack --mcp-access-key-file <作品目录>/.auctra/mcp/access-keys.json
+
+# 签发两把密钥，各写进一个新的 0600 文件；--store 与上面服务用的是同一个密钥库
+auctra mcp access-key issue --purpose service-collector --work-ref <项目引用> --key-file <新文件> --store <同一个密钥库>
+auctra mcp access-key issue --purpose service-consumer --work-ref <项目引用> --key-file <新文件> --store <同一个密钥库>
+
+# 控制中心一侧：登记地址、项目和两把密钥；地址是私网 IPv4 上的 http 时加 --private-http
+bun scripts/personal-config.ts auctra <配置文件> <Auctra 地址> <项目引用> <收集密钥文件> <读取密钥文件> --private-http
+
+# 控制中心已带上第五轮 W5 的改动之后，再把这两把不过期的密钥记成 never（旧服务端会把它读成“到期时间读不了”）
+bun scripts/personal-config.ts credential <配置文件> expiry collection:auctra never
+bun scripts/personal-config.ts credential <配置文件> expiry collection:auctra:flow never
+```
+
+`<项目引用>` 是完整的项目引用（形如 `project:<作品>`），签发和登记要用同一个。Auctra 的服务密钥不过期，所以升级之后记成 `never`（见上节；也可以在登记时用 `--expires-at never`，同样要等服务端先升级）。`--private-http` 只放行私网 IPv4 上的 http，公网地址、主机名和带路径的写法仍被拒绝；经过不可信网络时，Auctra 前面要放 HTTPS 反向代理。命令只写配置，不发请求；重启控制中心后在「服务」页点「同步记录」。看板“制作拆解”一格读的是 Scaena 的分镜投影：Scaena 没有部署它，或控制中心的观察密钥读不到它时，这一格显示未连接，不影响其余阶段。
 
 ## Provider 与 owner 状态
 

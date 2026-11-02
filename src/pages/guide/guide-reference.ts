@@ -271,7 +271,7 @@ export const connectedTools: ConnectedTool[] = [
     ],
     renew: [
       { command: "anatomia service key create --db <state-dir>/anatomia.db --key-ref service-key:<org>:control-center-next --observer-tenant tenant:<tenant> --observer-project project:<name> --observer-content --owner-auth-ref <owner-auth-ref> --evidence evidence:<ref> --out <key-dir>/anatomia-observer-next.key --json", note: "参数和第一次一样，只把 --out 换成一个还不存在的新文件；--key-ref 若提示已存在就换个新名字。旧密钥文件先留着，换好并核对之后再删" },
-      { command: "bun scripts/personal-config.ts credential <config-file> replace connection:anatomia-main <key-dir>/anatomia-observer-next.key", note: "文件必须是 0600。换上时会清掉旧密钥的到期记录；这把密钥有到期时间就加 --expires-at <RFC3339>，没有就不加，「服务」页会写“未记录到期时间”。然后重启控制中心" },
+      { command: "bun scripts/personal-config.ts credential <config-file> replace connection:anatomia-main <key-dir>/anatomia-observer-next.key", note: "文件必须是 0600。换上时会清掉旧密钥的到期记录；这把密钥有到期时间就加 --expires-at <RFC3339>，不会过期就加 --expires-at never，两样都不给，「服务」页会写“未记录到期时间”。然后重启控制中心" },
     ],
   },
   {
@@ -313,5 +313,5 @@ export const connectedTools: ConnectedTool[] = [
 export const renewGeneral: GuideCommand[] = [
   { command: "bun scripts/personal-config.ts credential <config-file> list", note: "列出每个凭据的槽位、状态和记录的到期时间；输出里没有文件位置和地址。槽位形如 connection:<连接 id>、open_tool:<工具>、collection:auctra" },
   { command: "bun scripts/personal-config.ts credential <config-file> replace connection:<id> <key-dir>/<new-key-file> --expires-at <RFC3339>", note: "新凭据照第一次接入时的签发命令再签一份（见上面的「接入控制中心」），写进新文件后用这条换上。文件必须是 0600；不给日期，旧的到期记录就清掉" },
-  { command: "bun scripts/personal-config.ts credential <config-file> expiry <slot> <RFC3339>", note: "凭据已经在用、只是没记到期时间时，用它补记；填 none 就清除记录" },
+  { command: "bun scripts/personal-config.ts credential <config-file> expiry <slot> <RFC3339>", note: "凭据已经在用、只是没记到期时间时，用它补记；填 none 就清除记录。凭据本来就不会过期的（比如 Auctra 的服务密钥）填 never，「服务」页写“不过期”，不再提示没记录" },
 ];

@@ -15,7 +15,7 @@ import { toolCatalogCacheKey, type CatalogAction, type CatalogChannel, type Cata
 import { formatRelative } from "../../shared/read-model/format";
 import {
   availabilityLabels, availabilityTone, capabilityLabels, catalogCoverageLabels, catalogCoverageTone, changeLabels, changeTone, channelStatusLabels, channelStatusTone,
-  entryKindLabels, freshnessLabels, generationModeLabels, laneLabels, labelFrom, modelStatusLabels, modelStatusTone, reasonLabel, riskLabels, riskTone,
+  entryKindLabels, freshnessLabels, generationModeLabels, laneLabels, labelFrom, modelStatusLabels, modelStatusTone, needsContractLabel, reasonLabel, riskLabels, riskTone,
 } from "../../shared/read-model/labels";
 import {
   catalogMetrics, changesByDay, entryRef, filterActions, filterChannels, filterModels, filterTools, findEntry, latestHighlights, parseCatalogTab, parseOwnerFilter, parseRiskFilter,
@@ -77,7 +77,7 @@ export default function CapabilityHub() {
       foldMetrics
       summary="跨 owner 的只读目录：模型、渠道、MCP 工具与动作。目录登记不等于可调用，控制中心不会调用任何条目。"
       metrics={metrics && <MetricStrip label="目录概况" items={[
-        { label: "服务", value: `${metrics.readableServers}/${metrics.servers}`, hint: metrics.pendingServers ? `+${metrics.pendingServers} 待接入` : undefined },
+        { label: "服务", value: `${metrics.readableServers}/${metrics.servers}`, hint: metrics.pendingServers ? `+${metrics.pendingServers} ${needsContractLabel}` : undefined },
         { label: "最新可用模型", value: metrics.latestReady, hint: `共 ${metrics.models}${metrics.historical ? ` · 历史 ${metrics.historical}` : ""}`, tone: metrics.latestReady ? "success" : "neutral" },
         { label: "就绪渠道", value: `${metrics.readyChannels}/${metrics.channels}` },
         { label: "工具与动作", value: metrics.tools + metrics.actions, hint: `只读 ${metrics.readOnlyActions} · 受控 ${metrics.gatedActions}` },
@@ -182,12 +182,12 @@ function Overview({ catalog, onOpen, onTab }: { catalog: ToolCatalog; onOpen: (r
             <span className="tabular text-right font-medium text-ink">{item.count}</span>
           </li>)}</ul> : <EmptyState compact icon={<ListTree />} title="owner 未声明动作" />}
         </Panel>
-        <Panel title="待接入目录" eyebrow="已知存在、但还没有控制中心可用的只读合同">
+        <Panel title={`${needsContractLabel}目录`} eyebrow="已知存在、但还没有控制中心可用的只读合同">
           <ul className="divide-y divide-line">{pending.map((server) => <li key={server.id}>
             <button type="button" onClick={() => onOpen(entryRef("server", server.owner, server.id))} className="flex w-full items-center gap-3 px-5 py-2.5 text-left hover:bg-panel-soft">
               <span className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-panel-sunken text-muted"><Server className="size-3.5" /></span>
               <span className="min-w-0 flex-1"><span className="block text-body-sm font-medium text-ink">{server.name}</span><span className="block truncate text-2xs text-muted">{reasonLabel(server.reason)}</span></span>
-              <Pill size="sm" tone="review">待接入</Pill>
+              <Pill size="sm" tone="review">{needsContractLabel}</Pill>
             </button>
           </li>)}</ul>
         </Panel>

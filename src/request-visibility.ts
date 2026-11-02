@@ -1,4 +1,5 @@
 import type { ProcessObservation, PromptCaptureObservation } from "./observation-contract";
+import { needsContractLabel } from "./shared/read-model/labels";
 
 export const owners = ["aigora", "scaena", "eikona", "sonora"] as const;
 export type Owner = (typeof owners)[number];
@@ -23,7 +24,7 @@ export const coverageLabels: Record<CoverageState, string> = {
   unavailable: "来源不可用",
   expired: "已过期",
   integrity_failed: "完整性校验失败",
-  needs_contract: "待补齐接口",
+  needs_contract: needsContractLabel,
 };
 export interface Coverage {
   owner: Owner;

@@ -4,6 +4,7 @@ import { ThemeProvider, useTheme, type ThemePreference } from "../../app-shell/t
 import { GuideContent } from "./GuideContent";
 import { parsePublicGuide, publicGuideHref } from "./guide-location";
 import type { GuideNavigator } from "./GuideNav";
+import { moveBetweenRadios, radioTabIndex } from "./radio-keys";
 
 const themeOptions: { id: ThemePreference; label: string; icon: typeof Sun }[] = [
   { id: "light", label: "浅色", icon: Sun },
@@ -11,10 +12,11 @@ const themeOptions: { id: ThemePreference; label: string; icon: typeof Sun }[] =
   { id: "system", label: "跟随系统", icon: Monitor },
 ];
 
-function ThemeSwitch() {
+export function ThemeSwitch() {
   const { preference, setPreference } = useTheme();
-  return <div role="radiogroup" aria-label="主题" className="public-guide-theme">
-    {themeOptions.map(({ id, label, icon: Icon }) => <button key={id} type="button" role="radio" aria-checked={preference === id} aria-label={label} title={label} onClick={() => setPreference(id)}><Icon className="size-4" /></button>)}
+  const checked = themeOptions.findIndex((option) => option.id === preference);
+  return <div role="radiogroup" aria-label="主题" className="public-guide-theme" onKeyDown={(event) => moveBetweenRadios(event, (index) => setPreference(themeOptions[index].id))}>
+    {themeOptions.map(({ id, label, icon: Icon }, index) => <button key={id} type="button" role="radio" aria-checked={index === checked} tabIndex={radioTabIndex(index, checked)} aria-label={label} title={label} onClick={() => setPreference(id)}><Icon className="size-4" /></button>)}
   </div>;
 }
 

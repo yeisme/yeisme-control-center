@@ -1,0 +1,38 @@
+# Tasks
+
+## 1. 服务目录分组
+
+- [x] 1.1 `src/pages/services/directory-groups.ts`：`isUnintegrated`（只登记且没配置才进分组，配置过的留在表格里）、`filterDirectory`（筛选与搜索规则照旧，搜名称、用途、路径、缺口）、`directoryView`（`listed`、`unintegrated`、`unintegratedTotal`、`narrowed`：有搜索文字或选了「缺口」）、`unintegratedCount`、读写偏好 `readFlag` / `writeFlag`（存储缺失或抛错时按收起、不抛错）与 `useUnintegratedOpen` | evidence: `tests/service-directory-groups.test.ts` 16 项（含 25 项真实目录定义：8 个列出、17 个折叠，顺序不变；配置过的条目留在表格；总数不随筛选变；`readFlag`/`writeFlag`/`toggleFlag` 用假存储，存储缺失或抛错都不出错；`useUnintegratedOpen` 从浏览器记住的值起步，它返回的 toggle 会写新值；面板读到记住的“展开”就直接展开）；去掉 toggle 的写入、让钩子不用给它的存储、面板不把存储传下去三个变异各有测试失败
+- [x] 1.2 `src/pages/services/ServiceDirectory.tsx`：`ServiceDirectoryPanel` 与 `UnintegratedGroup`：`h3` 里一个带 `aria-expanded`、`aria-controls` 的按钮，面板常驻页面、收起时 `hidden`，数量在标题里；有搜索或「缺口」时标题是没有按钮的纯文字、直接列出匹配项；分组里的表格没有「状态」列和接入行；筛选后没有任何匹配才显示“没有匹配的服务”；`ServicesPage.tsx` 只剩摆放 | evidence: `tests/service-directory-groups.test.ts` 的渲染 6 项（收起、展开、记住的展开、强制列出、不画空分组、状态列只在主表）；展开、记忆与搜索在私有端口的浏览器里手工核对过（没有入库的脚本，浏览器旅程没有覆盖分组本身，只守住服务页其余部分没被破坏）：收起默认值、Enter 展开、写入 `1`、重载后仍展开、搜索「pinax」得 `1 / 17 项` 且没有按钮、「缺口」筛选直接列出、回到「全部」恢复记住的状态；axe 收起、展开、搜索、深色展开 serious/critical 为 0；390 宽截图人工看过
+- [x] 1.3 服务页深链 `#/services?ref=<槽位>`：`src/pages/services/credential-target.ts`（精确匹配槽位，是否在折叠组里）；`CredentialsPanel` 的 `focusRef`：目标行高亮（`data-linked`）、可取得焦点，折叠组从第一次渲染起就是展开的，滚动与聚焦每个链接只做一次；`ServicesPage` 从地址读 `ref` | evidence: `tests/credential-target.test.ts` 6 项（问题行与折叠行、读不了的到期记录与部分读取被拒算问题行、缺省/空/未知/前缀/大小写/空格都不命中、`encodeURIComponent` 的往返、面板渲染：目标行高亮且可聚焦、折叠组展开、无目标时与普通面板逐字相同）；去掉展开、忽略折叠、改成前缀匹配三个变异各有测试失败；私有端口浏览器手工核对：问题行聚焦且在视野内、折叠组不开，折叠行让该组展开并聚焦、在视野内，axe 浅色与深色为 0，读者能再折叠、重新读取数据不会再展开或抢焦点，空/未知/大小写不符/缺省都是普通页面且无报错
+
+## 2. 一个短词
+
+- [x] 2.1 `needsContractLabel = "待补齐接口"` 放在 `src/shared/read-model/labels.ts`，说的是“该由 owner 补接口”；不用“待接入”，因为它会读成“去接入它”，还和同一页的“未接入”分组撞车（DriveBridge 卡片写“待接入”，下面就是“未接入 17 项”）。`request-visibility.ts`（请求覆盖）、`read-state.ts`（读取状态）、`open-tools.ts`（开放工具状态）、`OpenToolCard.tsx`（读取项）、`ProcessTimeline.tsx`、`labels.ts`（目录覆盖）、`readiness.ts`（Provider 就绪）、`SourceCoverage.tsx`、`OwnerLinkRow.tsx`（MuWeave 交接行）、`CapabilityHub.tsx`（指标提示、待补齐面板的标题与胶囊）、`ServiceDirectory.tsx`，以及已在主树里改用同一常量的 `drama.ts`（剧集阶段链）、`EpisodeInspector.tsx`、`WorkQueueInspector.tsx` 都用它；每处先核对确实是 `needs_contract` 的状态，解释缺口的长句不动 | evidence: `tests/needs-contract-label.test.ts` 3 项（常量的值且不含“接入”；覆盖、读取状态、开放工具、目录覆盖、Provider 就绪、阶段链六张标签表都等于它；`src` 里没有文件写“待合同”或“待接口”）；`grep -rn '待合同\|待接口' src` 无输出；把常量改回旧词的变异使其中一项失败。没改的：两处“缺少观测合同”（说的是某条连接缺的那份合同）和所有解释缺口的长句（如 `Layout.tsx` 的“等待 owner 合同”、`CapabilityHub.tsx` 的空态说明）
+
+## 3. 指南单选组键盘
+
+- [x] 3.1 `src/pages/guide/radio-keys.ts`：`radioTarget`（`moveIndex` 的列表走位，→↓ 向后、←↑ 向前，首尾绕回，Home/End）、`radioTabIndex`（已选项或没有已选时第一项是唯一 Tab 停靠点）、`moveBetweenRadios`（移动焦点并选中，修饰键与不用的键留给浏览器）；接入 `Picker`（选工具、选 Agent 客户端、选回放的客户端）与公开页主题开关；章节栏是一排真实链接，不动 | evidence: `tests/guide-keyboard.test.ts` 10 项：键位表、绕回、Home/End 在首尾不动、其余键与空组、roving 的 tabindex、`moveBetweenRadios` 的焦点与 `preventDefault`、修饰键、不是自己的单选项；用 `renderToStaticMarkup` 断言指南首屏与案例章每个单选组恰有一个 `tabindex="0"` 且就是已选项；去掉绕回、去掉 →/← 映射、去掉 tabindex 三个变异各有测试失败；公开页主题开关另有渲染测试（只有已选项是 Tab 停靠点）。单元测试在 node 里跑、按不了键，键位接线与 Tab 行为由 `scripts/verify-public-guide.ts` 新增的一步守住：“the pickers and the theme switch are radio groups the keyboard drives”，对选工具、选 Agent 客户端和主题三组按 →、←、End、↓（绕回）、↑（绕回）、Home、Shift+→（不动）、Tab（离开本组），每一步断言选中项、焦点和唯一的 Tab 停靠点，选择器的选择进地址、主题开关逐步生效并在最后恢复“跟随系统”，章节栏的链接都没有 tabindex，并过 axe；`test:public-guide` 13/13；Picker 与主题开关各去掉按键接线、各去掉 tabIndex 四个变异都使这一步失败
+
+## 4. 不过期的凭据与 observe
+
+- [x] 4.1 `src/shared/credentials.ts`：`neverExpires`、`isNeverExpires`（只认全小写的 `never`）、`CredentialStatus.never_expires`、「不过期」文案、`invalid_expiry` 的说明加上“或写成 never”；`parseRfc3339` 不变 | evidence: `tests/credentials-view.test.ts` 2 项新增（文案、故障优先、不算缺记录、卡片页脚与面板渲染）
+- [x] 4.2 `server/credentials.ts`：`never` 判为 `ok`，没有 `expires_at`、`days_left`、`stage`，行带 `never_expires: true`；文件读不到、被拒、部分读取被拒仍先于它；Auctra 两把密钥各记各的 | evidence: `tests/credentials.test.ts` 4 项新增（任何后来的日期都是 `ok`；故障优先；收集密钥 `never` 而读取密钥 3 天后到期；只认这个词，`Never`、` never`、`forever`、无时区日期仍是 `invalid_expiry`）；放宽 `parseRfc3339`、去掉 `never` 识别、去掉行上的标记三个变异各有测试失败
+- [x] 4.3 `scripts/personal-config.ts`：`--expires-at never`（`connect`、`open-tool`、`provider`、`auctra` 两把密钥、`credential replace`）与 `credential expiry <槽位> never` 存 `"never"`；`--issued-at`、`--expires-in` 不收；发行时间早于到期的检查对 `never` 恒成立；同一个文件重跑保留，换文件清掉；`credential list` 打印 `expires_at: "never"`；提示与用法里写明 | evidence: `tests/personal-config.test.ts` 4 项新增（每个命令都能记、`list` 输出、保留与清除、12 种写法 × 4 条命令加 4 种选项组合全部被拒且文件与 inode 不变、拒绝信息只在到期时提到 `never`）；放宽到不分大小写、让 `--issued-at` 接受 `never` 两个变异各有测试失败
+- [x] 4.4 `observe` 与服务端一致：界限取自 `observationBounds`，写之前用 `observationProblems` 检查整块，100 个接收人与 200 个字符的接收人被接受、101 与 201 被拒，手改留下的越界周期被点名并拒绝、用参数能改正 | evidence: `tests/personal-config.test.ts` 4 项新增（含现有的 `observation` 不是对象时：字符串、数字、布尔、数组各自在 `on`、`off`、带参数三种命令下都以 `observation_not_an_object` 拒绝、文件与 inode 不变；`null` 当作没有）；去掉接收人上限和整块检查的变异使其中两项失败
+- [x] 4.5 「凭据」面板的补记提示说明 `never`（旅程选择器 `[data-credential-backfill]` 里的命令不变），指南「续签凭据」两处说明里加上 `never` | evidence: `tests/credentials-view.test.ts`（补记提示渲染，没有缺记录时不出现）；`tests/guide-content.test.ts` 现有各项仍通过（命令没变，只改了说明）
+
+## 5. 文档
+
+- [x] 5.1 `docs/current-status.md`（“待补齐接口”一词、服务目录行不再声称有浏览器旅程覆盖、记 `never` 要等服务端升级之后）：修正 Eikona canary（费用上限已部署）、25 项服务目录（8 个已接入、17 个未接入）、部署交付（R1，以及“均未推送”“未发布”的旧说法）、发布卫生与复验账号、凭据生命周期、剧集看板（10-22 的读数标明当时 Auctra 未接）、全局音频播放器（Sonora 句柄 403 的旧说法）、使用指南章节（313539f 已随 R1 发布）、工具目录（Gateway 工具已读自 `/v1/tools`）；新增后台观察、Eikona 图像提交的费用上限、剧集制作看板的真实作品、Sonora 真实播放四行；键盘与焦点一行写明指南单选组 | evidence: 不含主机名、IP、域名或家目录路径（对本次改动逐行搜过）
+- [x] 5.2 `docs/frontend-api-completion.md`：额外工具来源表去掉已接入的 MCP Gateway、DriveBridge、Anatomia 三行，“待合同”改为“未接入”（服务目录分组）与“待补齐接口”（状态短词），A4 里 Gateway 目录的说法更正 | evidence: 与 `src/service-directory.ts` 的 17 个 `not_integrated` 条目逐项对照，表里 17 行
+- [x] 5.3 `docs/lan-deployment.md`：无效的 `observation` 块按未启用处理并按问题代码写日志、`observe` 用同一份界限，整块不是对象的要在文件里改正；`never` 的写法，以及先升级服务端、再记 `never`；给剧集看板运行 Auctra 服务的形态（`auctra serve …`、两把密钥的签发、`personal-config auctra … --private-http`），只有占位符 | evidence: 与 `scripts/personal-config.ts`、`server/observation-config.ts`、`ServicesPage.tsx` 里的步骤逐条对照
+- [x] 5.4 `docs/creative-flow-integration.md`、`docs/provider-live.md` 第 42 行、`docs/frontend-api-completion.md` 里指这个状态的短词改为“待补齐接口”；`server/contracts.ts` 里 `CredentialLifecycle` 的注释写明到期时间是 RFC 3339 或字面值 `never` | evidence: `docs/*.md` 里只剩 `docs/interfaces.md` 第 163 行的一句“固定视频输入、known quote、封面与交付成功仍待合同”（一句话，不是状态标签，该文件归另一条线）；`openspec/changes/yeisme-control-center-background-observation-v1/tasks.md` 第 48 行写着换成 `labels.ts` 里的“待接入标签”，词已不对，由那个变更的负责人改
+
+## 6. 验证
+
+- [x] 6.1 `bun run typecheck` | evidence: 通过（退出码 0）；另按 `--noUnusedLocals --noUnusedParameters` 单独查过本次改动的文件，没有未用的导入
+- [x] 6.2 全量单元测试 | evidence: `bunx vitest run --testTimeout=90000 --hookTimeout=90000 --maxWorkers=4`：87 个文件 799 项全部通过（含另一条线同时在改的测试；中途有一次因它们写到一半而失败，等它们的文件稳定后重跑通过）；本变更涉及的文件：目录分组 16、指南键盘 11、深链 6、短词 3、凭据状态 29、凭据文案 10、`personal-config` 36、创意流 14、指南内容 10；机器负载高时默认 5 秒超时会误报
+- [x] 6.3 `bun run build`、`bun run check:public-surface`、`test:public-guide` | evidence: 构建通过；公开面检查 772 个文件 0 个发现；`PUBLIC_GUIDE_PORT=4392 bun run test:public-guide` 13/13（新增一步是指南单选组的键盘检查）
+- [x] 6.4 浏览器旅程只读跑一遍，确认服务页、指南、标签与无障碍检查没被破坏 | evidence: `I1_UI_PORT=4421 I1_API_PORT=4422 I1_OWNER_PORT=4423 bun run test:browser-journey`：77 项中 76 项通过，服务、指南、工具目录、两遍 axe（桌面与手机，浅色与深色）、凭据两项都在其中；失败的一项是另一条线正在改的“桌面通知”检查（`notified_for_what_was_in_view`，只在它未提交的旅程改动里），不属于本变更；旅程脚本本变更一字未改，也没有任何一项断言“待接入”“待接口”“待合同”或“待补齐接口”的字样；服务目录分组与服务页深链没有浏览器旅程覆盖，由单元测试和上面手工核对守住
+- [x] 6.5 `openspec validate yeisme-control-center-services-governance-v1 --strict --no-interactive` | evidence: 输出 `Change 'yeisme-control-center-services-governance-v1' is valid`

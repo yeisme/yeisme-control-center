@@ -16,7 +16,8 @@ import { isOpenToolKind } from "../src/shared/open-tools";
 import { clientOrigin } from "../src/task-links";
 import { credentialReasonOf, type CredentialFileReason } from "../server/credential-file";
 import { credentialHolder, credentialSlots, credentialStatuses } from "../server/credentials";
-import { parseRfc3339 } from "../src/shared/credentials";
+import { observationBounds, observationProblems } from "../server/observation-config";
+import { isNeverExpires, neverExpires, parseRfc3339 } from "../src/shared/credentials";
 import type { ServerConfig, TaskConnection, ProviderOwner, ObservationConfig } from "../server/contracts";
 const [command, first, ...rest] = process.argv.slice(2);
 const userActions = ["add", "list", "revoke", "rotate", "enable"];
@@ -24,9 +25,9 @@ const userActions = ["add", "list", "revoke", "rotate", "enable"];
 const [file, ...args] = command === "user" && userActions.includes(first) && rest.length ? [rest[0], first, ...rest.slice(1)] : [first, ...rest];
 const usage =
   "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|credential|studio|cancel|content|disable|observe|status <config-file> [arguments]\n" +
-  "Credential expiry: connect, open-tool, provider and auctra take [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], recorded next to the credential reference (for auctra the dates apply to both keys).\n" +
+  "Credential expiry: connect, open-tool, provider and auctra take [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], recorded next to the credential reference (for auctra the dates apply to both keys); never marks a credential that does not expire.\n" +
   "auctra also takes --private-http, like connect and open-tool: plain http to a private IPv4 address is accepted for its origin.\n" +
-  "  credential <config-file> list | expiry <slot> <RFC3339|none> | replace <slot> <file> [--expires-at|--expires-in] [--issued-at]";
+  "  credential <config-file> list | expiry <slot> <RFC3339|never|none> | replace <slot> <file> [--expires-at|--expires-in] [--issued-at]";
 if (
   !file ||
   ![
@@ -85,12 +86,18 @@ const replacePrivate = (target: string, content: string) => {
   writeFileSync(temp, content, { mode: 0o600, flag: "wx" });
   try { renameSync(temp, target); } catch (error) { rmSync(temp, { force: true }); throw error; }
 };
-/** An RFC 3339 date-time as a UTC ISO string. Seconds and a zone are required: a bare date or a local time is refused. */
-const instant = (value: string, name: string) => {
+/**
+ * An RFC 3339 date-time as a UTC ISO string. Seconds and a zone are required: a bare date or a local time is refused.
+ * Only an expiry (`allowNever`) may also be the word `never`, kept as it is; nothing else that is not a time gets through.
+ */
+const instant = (value: string, name: string, allowNever = false) => {
+  if (allowNever && isNeverExpires(value)) return neverExpires;
   const at = parseRfc3339(value);
-  if (at === undefined) throw Error(`${name} must be an RFC 3339 time with seconds and a zone, such as 2026-11-30T00:00:00Z or 2026-11-30T23:59:59+08:00.`);
+  if (at === undefined) throw Error(`${name} must be an RFC 3339 time with seconds and a zone, such as 2026-11-30T00:00:00Z or 2026-11-30T23:59:59+08:00${allowNever ? ", or never for a credential that does not expire" : ""}.`);
   return new Date(at).toISOString();
 };
+/** Whether an issue time is before the expiry; a credential that never expires is issued before it. */
+const issuedBefore = (issued: string, expires: string) => isNeverExpires(expires) || Date.parse(issued) < Date.parse(expires);
 /**
  * A credential file the control center itself can use: it must pass `secret()`, the function the server reads it with,
  * so a missing, loose, unreadable, empty or blank file is refused here and not found out when a read fails. The content
@@ -132,10 +139,10 @@ const takeDates = (list: string[]) => {
     lasting = Number(parts[1]) * (parts[2] === "d" ? 86_400_000 : 3_600_000);
   }
   const dates: CredentialDates = {
-    ...(expiresAt !== undefined ? { expires: instant(expiresAt, "--expires-at") } : lasting !== undefined ? { expires: new Date(Date.now() + lasting).toISOString() } : {}),
+    ...(expiresAt !== undefined ? { expires: instant(expiresAt, "--expires-at", true) } : lasting !== undefined ? { expires: new Date(Date.now() + lasting).toISOString() } : {}),
     ...(issuedAt !== undefined ? { issued: instant(issuedAt, "--issued-at") } : {}),
   };
-  if (dates.expires && dates.issued && Date.parse(dates.issued) >= Date.parse(dates.expires)) throw Error("--issued-at must be earlier than the expiry.");
+  if (dates.expires && dates.issued && !issuedBefore(dates.issued, dates.expires)) throw Error("--issued-at must be earlier than the expiry.");
   return { rest, dates };
 };
 /** The dates as config keys next to a credential reference: `credential_*`, or `flow_credential_*` for Auctra's reader key. */
@@ -152,7 +159,7 @@ const datesToKeep = (given: CredentialDates, previous: object | undefined, sameF
   const recorded = (previous ?? {}) as Record<string, unknown>;
   const kept = (key: string) => sameFile && typeof recorded[`${prefix}_${key}`] === "string" ? recorded[`${prefix}_${key}`] as string : undefined;
   const dates = { expires: given.expires ?? kept("expires_at"), issued: given.issued ?? kept("issued_at") };
-  if (dates.expires && dates.issued && Date.parse(dates.issued) >= Date.parse(dates.expires)) throw Error("The issue time must be earlier than the expiry, counting the dates already recorded for this file.");
+  if (dates.expires && dates.issued && !issuedBefore(dates.issued, dates.expires)) throw Error("The issue time must be earlier than the expiry, counting the dates already recorded for this file.");
   return dates;
 };
 const hadExpiry = (entry: object | undefined, prefix = "credential") => !!entry && `${prefix}_expires_at` in entry;
@@ -183,7 +190,7 @@ const expiryReport = (written: CredentialDates, given: CredentialDates, slot: st
   ...(written.expires ? { expires_at: written.expires, ...(given.expires ? {} : { expiry_kept: true }) } : {
     expiry_recorded: false,
     ...(hadOne ? { expiry_cleared: true } : {}),
-    notice: (hadOne ? "The expiry recorded for the previous credential was cleared. Record the new one" : "No expiry is recorded, so the control center cannot warn before the credential runs out. Record it") + ` with: credential <config-file> expiry ${slot} <RFC3339>.`,
+    notice: (hadOne ? "The expiry recorded for the previous credential was cleared. Record the new one" : "No expiry is recorded, so the control center cannot warn before the credential runs out. Record it") + ` with: credential <config-file> expiry ${slot} <RFC3339> (or never, if the credential does not expire).`,
   }),
   ...(written.issued ? { issued_at: written.issued } : {}),
 });
@@ -375,7 +382,7 @@ if (command === "init") {
   } else if (command === "observe") {
     // Server-side observation (reminders with no browser open). The server reads this at start, so restart afterwards.
     const [mode, ...flags] = args;
-    if (!["on", "off"].includes(mode || "")) throw Error("observe requires on|off [--interval-minutes N] [--open-tools-every N] [--recipients issuer|subject,...|default].");
+    if (!["on", "off"].includes(mode || "")) throw Error(`observe requires on|off [--interval-minutes N (${observationBounds.minIntervalMinutes}-${observationBounds.maxIntervalMinutes})] [--open-tools-every N (${observationBounds.minOpenToolsEvery}-${observationBounds.maxOpenToolsEvery})] [--recipients issuer|subject,... (at most ${observationBounds.maxRecipients})|default].`);
     const known = ["--interval-minutes", "--open-tools-every", "--recipients"];
     const given: Record<string, string> = {};
     for (let at = 0; at < flags.length; at += 2) {
@@ -391,27 +398,40 @@ if (command === "init") {
       if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < min || number > max) throw Error(`${name} must be a whole number from ${min} to ${max}.`);
       return number;
     };
-    const interval = whole("--interval-minutes", 5, 1440);
-    const every = whole("--open-tools-every", 1, 1000);
+    // The bounds are the server's own: a block outside them would be read as switched off, so it is not written.
+    const interval = whole("--interval-minutes", observationBounds.minIntervalMinutes, observationBounds.maxIntervalMinutes);
+    const every = whole("--open-tools-every", observationBounds.minOpenToolsEvery, observationBounds.maxOpenToolsEvery);
     let recipients: string[] | undefined | null;
     if (given["--recipients"] !== undefined) {
       if (given["--recipients"] === "default") recipients = null;
       else {
         recipients = [...new Set(given["--recipients"].split(",").map((entry) => entry.trim()))];
         if (!recipients.length || recipients.some((entry) => !/^[^\s,|]+\|[^\s,|]+$/.test(entry))) throw Error("--recipients takes issuer|subject entries separated by commas, or default.");
+        if (recipients.length > observationBounds.maxRecipients) throw Error(`--recipients takes at most ${observationBounds.maxRecipients} entries.`);
+        if (recipients.some((entry) => entry.length > observationBounds.maxRecipientLength)) throw Error(`--recipients entries are at most ${observationBounds.maxRecipientLength} characters each.`);
       }
     }
-    const before: ObservationConfig = config.observation ?? { enabled: false };
+    // A block that is not an object (a hand edit such as "yes") cannot be carried over, and no flag can repair what is not
+    // an object, so it is refused by its code instead of being spread into the new block. `null` counts as no block, as on the server.
+    const existing: unknown = config.observation;
+    if (existing !== undefined && existing !== null && (typeof existing !== "object" || Array.isArray(existing))) {
+      throw Error(`The observation block in the configuration is not an object (${observationProblems(existing).join(", ")}), and the server treats it as off; nothing was written. Correct or remove it in the file, then run observe again.`);
+    }
+    const before: ObservationConfig = (existing as ObservationConfig | null | undefined) ?? { enabled: false };
     const { recipients: kept, ...base } = before;
     const next: ObservationConfig = { ...base, enabled: mode === "on" };
     if (interval !== undefined) next.interval_minutes = interval;
     if (every !== undefined) next.open_tools_every = every;
     if (mode === "on") {
-      next.interval_minutes ??= 10;
-      next.open_tools_every ??= 3;
+      next.interval_minutes ??= observationBounds.defaultIntervalMinutes;
+      next.open_tools_every ??= observationBounds.defaultOpenToolsEvery;
     }
     const chosen = recipients === undefined ? kept : recipients ?? undefined;
-    config.observation = { ...next, ...(chosen?.length ? { recipients: chosen } : {}) };
+    const observation: ObservationConfig = { ...next, ...(chosen?.length ? { recipients: chosen } : {}) };
+    // The whole block, as the server will read it: the flags are checked above, this also catches a value an earlier hand edit left.
+    const problems = observationProblems(observation);
+    if (problems.length) throw Error(`The observation block would be invalid (${problems.join(", ")}), and the server treats an invalid block as off; nothing was written.`);
+    config.observation = observation;
     save(config);
     console.log(JSON.stringify({ observation: config.observation, network_called: false, next: "restart the control center to reload" }, null, 2));
   } else if (command === "connect") {
@@ -425,7 +445,7 @@ if (command === "init") {
       !credential_ref
     )
       throw Error(
-        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]",
+        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]",
       );
     const c: TaskConnection = {
       id,
@@ -469,8 +489,8 @@ if (command === "init") {
       "Registered endpoint and credential reference; no network call or permission change.",
     );
     console.log(dates.expires
-      ? `Recorded credential expiry ${dates.expires} for connection:${id}.`
-      : `No credential expiry recorded; add one with: credential <config-file> expiry connection:${id} <RFC3339>.`);
+      ? isNeverExpires(dates.expires) ? `Recorded that the credential never expires for connection:${id}.` : `Recorded credential expiry ${dates.expires} for connection:${id}.`
+      : `No credential expiry recorded; add one with: credential <config-file> expiry connection:${id} <RFC3339> (or never, if the credential does not expire).`);
     if (c.owner !== "anatomia" && pinned && pinned !== project && !flags.includes("--default"))
       console.log(`Kept ${c.owner} default project ${pinned}; pass --default to make ${project} the default.`);
   } else if (command === "auctra") {
@@ -482,7 +502,7 @@ if (command === "init") {
     const replace = auctraArgs.includes("--replace");
     const privateHttp = auctraArgs.includes("--private-http");
     if (!origin || !project || !collectorRef || flags.length)
-      throw Error("auctra requires <https-origin|loopback-origin> <project:id> <collector-key-file> [reader-key-file] [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
+      throw Error("auctra requires <https-origin|loopback-origin> <project:id> <collector-key-file> [reader-key-file] [--private-http] [--replace] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
     const auctraOrigin = originFor(origin, privateHttp);
     if (!/^project:[^\s\\/\x00-\x1f]{1,256}$/.test(project)) throw Error("Auctra project must be the exact project ref, such as project:my-drama.");
     const keyFiles = [credentialFile(collectorRef, "The Auctra collector key file"), ...(readerRef ? [credentialFile(readerRef, "The Auctra reader key file")] : [])];
@@ -501,7 +521,7 @@ if (command === "init") {
     const { rest: providerArgs, dates } = takeDates(args);
     const [owner, endpoint, project, credential_ref, model_ref, submit, status, ...rest] = providerArgs;
     if (!owner || !["eikona", "scaena", "sonora"].includes(owner) || !endpoint || !project || !credential_ref || !model_ref || !submit || providerArgs.length < 7)
-      throw Error("provider requires <eikona|scaena|sonora> <https-mcp-endpoint> <project> <0600-credential-file> <model-ref> <submit-action> <status-action|-> [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
+      throw Error("provider requires <eikona|scaena|sonora> <https-mcp-endpoint> <project> <0600-credential-file> <model-ref> <submit-action> <status-action|-> [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
     const file = credentialFile(credential_ref, "The provider credential file");
     const allowedActions = new Set(["generate", "createVideoProviderTask", "voice.audition"]);
     if (!allowedActions.has(submit)) throw Error("Unsupported provider submit action.");
@@ -529,7 +549,7 @@ if (command === "init") {
     const [tool, endpoint, credentialRef, ...flags] = toolArgs;
     const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
     if (!scope) throw Error("Personal scope missing.");
-    if (!isOpenToolKind(tool) || !endpoint) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], or <drivebridge|gateway> off");
+    if (!isOpenToolKind(tool) || !endpoint) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], or <drivebridge|gateway> off");
     if (endpoint === "off" && toolArgs.length === 2) {
       if (args.length !== toolArgs.length) throw Error("open-tool off takes no expiry options.");
       const existing = config.open_tools?.[tool];
@@ -540,7 +560,7 @@ if (command === "init") {
       console.log(JSON.stringify({ tool, enabled: false, network_called: false, next: "restart the control center to reload" }, null, 2));
     } else {
       const unknown = flags.filter((flag) => !["--private-http", "--replace"].includes(flag));
-      if (!credentialRef || unknown.length) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
+      if (!credentialRef || unknown.length) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
       const allowPrivateHttp = flags.includes("--private-http");
       endpointURL(endpoint, allowPrivateHttp, "open_tool_endpoint_denied");
       const credential_ref = credentialFile(credentialRef, "The open tool credential file");
@@ -571,18 +591,18 @@ if (command === "init") {
         enabled: slots.find((slot) => slot.id === row.id)?.enabled !== false,
         state: row.state,
         ...(row.reason ? { reason: row.reason } : {}),
-        ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+        ...(row.never_expires ? { expires_at: neverExpires } : row.expires_at ? { expires_at: row.expires_at } : {}),
         ...(row.days_left !== undefined ? { days_left: row.days_left } : {}),
         ...(row.shared_with.length ? { shared_with: row.shared_with } : {}),
       }));
       console.log(JSON.stringify({ credentials: rows, network_called: false }, null, 2));
     } else if (action === "expiry") {
       const [value, ...extra] = more;
-      if (!slotId || value === undefined || extra.length) throw Error("credential expiry requires <slot> <RFC3339|none>.");
+      if (!slotId || value === undefined || extra.length) throw Error("credential expiry requires <slot> <RFC3339|never|none>.");
       const holder = holderOf(slotId);
-      const expires = value === "none" ? undefined : instant(value, "The expiry");
+      const expires = value === "none" ? undefined : instant(value, "The expiry", true);
       const issued = holder.target[holder.issuedKey];
-      if (expires && typeof issued === "string" && Date.parse(issued) >= Date.parse(expires)) throw Error("The expiry must be later than the recorded issue time.");
+      if (expires && typeof issued === "string" && !issuedBefore(issued, expires)) throw Error("The expiry must be later than the recorded issue time.");
       if (expires) holder.target[holder.expiresKey] = expires;
       else delete holder.target[holder.expiresKey];
       save(config);
@@ -593,7 +613,7 @@ if (command === "init") {
     } else if (action === "replace") {
       const { rest: replaceArgs, dates } = takeDates(more);
       const [fileArg, ...extra] = replaceArgs;
-      if (!slotId || !fileArg || extra.length) throw Error("credential replace requires <slot> <credential-file> [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>].");
+      if (!slotId || !fileArg || extra.length) throw Error("credential replace requires <slot> <credential-file> [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>].");
       const holder = holderOf(slotId);
       const next = credentialFile(fileArg, "The new credential file");
       const previous = resolve(String(holder.target[holder.refKey]));
@@ -608,7 +628,7 @@ if (command === "init") {
       if (dates.issued) holder.target[holder.issuedKey] = dates.issued;
       save(config);
       console.log(JSON.stringify({ slot: slotId, credential_configured: true, network_called: false, ...expiryReport(dates, dates, slotId, cleared), ...(sharing.length ? { still_using_previous_file: sharing } : {}), next: "restart the control center to reload" }, null, 2));
-    } else throw Error("credential requires list | expiry <slot> <RFC3339|none> | replace <slot> <credential-file> [--expires-at|--expires-in] [--issued-at].");
+    } else throw Error("credential requires list | expiry <slot> <RFC3339|never|none> | replace <slot> <credential-file> [--expires-at|--expires-in] [--issued-at].");
   } else if (command === "studio") {
     const c = config.connections?.find((c) => c.id === args[0]);
     if (!c || c.owner !== "scaena" || args.length !== 2)

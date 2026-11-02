@@ -33,15 +33,24 @@ export interface CredentialStatus {
   state: CredentialState;
   reason?: CredentialReason;
   stage?: CredentialStage;
-  /** RFC 3339, as recorded by whoever issued the credential. */
+  /** RFC 3339, as recorded by whoever issued the credential. Absent for a credential recorded as never expiring. */
   expires_at?: string;
   /** Whole days, rounded up; only while the credential has not expired. */
   days_left?: number;
+  /** The issuer recorded that this credential does not expire (`never`), so there is no date to show or to warn about. */
+  never_expires?: true;
   /** When the owner last accepted the credential, only if an observation says so. */
   last_accepted_at?: string;
   /** Ids of the other slots that point at the same file. */
   shared_with: string[];
 }
+
+/**
+ * What `credential_expires_at` holds for a credential that does not expire, such as an Auctra service key or an
+ * observer key. It is a word, not a time: `parseRfc3339` still refuses it, and so does everything else that is not a date.
+ */
+export const neverExpires = "never";
+export const isNeverExpires = (value: unknown): value is typeof neverExpires => value === neverExpires;
 
 export const dayMs = 86_400_000;
 const hourMs = 3_600_000;
@@ -72,7 +81,7 @@ export const credentialReasonLabels: Record<CredentialReason, string> = {
   forbidden: "凭据没有读取这些内容的权限",
   content_denied: "工具拒绝内容读取，预览和下载不可用",
   read_forbidden: "有一部分读取被拒，其余读取正常",
-  invalid_expiry: "记录的到期时间读不了（要带秒和时区的 RFC 3339），按没有记录处理",
+  invalid_expiry: "记录的到期时间读不了（要带秒和时区的 RFC 3339，或写成 never），按没有记录处理",
 };
 
 /** A state needs the administrator's attention; `unknown_expiry` is a gap in what is recorded, not a fault. */
@@ -142,6 +151,7 @@ export function credentialTone(row: Pick<CredentialStatus, "state" | "stage" | "
 
 /** The short text for a card footer or a list row. */
 export function credentialChipText(row: CredentialStatus, now: number): string {
+  if (row.state === "ok" && row.never_expires) return "不过期";
   if ((row.state === "ok" || row.state === "expiring" || row.state === "expired") && row.expires_at) return formatCredentialExpiry(row.expires_at, now);
   if (row.reason === "invalid_expiry") return "到期时间读不了";
   return credentialStateLabels[row.state];
