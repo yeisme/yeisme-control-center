@@ -152,8 +152,8 @@ const loop = background ? createObservationLoop(services, { credentials: credent
 if (loop) { services.observation = loop; loop.start(); }
 
 // Fixture-only shim: personal sessions carry no OIDC token, so grant a fixture delegation after login.
-async function handle(request: Request) {
-  const response = await app(request);
+async function handle(request: Request, peer?: string) {
+  const response = await app(request, { peer });
   if (request.method === "POST" && new URL(request.url).pathname.endsWith("/auth/personal") && response.status === 200) {
     const id = response.headers.getSetCookie().map((cookie) => cookie.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
     const session = id ? auth.sessions.get(id) : undefined;
@@ -163,6 +163,9 @@ async function handle(request: Request) {
 }
 
 const api = createHttpServer(async (req, res) => {
+  // As `server/index.ts` does: the connection's peer, read before anything is awaited. The dev server's proxy in front of this is
+  // the loopback peer, and the address of its own client is the last entry of the header it sets.
+  const peer = req.socket.remoteAddress;
   try {
     if (req.headers.host !== new URL(origin).host) { res.writeHead(421).end(); return; }
     const url = new URL(req.url || "/", origin);
@@ -186,7 +189,7 @@ const api = createHttpServer(async (req, res) => {
     for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join("; ") : value);
     const controller = new AbortController();
     res.once("close", () => { if (!res.writableEnded) controller.abort(); });
-    const response = await handle(new Request(url, { signal: controller.signal, method: req.method, headers, body: ["GET", "HEAD"].includes(req.method || "GET") ? undefined : Buffer.concat(chunks) }));
+    const response = await handle(new Request(url, { signal: controller.signal, method: req.method, headers, body: ["GET", "HEAD"].includes(req.method || "GET") ? undefined : Buffer.concat(chunks) }), peer);
     res.statusCode = response.status;
     response.headers.forEach((value, key) => { if (key !== "set-cookie") res.setHeader(key, value); });
     const cookies = response.headers.getSetCookie();

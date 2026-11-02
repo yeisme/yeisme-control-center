@@ -6,12 +6,12 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
 import { secret } from "../server/auth";
-import { ConfigBusyError, ConfigChangedError, canonicalConfigPath, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
+import { ConfigBusyError, ConfigChangedError, ConfigLockInvalidError, canonicalConfigPath, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
 import { enabledUsers, isEnabledFlag } from "../server/personal-users";
 import { connectionURL, endpointURL } from "../server/task-connections";
 import { isOpenToolKind } from "../src/shared/open-tools";
@@ -81,6 +81,10 @@ const save = async (config: ServerConfig) => {
   } catch (error) {
     if (error instanceof ConfigBusyError) throw Error("配置文件正被另一个进程写入，等待 5 秒后仍未释放。没有写入任何内容，请稍后重新运行。");
     if (error instanceof ConfigChangedError) throw Error("配置文件在读取后被改动，请重新运行。没有写入任何内容。");
+    if (error instanceof ConfigLockInvalidError) {
+      const what = { link: "是符号链接", not_file: "不是普通文件（可能是管道或目录）", other_owner: "属于另一个用户" }[error.problem];
+      throw Error(`配置文件旁的锁文件 ${basename(path)}.lock.sqlite ${what}，不能用来加锁。没有写入任何内容。请把它删掉（下次写入会重新创建一个属于当前用户的），或换回当前用户的普通文件，再重新运行。`);
+    }
     throw error;
   }
 };

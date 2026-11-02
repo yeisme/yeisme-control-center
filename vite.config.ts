@@ -78,9 +78,16 @@ export default defineConfig(() => ({
         target: apiOrigin,
         changeOrigin: true,
         configure(proxy) {
-          proxy.on("proxyReq", (request) => {
+          proxy.on("proxyReq", (request, req) => {
             request.setHeader("Host", controlOriginUrl.host);
             request.setHeader("Origin", controlOriginUrl.origin);
+            // The control center counts sign-ins by the client address in the last entry of this header, and believes it from a
+            // proxy on this machine, which is what this is. What the client wrote there is its own claim: left to pass through,
+            // anyone who can reach this server could count as any address they liked. So it is replaced by whoever is really on
+            // this connection (and removed when the connection is already gone, so the control center counts the proxy itself).
+            const peer = req.socket.remoteAddress;
+            if (peer) request.setHeader("X-Forwarded-For", peer);
+            else request.removeHeader("X-Forwarded-For");
           });
           proxy.on("proxyRes", (response) => {
             const cookies = response.headers["set-cookie"];

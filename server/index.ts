@@ -75,6 +75,9 @@ if (observationConfig.enabled && backgroundOff) console.log("[control-center] ba
 // Made once now, off the request path, so a sign-in that names no account costs the same as a real one from the first request on.
 void decoyDigest().catch(() => undefined);
 const server = createServer(async (req, res) => {
+  // Who is on the other end of the connection, read before anything is awaited: once the client has reset the connection the
+  // socket no longer knows, and a request that was already complete would be counted as coming from nowhere.
+  const peer = req.socket.remoteAddress;
   try {
     if (req.headers.host !== new URL(config.origin).host) {
       res.writeHead(421);
@@ -111,8 +114,8 @@ const server = createServer(async (req, res) => {
             ? undefined
             : Buffer.concat(chunks),
         }),
-        // Who is on the other end of the connection: the TLS front on this machine, whose forwarding header names the client.
-        { peer: req.socket.remoteAddress },
+        // The connection's peer: the TLS front on this machine, whose forwarding header names the client.
+        { peer },
       );
       res.statusCode = response.status;
       response.headers.forEach((v, k) => {

@@ -2,8 +2,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
-import { ConfigBusyError, ConfigChangedError, canonicalConfigPath, fileIdentity, ownerMismatch, ownerProblem, withConfigLock, writeConfigIfUnchanged } from "../server/config-lock";
+import { spawn, spawnSync } from "node:child_process";
+import { ConfigBusyError, ConfigChangedError, ConfigLockInvalidError, acquireConfigLock, canonicalConfigPath, fileIdentity, ownerMismatch, ownerProblem, withConfigLock, writeConfigIfUnchanged } from "../server/config-lock";
 
 const dir = mkdtempSync(join(tmpdir(), "yeisme-lock-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -16,13 +16,8 @@ const fakeTime = (start = 1_000_000) => {
   return { now: () => t, sleep: async (ms: number) => { t += ms; } };
 };
 const holdLock = async (path: string) => {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  let held!: () => void;
-  const holding = new Promise<void>((resolve) => { held = resolve; });
-  const holder = withConfigLock(path, async () => { held(); await gate; });
-  await holding;
-  return async () => { release(); await holder; };
+  const lock = await acquireConfigLock(path);
+  return async () => { lock.release(); };
 };
 /** A real process, run under Bun like the control center and the command line are. */
 const bun = (script: string, ...args: string[]) => {
@@ -30,7 +25,7 @@ const bun = (script: string, ...args: string[]) => {
   let stdout = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   const done = new Promise<number | null>((resolve) => child.on("close", (status) => resolve(status)));
-  return { child, done, said: async (text: string) => { for (let i = 0; i < 1000 && !stdout.includes(text); i++) await sleep(10); return stdout.includes(text); } };
+  return { child, done, output: () => stdout, said: async (text: string) => { for (let i = 0; i < 1000 && !stdout.includes(text); i++) await sleep(10); return stdout.includes(text); } };
 };
 
 describe("the configuration lock", () => {
@@ -48,7 +43,7 @@ describe("the configuration lock", () => {
 
   it("returns the work's value, throws its error, and is free again afterwards", async () => {
     const path = target();
-    expect(await withConfigLock(path, async () => 42)).toBe(42);
+    expect(await withConfigLock(path, () => 42)).toBe(42);
     await expect(withConfigLock(path, () => { throw new Error("boom"); })).rejects.toThrow("boom");
     expect(await withConfigLock(path, () => "again")).toBe("again");
   });
@@ -56,15 +51,14 @@ describe("the configuration lock", () => {
   it("makes a second caller in the same process wait for the first, and run only after it let go", async () => {
     const path = target();
     const order: string[] = [];
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const first = withConfigLock(path, async () => { order.push("first:start"); await gate; order.push("first:end"); });
-    await sleep(20);
+    const first = await acquireConfigLock(path);
+    order.push("first:start");
     const second = withConfigLock(path, () => { order.push("second"); }, { pollMs: 5 });
     await sleep(80);
     expect(order).toEqual(["first:start"]);
-    release();
-    await Promise.all([first, second]);
+    order.push("first:end");
+    first.release();
+    await second;
     expect(order).toEqual(["first:start", "first:end", "second"]);
   });
 
@@ -88,7 +82,8 @@ describe("the configuration lock", () => {
     const workers = [1, 2, 3].map(() => bun("tests/fixtures/lock-worker.ts", path, log, "6", "25"));
     // This process, on Node's driver, takes the same lock in between.
     for (let round = 0; round < 6; round++) {
-      await withConfigLock(path, async () => { appendFileSync(log, `enter node\n`); await sleep(25); appendFileSync(log, `exit node\n`); }, { waitMs: 30_000 });
+      const lock = await acquireConfigLock(path, { waitMs: 30_000 });
+      try { appendFileSync(log, `enter node\n`); await sleep(25); appendFileSync(log, `exit node\n`); } finally { lock.release(); }
     }
     expect(await Promise.all(workers.map((worker) => worker.done))).toEqual([0, 0, 0]);
     const lines = readFileSync(log, "utf8").trim().split("\n");
@@ -120,6 +115,120 @@ describe("the configuration lock", () => {
     } finally {
       chmodSync(home, 0o700);
     }
+  });
+});
+
+describe("the lock stays held while the process does other things with the lock file", () => {
+  /** A real Bun process that tries the lock once: `acquired`, `busy` or `error:<name>`. */
+  const tryFromAnotherProcess = async (path: string, waitMs = 300) => {
+    const child = bun("tests/fixtures/lock-try.ts", path, String(waitMs));
+    await child.done;
+    return child.output().trim();
+  };
+
+  it("is not given up by the calls that wait for it, fail on it or make the file in the same process (the lock file is never opened and closed by hand)", async () => {
+    const path = target();
+    const lock = await acquireConfigLock(path);
+    const time = fakeTime();
+    // Each of these looks at the lock file in this process while the lock is held: closing a descriptor of it used to drop the lock.
+    for (let call = 0; call < 3; call++) await expect(withConfigLock(path, () => "never", { ...time, waitMs: 200, pollMs: 20 })).rejects.toBeInstanceOf(ConfigBusyError);
+    await expect(acquireConfigLock(path, { ...time, waitMs: 50, pollMs: 10 })).rejects.toBeInstanceOf(ConfigBusyError);
+    expect(await tryFromAnotherProcess(path)).toBe("busy");
+    lock.release();
+    expect(await tryFromAnotherProcess(path)).toBe("acquired");
+  }, 30_000);
+
+  it("is let go once however many times the holder lets go, and is free for another process afterwards", async () => {
+    const path = target();
+    const lock = await acquireConfigLock(path);
+    lock.release();
+    lock.release();
+    expect(await tryFromAnotherProcess(path)).toBe("acquired");
+    // Taken again after a release: the holder's second release must not let go of this new hold.
+    const again = await acquireConfigLock(path);
+    lock.release();
+    expect(await tryFromAnotherProcess(path)).toBe("busy");
+    again.release();
+  }, 30_000);
+});
+
+describe("the work done under the lock is synchronous", () => {
+  it("refuses a promise, lets go of the lock, and does not leave the promise's failure unhandled", async () => {
+    const path = target();
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", record);
+    try {
+      await expect(withConfigLock(path, async () => 1)).rejects.toThrow(TypeError);
+      await expect(withConfigLock(path, async () => { throw new Error("late failure"); })).rejects.toThrow(TypeError);
+      await expect(withConfigLock(path, () => ({ then: (resolve: (value: number) => void) => resolve(2) }))).rejects.toThrow(TypeError);
+      await sleep(30);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+    expect(unhandled).toEqual([]);
+    // Free again at once, for this process and another.
+    expect(await withConfigLock(path, () => "free", { waitMs: 100, pollMs: 10 })).toBe("free");
+  });
+
+  it("passes a plain value, undefined and an object with no `then` through", async () => {
+    const path = target();
+    expect(await withConfigLock(path, () => undefined)).toBeUndefined();
+    expect(await withConfigLock(path, () => ({ ok: true }))).toEqual({ ok: true });
+    expect(await withConfigLock(path, () => null)).toBeNull();
+  });
+});
+
+describe("a lock file that is not a regular file of this user", () => {
+  const lockOf = (path: string) => path + ".lock.sqlite";
+
+  it("is refused when it is a link, and the link's target is left alone", async () => {
+    const path = target();
+    const elsewhere = join(dir, `elsewhere-${counter}`);
+    writeFileSync(elsewhere, "not a lock\n", { mode: 0o644 });
+    symlinkSync(elsewhere, lockOf(path));
+    await expect(withConfigLock(path, () => "ran")).rejects.toMatchObject({ name: "ConfigLockInvalidError", problem: "link" });
+    expect(readFileSync(elsewhere, "utf8")).toBe("not a lock\n");
+    expect(statSync(elsewhere).mode & 0o777).toBe(0o644);
+    // A link to nothing is a link too.
+    const dangling = target();
+    symlinkSync(join(dir, "does-not-exist"), lockOf(dangling));
+    await expect(withConfigLock(dangling, () => "ran")).rejects.toBeInstanceOf(ConfigLockInvalidError);
+    expect(existsSync(join(dir, "does-not-exist"))).toBe(false);
+  });
+
+  it("is refused at once when it is a pipe, which would otherwise hang the process that opened it", async () => {
+    const path = target();
+    expect(spawnSync("mkfifo", [lockOf(path)]).status).toBe(0);
+    const outcome = await Promise.race([
+      withConfigLock(path, () => "ran").then(() => "ran", (error: unknown) => (error as ConfigLockInvalidError).problem),
+      sleep(3_000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("not_file");
+  });
+
+  it("is refused when it is a directory", async () => {
+    const path = target();
+    mkdirSync(lockOf(path));
+    await expect(withConfigLock(path, () => "ran")).rejects.toMatchObject({ problem: "not_file" });
+  });
+
+  it("is refused when it belongs to another user, and used when it belongs to this one", async () => {
+    const path = target();
+    await withConfigLock(path, () => undefined);
+    const owner = statSync(lockOf(path)).uid;
+    await expect(withConfigLock(path, () => "ran", { euid: owner + 1 })).rejects.toMatchObject({ name: "ConfigLockInvalidError", problem: "other_owner" });
+    expect(await withConfigLock(path, () => "ran", { euid: owner })).toBe("ran");
+  });
+
+  it("is made by the lock when it is missing, and a looser one is tightened", async () => {
+    const path = target();
+    expect(existsSync(lockOf(path))).toBe(false);
+    await withConfigLock(path, () => undefined);
+    expect(statSync(lockOf(path)).mode & 0o777).toBe(0o600);
+    chmodSync(lockOf(path), 0o664);
+    await withConfigLock(path, () => undefined);
+    expect(statSync(lockOf(path)).mode & 0o777).toBe(0o600);
   });
 });
 

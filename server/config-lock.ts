@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, openSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, lstatSync, openSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -13,6 +13,14 @@ import { basename, dirname, join, resolve } from "node:path";
  * read, change, write and rename. SQLite takes it as an operating-system file lock, so it is exclusive between processes and
  * between connections of one process, and the operating system lets go of it the moment the holder dies, however it dies
  * (`kill -9` included). There is nothing to time out, no pid to reuse and nothing stale to break.
+ *
+ * Two rules keep that true. (1) POSIX drops every lock a process holds on a file when the process closes *any* descriptor of
+ * that file, so nothing here opens or closes the lock file by hand while a lock may be held: the file is made once with `wx`
+ * (which fails on an existing file before any descriptor exists) and is only ever looked at with `lstat` and `chmod`, which open
+ * nothing; SQLite itself defers closing a descriptor while the process holds a lock. (2) The work done under the lock is
+ * synchronous (`withConfigLock` refuses a promise): it runs in one turn of the event loop, so no other request of this process
+ * can start a lock of its own, or be served at all, while the file is read, changed and renamed. A holder that has to stay
+ * across awaits (tests, a worker) takes `acquireConfigLock` and lets go itself.
  */
 export const lockWaitMs = 5_000;
 export const lockPollMs = 25;
@@ -22,6 +30,17 @@ export class ConfigBusyError extends Error {
   constructor() {
     super("config_busy");
     this.name = "ConfigBusyError";
+  }
+}
+
+/** What is wrong with the lock file: a link (it would lead somewhere else), a pipe or directory (opening a pipe hangs), or a file that is another user's. */
+export type LockProblem = "link" | "not_file" | "other_owner";
+
+/** The file the lock is made on is not a regular file of this user, so it is not used. Nothing was written; the file has to be removed or put right by hand. */
+export class ConfigLockInvalidError extends Error {
+  constructor(readonly problem: LockProblem) {
+    super("config_lock_invalid");
+    this.name = "ConfigLockInvalidError";
   }
 }
 
@@ -40,6 +59,8 @@ export interface LockOptions {
   sleep?: (ms: number) => Promise<void>;
   /** A seam for tests: runs after the temporary file is written and before the version is checked for the last time. */
   beforeRename?: () => void;
+  /** A seam for tests: the user the lock file must belong to; by default the effective user of this process. */
+  euid?: number;
 }
 
 /** Names one version of a file: inode, size, modification and change time. A file renamed into place has a new inode. `absent` when there is none. */
@@ -128,18 +149,46 @@ function tryLock(lockPath: string): (() => void) | undefined {
 }
 
 /**
- * Runs `work` while holding the lock of the configuration file `configPath` (links resolved first). Waits up to `waitMs` for
- * another holder, then throws `ConfigBusyError`. Do the slow part of a change (hashing, key generation) before calling this;
- * `work` should only re-read, change and write the file. Failing to open the lock for any other reason (a read-only
- * directory) is thrown as it is.
+ * Makes the lock file if it is not there (private from birth) and checks that it is what the lock needs: a regular file, not a
+ * link, that belongs to this user. A link would lead the lock somewhere else, opening a pipe never returns, and a file of another
+ * user cannot be opened for writing, which would make every write fail for good with no word of why.
  */
-export async function withConfigLock<T>(configPath: string, work: () => T | Promise<T>, options: LockOptions = {}): Promise<T> {
-  const { waitMs = lockWaitMs, pollMs = lockPollMs, now = Date.now } = options;
+function prepareLockFile(lockPath: string, euid: number | undefined) {
+  let info: Stats | undefined;
+  for (let attempt = 0; !info; attempt++) {
+    // `wx` fails on anything that exists (a link and a pipe included) before a descriptor is made: see the rules at the top.
+    try { closeSync(openSync(lockPath, "wx", 0o600)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    try {
+      info = lstatSync(lockPath);
+    } catch (error) {
+      // Removed between the two calls: make it again.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= 2) throw error;
+    }
+  }
+  if (info.isSymbolicLink()) throw new ConfigLockInvalidError("link");
+  if (!info.isFile()) throw new ConfigLockInvalidError("not_file");
+  if (euid !== undefined && info.uid !== euid) throw new ConfigLockInvalidError("other_owner");
+  // An older or hand-made file is tightened, though it holds nothing: the lock is in the kernel, not in the file.
+  if ((info.mode & 0o777) !== 0o600) try { chmodSync(lockPath, 0o600); } catch { /* not ours to change */ }
+}
+
+/** A lock that is held. Lets go of it once, whatever the number of calls. */
+export interface ConfigLock {
+  release(): void;
+}
+
+/**
+ * Takes the lock of the configuration file `configPath` (links resolved first) and returns what lets go of it. Waits up to `waitMs`
+ * for another holder, in short polls so that the process is not frozen meanwhile (the control center keeps serving requests), then
+ * throws `ConfigBusyError`. A lock file that is not a regular file of this user throws `ConfigLockInvalidError`; failing to make it
+ * for any other reason (a read-only directory) is thrown as it is. The caller must call `release`, and must keep the handle until
+ * then: a connection that nothing refers to can be collected, and a collected connection lets go of its lock.
+ */
+export async function acquireConfigLock(configPath: string, options: LockOptions = {}): Promise<ConfigLock> {
+  const { waitMs = lockWaitMs, pollMs = lockPollMs, now = Date.now, euid = process.geteuid?.() } = options;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
   const lockPath = canonicalConfigPath(configPath) + ".lock.sqlite";
-  // Made private at birth. An existing file is tightened, though it holds nothing: the lock is in the kernel, not in the file.
-  closeSync(openSync(lockPath, "a", 0o600));
-  try { chmodSync(lockPath, 0o600); } catch { /* not ours to change */ }
+  prepareLockFile(lockPath, euid);
   const started = now();
   let release = tryLock(lockPath);
   while (!release) {
@@ -147,10 +196,32 @@ export async function withConfigLock<T>(configPath: string, work: () => T | Prom
     await sleep(pollMs);
     release = tryLock(lockPath);
   }
+  const held = release;
+  let letGo = false;
+  return { release: () => { if (!letGo) { letGo = true; held(); } } };
+}
+
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+  !!value && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function";
+
+/**
+ * Runs `work` while holding the lock of the configuration file `configPath`, then lets go. `work` must be synchronous and should only
+ * re-read, change and write the file (do the slow part of a change, hashing and key generation, before calling this): a promise
+ * from it is refused with a `TypeError` once it has returned, with the lock released, because a lock held across an await is a lock
+ * that other work of the process runs under. Waiting, a busy lock and a lock file that cannot be used are as in `acquireConfigLock`.
+ */
+export async function withConfigLock<T>(configPath: string, work: () => T, options: LockOptions = {}): Promise<T> {
+  const lock = await acquireConfigLock(configPath, options);
   try {
-    return await work();
+    const result = work();
+    if (isThenable(result)) {
+      // It has started and cannot be taken back; it must not also end as an unhandled rejection.
+      void Promise.resolve(result).catch(() => undefined);
+      throw new TypeError("withConfigLock: the work done under the lock must be synchronous");
+    }
+    return result;
   } finally {
-    release();
+    lock.release();
   }
 }
 

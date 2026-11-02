@@ -3,8 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { ConfigChangedError, fileIdentity, withConfigLock, writeConfigIfUnchanged } from "../server/config-lock";
-import { cli, cliAsync, rewrite, running, signIn, stored, viewer, waitFor } from "./personal-server.support";
+import { ConfigChangedError, acquireConfigLock, fileIdentity, writeConfigIfUnchanged } from "../server/config-lock";
+import { call, cli, cliAsync, password, rewrite, running, signIn, stored, viewer, waitFor } from "./personal-server.support";
 
 describe("a web revoke and a personal-config save cannot undo each other", () => {
   it("keeps the revocation when the command line writes a copy it read before the revoke (the reported race)", async () => {
@@ -29,20 +29,14 @@ describe("a web revoke and a personal-config save cannot undo each other", () =>
     const { auth, app, file, home } = await running();
     const x = await auth.createPersonalUser(viewer("x"));
     const bobKey = join(home, "bob.key");
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    let held!: () => void;
-    const holding = new Promise<void>((resolve) => { held = resolve; });
     // Someone else holds the lock, as a web write in progress would.
-    const holder = withConfigLock(file, async () => { held(); await gate; });
-    await holding;
+    const lock = await acquireConfigLock(file);
     const command = cliAsync("user", file, "add", "bob", "viewer", "Bob", "--key-file", bobKey);
     // The command has read the file and made its key digest; its save is now waiting for the lock.
     await waitFor(() => existsSync(join(file + ".users", "bob.key")));
     // The revoke the web console made is stored (a write by another writer, finished before the lock is let go).
     rewrite(file, (config) => { config.personal.users = config.personal.users.map((user: { username: string }) => user.username === "x" ? { ...user, enabled: false } : user); });
-    release();
-    await holder;
+    lock.release();
     const result = await command.done;
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("配置文件在读取后被改动，请重新运行");
@@ -83,15 +77,10 @@ describe("a web revoke and a personal-config save cannot undo each other", () =>
   });
 });
 
-describe("a write waits for the lock, gives up politely, and breaks only a stale one", () => {
+describe("a write waits for the lock and gives up politely, and a lock that is let go is free at once", () => {
   const holdLock = async (file: string) => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    let held!: () => void;
-    const holding = new Promise<void>((resolve) => { held = resolve; });
-    const holder = withConfigLock(file, async () => { held(); await gate; });
-    await holding;
-    return { release: async () => { release(); await holder; } };
+    const lock = await acquireConfigLock(file);
+    return { release: async () => { lock.release(); } };
   };
 
   it("answers 503 config_busy when the lock stays held, keeps the revocation in force in memory, and stores it with the next write", async () => {
@@ -197,4 +186,61 @@ describe("a configuration reached through a link", () => {
       rmSync(join(link, ".."), { recursive: true, force: true });
     }
   });
+});
+
+describe("a lock file that cannot be used", () => {
+  /** Puts something unusable where the lock file goes: a link to a file that is not a lock, or a pipe. */
+  const plant = (file: string, kind: "link" | "pipe") => {
+    const lock = file + ".lock.sqlite";
+    rmSync(lock, { force: true });
+    if (kind === "link") {
+      const elsewhere = file + ".elsewhere";
+      writeFileSync(elsewhere, "not a lock\n");
+      symlinkSync(elsewhere, lock);
+    } else {
+      expect(spawnSync("mkfifo", [lock]).status).toBe(0);
+    }
+    return lock;
+  };
+
+  it.each(["link", "pipe"] as const)("is answered 503 config_lock_invalid by the web (a %s), with no account made, no key digest left and a revocation kept in memory", async (kind) => {
+    const { auth, app, file } = await running();
+    const x = await auth.createPersonalUser(viewer("x"));
+    plant(file, kind);
+    const admin = await signIn(app, "root", password);
+    const csrf = (await (await call(app, "/session", { cookie: admin.cookie })).json()).csrf as string;
+    const created = await call(app, "/admin/personal-users", { method: "POST", cookie: admin.cookie, csrf, body: { username: "late", name: "Late", role: "viewer", scope_ids: ["personal"] } });
+    expect([created.status, (await created.json()).error]).toEqual([503, "config_lock_invalid"]);
+    expect(existsSync(join(file + ".users", "late.key"))).toBe(false);
+    const revoked = await call(app, "/admin/personal-users/x/revoke", { method: "POST", cookie: admin.cookie, csrf });
+    expect([revoked.status, (await revoked.json()).error]).toEqual([503, "config_lock_invalid"]);
+    // Revoked at once in memory, though nothing could be stored; the file is as it was.
+    expect((await signIn(app, "x", x.access_key)).response.status).toBe(401);
+    expect(stored(file).personal?.users?.map((user) => [user.username, user.enabled])).toEqual([["x", true]]);
+    // Put right (the unusable file removed), the next write stores the pending revocation and the new account.
+    rmSync(file + ".lock.sqlite", { force: true });
+    await auth.createPersonalUser(viewer("z"));
+    expect(stored(file).personal?.users?.map((user) => [user.username, user.enabled])).toEqual([["x", false], ["z", true]]);
+  });
+
+  it.each([["link", "符号链接"], ["pipe", "管道"]] as const)("makes the command line stop with a Chinese message (a %s), writing nothing and leaving no key behind", async (kind, word) => {
+    const { file, home } = await running();
+    const before = readFileSync(file, "utf8");
+    plant(file, kind);
+    const started = Date.now();
+    const result = await cliAsync("user", file, "add", "bob", "viewer", "Bob", "--key-file", join(home, "bob.key")).done;
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("锁文件");
+    expect(result.stderr).toContain(word);
+    expect(result.stderr).toContain("没有写入任何内容");
+    // Refused at once: neither the five second wait nor a hang on the pipe.
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(existsSync(join(home, "bob.key"))).toBe(false);
+    expect(existsSync(join(file + ".users", "bob.key"))).toBe(false);
+    // Once the file is removed, the same command works and makes a lock file of its own.
+    rmSync(file + ".lock.sqlite", { force: true });
+    expect(cli("user", file, "add", "bob", "viewer", "Bob", "--key-file", join(home, "bob.key")).status).toBe(0);
+    expect(statSync(file + ".lock.sqlite").isFile()).toBe(true);
+  }, 30_000);
 });

@@ -5,7 +5,7 @@ import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./co
 import type { ControlCenterRole } from "../src/service-directory";
 import { credentialFileProblem, type CredentialFileReason } from "./credential-file";
 import { checkPassword, credentialVersion, hashPassword } from "./password";
-import { ConfigBusyError, ConfigChangedError, canonicalConfigPath, fileIdentity, replaceConfigFile, withConfigLock, type LockOptions } from "./config-lock";
+import { ConfigBusyError, ConfigChangedError, ConfigLockInvalidError, canonicalConfigPath, fileIdentity, replaceConfigFile, withConfigLock, type LockOptions } from "./config-lock";
 import { duplicateNames, enabledUsers, findEnabledUser, isEnabledFlag } from "./personal-users";
 import { LoginLimiter, loginLimits } from "./login-limits";
 import { SessionStore } from "./db/session-store";
@@ -481,6 +481,8 @@ export class SessionAuth {
       }, this.lockOptions);
     } catch (error) {
       if (error instanceof ConfigBusyError) throw new AuthError("config_busy", 503);
+      // The lock file beside the configuration is a link, a pipe or another user's file: it is not used, and cannot be put right from here.
+      if (error instanceof ConfigLockInvalidError) throw new AuthError("config_lock_invalid", 503);
       if (error instanceof AuthError) throw error;
       throw new AuthError("user_management_unavailable", 503);
     }

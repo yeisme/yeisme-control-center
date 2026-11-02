@@ -1,9 +1,10 @@
-import { afterAll } from "vitest";
+import { afterAll, vi } from "vitest";
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { SessionAuth } from "../server/auth";
+import * as passwordModule from "../server/password";
 import { hashPassword } from "../server/password";
 import { createApp } from "../server/app";
 import type { ServerConfig } from "../server/contracts";
@@ -48,6 +49,17 @@ export const signIn = async (app: App, username: string, key: string, from: { pe
   const response = await call(app, "/auth/personal", { method: "POST", body: { username, key }, ...from });
   return { response, cookie: response.headers.get("set-cookie") ?? "" };
 };
+
+/**
+ * A wrong secret that is refused without the password work, for the tests that need hundreds of refused sign-ins: scrypt costs about
+ * a tenth of a second each. (A secret over 1024 bytes used to serve for this; it is a 400 now, and is not counted.) Call
+ * `refuseCheaply()` first; every other secret is still checked for real.
+ */
+export const cheapWrong = "cheap-wrong-secret-for-tests";
+export function refuseCheaply() {
+  const real = passwordModule.checkPassword;
+  return vi.spyOn(passwordModule, "checkPassword").mockImplementation((secret, encoded) => secret === cheapWrong ? Promise.resolve(false) : real(secret, encoded));
+}
 
 export const cli = (...args: string[]) => spawnSync("bun", ["scripts/personal-config.ts", ...args], { encoding: "utf8" });
 

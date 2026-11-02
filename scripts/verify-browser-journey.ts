@@ -1735,6 +1735,19 @@ try {
     if (devServerHiccups.length) await fs.writeFile(path.join(run, "artifacts", "dev-server-hiccups.json"), JSON.stringify(devServerHiccups.map((text) => text.slice(0, 300)), null, 2) + "\n");
     if (errors.length) throw new Error(errors.join(" | "));
   });
+  // Last of the rich scenario, because it fills one sign-in allowance of this fixture for the machine's address. Sign-ins go through the
+  // dev server's proxy, each with another invented address in the forwarding header the client writes. If the proxy let it pass, each
+  // would be a client of its own and none would be refused; it replaces the header with the address on its own connection, so they are
+  // one client, and the sixth refusal of one account from one address is turned away up front.
+  await check("the dev server's proxy counts a client by its connection, never by the forwarding header it wrote", async () => {
+    const attempt = (invented: string) => fetch(`${ui}/api/control-center/v1/auth/personal`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": invented },
+      body: JSON.stringify({ username: "fixture-admin", key: "a-key-that-is-not-the-key" }),
+    });
+    const answers: number[] = [];
+    for (let i = 1; i <= 6; i++) answers.push((await attempt(`203.0.113.${i}`)).status);
+    if (answers.join() !== "401,401,401,401,401,429") throw new Error(`forwarding_header_believed_through_the_dev_proxy:${answers.join()}`);
+  });
   await context.close();
 
   await stopFixture(fixture);

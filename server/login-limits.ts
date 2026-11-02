@@ -1,3 +1,5 @@
+import { addressGroup } from "./client-address";
+
 /**
  * How many sign-ins that were refused (credentials checked and wrong) are allowed in a window, counted so that a stranger who
  * has no account cannot use them up for the people who do.
@@ -5,12 +7,17 @@
  * - per account and client address: 5. Guessing at one account from one place stops there, and the same account's real owner,
  *   coming from another address, is not touched;
  * - per client address, every name known or not: 20. One place cannot try many names or many accounts;
- * - per account across every address: 50. A guesser who changes address (a local proxy that passes on a client-supplied
+ * - per account across every address: 50. A guesser who changes address (a proxy on this machine that passes on a client-supplied
  *   forwarding header makes that cheap) is still bounded for each account;
  * - the whole server: 500. A circuit breaker for a flood from many addresses at once.
  *
  * A sign-in that names no account counts only against its address and the breaker, so it never reaches an account's buckets.
  * Everything is asked before any password work is done, so a refused request costs almost nothing.
+ *
+ * An address is counted as an IPv4 address or an IPv6 /64 (`addressGroup`), in its canonical form, so writing one address another way,
+ * or choosing another address in the same /64, is not a new client. What remains is real: someone with ten addresses (or /64s) of
+ * their own can fill one account's 50, and twenty-five can fill the server's 500. The counts live in this process and start from
+ * nothing when it restarts.
  */
 export const loginLimits = { windowMs: 15 * 60_000, accountAddress: 5, address: 20, account: 50, server: 500 };
 
@@ -50,8 +57,9 @@ export class LoginLimiter {
   }
 
   /** The buckets that are full for this attempt. Empty means it may go on. `account` is the account the name refers to, or nothing for a name that is no account. */
-  full(address: string, account?: string): LimitBucket[] {
+  full(client: string, account?: string): LimitBucket[] {
     const now = this.now();
+    const address = addressGroup(client);
     const full: LimitBucket[] = [];
     if (account !== undefined && this.within(this.accountAddress, account + "\u0000" + address, now).length >= this.limits.accountAddress) full.push("account_address");
     if (this.within(this.address, address, now).length >= this.limits.address) full.push("address");
@@ -62,8 +70,9 @@ export class LoginLimiter {
   }
 
   /** Counts one refused attempt. Returns the buckets this attempt filled, so the caller can note once that they tripped. */
-  failed(address: string, account?: string): LimitBucket[] {
+  failed(client: string, account?: string): LimitBucket[] {
     const now = this.now();
+    const address = addressGroup(client);
     const tripped: LimitBucket[] = [];
     if (account !== undefined && this.add(this.accountAddress, account + "\u0000" + address, now) === this.limits.accountAddress) tripped.push("account_address");
     if (this.add(this.address, address, now) === this.limits.address) tripped.push("address");

@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync } from "node:fs";
 import { loginLimits } from "../server/login-limits";
 import type { AuditRow } from "../server/db/audit";
-import { call, password, running, signIn, viewer } from "./personal-server.support";
+import { call, cheapWrong as wrong, password, refuseCheaply, running, signIn, viewer } from "./personal-server.support";
 
+beforeEach(() => { refuseCheaply(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
-const wrong = "x".repeat(1100);
 const proxy = (client: string) => ({ peer: "127.0.0.1", forwardedFor: client });
 
 /** The sign-in rows of the audit trail, newest first, as an administrator reads them. */

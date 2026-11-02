@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import { AuthError, SessionAuth } from "./auth";
 import { clientAddress } from "./client-address";
+import { maxSecretBytes } from "./password";
 import { OwnerReaders, owners } from "./owners";
 import { TaskConnections, taskIdentityOf } from "./task-connections";
 import { ConnectionCatalog, ownerProjectRef } from "./connection-catalog";
@@ -398,8 +399,14 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           Object.keys(body).some((k) => !["password", "key", "username"].includes(k))
         )
           throw new AuthError("invalid_login_request", 400);
+        // A secret longer than a key or a password can be never matches anything, and the password check turns it away without any
+        // work. It is not a guess at a credential, so it is refused here, before anything is counted: counted, it would let one
+        // client fill the limits at no cost (the username is held to 80 characters above, the whole request to 2048).
+        const secretValue: string = body.key || body.password;
+        if (Buffer.byteLength(secretValue) > maxSecretBytes)
+          throw new AuthError("invalid_login_request", 400);
         try {
-          const result = await auth.personalLogin(r, body.key || body.password, body.username, clientAddress(info.peer, r.headers.get("x-forwarded-for")));
+          const result = await auth.personalLogin(r, secretValue, body.username, clientAddress(info.peer, r.headers.get("x-forwarded-for")));
           audit.record(
             {
               actor: typeof body.username === "string" ? body.username : "owner",

@@ -65,7 +65,7 @@ A personal session MUST end when 30 minutes have passed since its last request, 
 
 ### Requirement: Refused sign-ins are counted by client address and by account, and only refused ones
 
-The sign-in limit MUST count the sign-ins whose credentials were checked and refused, in four buckets over 15 minutes: 5 per known account and client address, 20 per client address whatever the name, 50 per known account across addresses, and 500 for the whole server. A sign-in that names no account MUST count only against its client address and the server bucket. Every bucket MUST be asked before any credential work and before the busy flag is taken, and a full bucket MUST be answered 429 `login_rate_limited`. A successful sign-in, and a failure on the server's side such as an unreadable credential file, MUST NOT count. A sign-in that arrives while another is being checked MUST be answered 429 `login_busy`, which is not a failure and is not counted; the sign-in page MUST describe `login_busy` and `login_rate_limited` differently. Each of the limiter's tables MUST hold at most 10,000 keys however many addresses a flood comes from.
+The sign-in limit MUST count the sign-ins whose credentials were checked and refused, in four buckets over 15 minutes: 5 per known account and client address, 20 per client address whatever the name, 50 per known account across addresses, and 500 for the whole server. A client address MUST be counted in its canonical form, as the IPv4 address or, for IPv6, as its /64, so that one address written two ways, or two addresses of one /64, are one client. A sign-in that names no account MUST count only against its client address and the server bucket. Every bucket MUST be asked before any credential work and before the busy flag is taken, and a full bucket MUST be answered 429 `login_rate_limited`. A successful sign-in, and a failure on the server's side such as an unreadable credential file, MUST NOT count. A sign-in that arrives while another is being checked MUST be answered 429 `login_busy`, which is not a failure and is not counted; the sign-in page MUST describe `login_busy` and `login_rate_limited` differently. Each of the limiter's tables MUST hold at most 10,000 keys however many addresses a flood comes from.
 
 #### Scenario: many successful sign-ins
 
@@ -97,9 +97,43 @@ The sign-in limit MUST count the sign-ins whose credentials were checked and ref
 - **WHEN** a bucket is full while the busy flag is set, and a sign-in arrives
 - **THEN** it is answered `login_rate_limited` and not `login_busy`, and no password check ran for it
 
+#### Scenario: one IPv6 network is one client
+
+- **WHEN** five wrong keys for one account arrive from five different addresses of one /64 (written `2001:db8:0:1::1`, `2001:DB8:0:1:0:0:0:7`, `2001:db8:0:0001:aaaa::5` and so on)
+- **THEN** a sixth address of that /64 is refused as the same client, and an address of another /64 is not
+
+#### Scenario: one address written another way
+
+- **WHEN** twenty refused sign-ins come from one IPv4 client written as `198.51.100.30`, `::ffff:198.51.100.30`, `::FFFF:C633:641E` and with surrounding spaces, or from one IPv6 peer written `2001:db8:0:0::9`, `2001:DB8::9` and `2001:db8::9`
+- **THEN** they are one client, and its next sign-in is 429
+
+#### Scenario: what many real addresses can do
+
+- **WHEN** ten different real addresses each make five refused sign-ins for one account, or twenty-five addresses each make twenty refused sign-ins
+- **THEN** the account is then refused from every address (its 50 are used), or everyone is refused (the 500 are used), and with one address fewer neither is the case; the guide says so, and that the counts are per process and start again when it restarts
+
+### Requirement: A secret that can never match is a 400 before anything is counted
+
+A sign-in whose secret (`key`, or `password`) is longer than 1024 bytes MUST be answered 400 `invalid_login_request` before any password work and before any limit is asked or counted, because the password check refuses such a secret without work and it is not a guess at a credential. The limit MUST be 1024 bytes, not characters. A username longer than 80 characters and a request longer than 2048 characters MUST be answered 400 `invalid_login_request` before anything is counted, too.
+
+#### Scenario: a flood of oversized secrets
+
+- **WHEN** eighty sign-ins from one address carry secrets of 1025 bytes or more
+- **THEN** every one is 400 `invalid_login_request`, no password check ran, and the same address then signs in with its right key and still has its whole allowance of refusals
+
+#### Scenario: the edge is in bytes
+
+- **WHEN** a wrong secret of 1024 ASCII bytes, one of 1025, one of 341 three-byte characters (1023 bytes) and one of 342 (1026 bytes) are sent
+- **THEN** the first and third are 401 and counted, the second and fourth are 400 and not counted
+
+#### Scenario: long names and long requests
+
+- **WHEN** a username of 81 characters, and a request body of more than 2048 characters, are sent
+- **THEN** both are 400 and neither is counted, while a username of 80 characters is an ordinary refusal
+
 ### Requirement: The client address of a sign-in comes from the connection, and a forwarding header only when the connection is from this machine
 
-`server/index.ts` MUST hand the connection's peer address to the request handler. The server MUST take the client address from the last entry of `X-Forwarded-For` only when the peer is a loopback address (127.0.0.0/8, `::1`, or an IPv4-mapped form) and that entry is a valid IP address; in every other case, including an absent or malformed header, it MUST use the peer address. A handler called without a peer MUST count every sign-in as coming from `unknown`.
+`server/index.ts` MUST read the connection's peer address first in the request handler, before anything is awaited, and hand it to the request handler of the application. The server MUST take the client address from the last entry of `X-Forwarded-For` only when the peer is a loopback address (127.0.0.0/8, `::1`, or an IPv4-mapped form, written in any way) and that entry is a valid IP address; in every other case, including an absent or malformed header, it MUST use the peer address. Addresses MUST be put in one canonical form before the loopback test and before they are counted: IPv6 compressed (RFC 5952) and in lower case, IPv4-mapped IPv6 as the IPv4 address it carries, a zone dropped. A handler called without a peer MUST count every sign-in as coming from `unknown`.
 
 #### Scenario: behind the proxy on this machine
 
@@ -115,6 +149,35 @@ The sign-in limit MUST count the sign-ins whose credentials were checked and ref
 
 - **WHEN** the peer is loopback and the header is `not-an-address`, `198.51.100.7:4433` or empty
 - **THEN** the peer address is used
+
+#### Scenario: the proxy's address written another way
+
+- **WHEN** the peer is `::ffff:7f00:1`, `0:0:0:0:0:0:0:1` or `::1` and the header names `2001:DB8:0:0::5`
+- **THEN** the header is believed in each case and the client is `2001:db8::5`; from the peer `::ffff:c000:209` the header is not believed and the client is `192.0.2.9`
+
+#### Scenario: the peer is read before the body
+
+- **WHEN** the source of the request handlers of `server/index.ts` and of the fixture server is read
+- **THEN** each reads `req.socket.remoteAddress` once, before its first `await`, and passes that value on
+
+### Requirement: A proxy on this machine writes the forwarding header itself
+
+Because the server believes `X-Forwarded-For` from a proxy on this machine, every such proxy MUST replace the header with the address of the peer on its own connection, never pass on what the client wrote. The dev server's `/api/control-center` proxy in `vite.config.ts`, which `scripts/fixture-preview.ts`, `bun run dev` and the preview scripts use, MUST set `X-Forwarded-For` to `req.socket.remoteAddress` for every request, overwrite any incoming value whether it is one entry, a list or several header lines, and remove the header when the connection has no address. The fixture server MUST hand the peer to the application as the real server does.
+
+#### Scenario: a client writes its own header through the dev proxy
+
+- **WHEN** a client sends `X-Forwarded-For: 203.0.113.77`, a list of addresses, or the header twice, through a dev server started on the repository's `vite.config.ts` with a stand-in control center behind it
+- **THEN** the stand-in receives `127.0.0.1` (the real peer) as the only value, none of the claimed addresses, and the address the control center would count is the real one
+
+#### Scenario: no header
+
+- **WHEN** the client writes no `X-Forwarded-For`
+- **THEN** the control center still receives the real peer in it
+
+#### Scenario: twenty-five invented addresses
+
+- **WHEN** twenty-five requests through the dev proxy each claim another address
+- **THEN** the control center counts them as one client; in the fixture a sixth refused sign-in of one account from them is 429
 
 ### Requirement: Input the caller got wrong is a 400 and not a 503
 
@@ -190,9 +253,9 @@ The provider status monitor MUST NOT reject when the run ledger cannot be read; 
 - **WHEN** a promise is rejected with no handler in a server process
 - **THEN** a line with the error code is logged, the message is not, and the process keeps running
 
-### Requirement: Every writer of the configuration file takes one exclusive lock and never writes an older copy
+### Requirement: Every writer of the configuration file takes one kernel-held exclusive lock and never writes an older copy
 
-The control center, when it creates or revokes an account, and `personal-config`, for every command that saves the configuration, MUST take the exclusive lock `<config>.lock` (created with `wx`, mode 0600, holding the holder's pid and time) before writing, wait up to about 5 seconds for it, and then give up: the control center with 503 `config_busy`, the command line with a Chinese error and nothing written. A lock whose holder is not running, or that is older than 30 seconds, MUST be broken. Slow work (hashing, key generation) MUST be done before the lock is taken. Under the lock the control center MUST read the file again, apply its change and its pending revocations to the accounts that file holds, and write through a temporary file renamed over the original. `personal-config` MUST record the version of the file (inode, size, modification and change time) before it reads it and MUST, under the lock, write nothing and fail with "配置文件在读取后被改动，请重新运行" when the file is a different version. A command that stops this way MUST remove the key file and key digest it had made.
+The control center, when it creates or revokes an account, and `personal-config`, for every command that saves the configuration, MUST take the same exclusive lock before writing: a transaction opened with `BEGIN IMMEDIATE` on the small SQLite file `<config>.lock.sqlite` (created on first use with mode 0600, holding nothing), held for the whole read, change, write and rename, through the SQLite driver of the process (`bun:sqlite` under Bun) so that the file locks of every process exclude each other. A writer MUST wait up to about 5 seconds without blocking its event loop and then give up: the control center with 503 `config_busy`, the command line with a Chinese error and nothing written. The lock MUST be released by the operating system when its holder exits, however it exits, and the writers MUST NOT keep, test or break a lock by pid or by age. Slow work (hashing, key generation) MUST be done before the lock is taken. Under the lock the control center MUST read the file again, apply its change and its pending revocations to the accounts that file holds, and write through a temporary file renamed over the original, after checking once more, immediately before the rename, that the file is still the version it read; when it is not, it MUST discard the write and repeat the read, change and write, at most three times, then answer 503 `config_busy`. `personal-config` MUST record the version of the file (inode, size, modification and change time) before it reads it and MUST, under the lock and again immediately before the rename, write nothing and fail with "配置文件在读取后被改动，请重新运行" when the file is a different version. A command that stops this way MUST remove the key file and key digest it had made.
 
 #### Scenario: a revocation made while the command line works on an older copy
 
@@ -209,10 +272,67 @@ The control center, when it creates or revokes an account, and `personal-config`
 - **WHEN** another process holds the lock for longer than the wait while an administrator revokes an account on the web
 - **THEN** the answer is 503 `config_busy`, the account is revoked in memory at once, the file is unchanged, and the next successful write stores the revocation; creating an account in the same situation leaves no account and no key digest
 
-#### Scenario: a crashed holder
+#### Scenario: a holder killed with SIGKILL
 
-- **WHEN** the lock file names a process that no longer runs, or is older than 30 seconds
-- **THEN** the next writer breaks it and writes
+- **WHEN** a process that holds the lock is killed with SIGKILL
+- **THEN** the next writer takes the lock at once, without waiting out an age or probing a pid, and nothing is left to clean up
+
+#### Scenario: real processes never overlap
+
+- **WHEN** several real processes, some on Bun and one on Node, take the lock repeatedly and log when they enter and leave the locked section
+- **THEN** no process enters while another is inside
+
+#### Scenario: a writer that does not take the lock
+
+- **WHEN** a writer that ignores the lock replaces the file after a locked writer has read it and before its rename
+- **THEN** the rename does not happen, the other writer's content is kept, and the control center repeats its change on that content
+
+### Requirement: The lock is never given up by what the process does with the lock file, and the work under it is synchronous
+
+While a process holds the lock, nothing in that process MAY open and close a descriptor of the lock file, because POSIX drops every lock a process holds on a file when the process closes any descriptor of that file. The lock file MUST be created with `wx` only when it is missing (an existing file makes that call fail before any descriptor exists), and an existing one MUST only be inspected with `lstat` and tightened with `chmod`. The lock helper MUST run its work synchronously: when the work returns a thenable it MUST release the lock, throw a `TypeError`, and not leave the thenable's failure unhandled. A holder that must stay across awaits MUST take the lock through a handle (`acquireConfigLock`), keep the handle, and release it itself; releasing twice MUST release once.
+
+#### Scenario: other lock calls in the process that holds the lock
+
+- **WHEN** a process holds the lock and makes several other lock calls on the same file that wait and fail with `config_busy`, and a second real process then tries to take the lock
+- **THEN** the second process is refused as busy; once the first process releases, the second process takes it
+
+#### Scenario: a promise from the work
+
+- **WHEN** the work under the lock returns a promise, a rejected promise or any object with a `then` function
+- **THEN** the helper rejects with a `TypeError`, the lock is free again at once, and no unhandled rejection is raised
+
+### Requirement: A lock file that is not a regular file of this user is not used
+
+Before it takes the lock, a writer MUST `lstat` the lock file and MUST refuse to use it when it is a symbolic link, is not a regular file (a pipe, a directory), or belongs to a user other than the effective user. The control center MUST answer 503 `config_lock_invalid` and keep an account revocation in force in memory, creating no account and leaving no key digest; `personal-config` MUST fail with a Chinese message that says which of the three it is, writing nothing and leaving no key behind. The refusal MUST be immediate: neither the wait for the lock nor a hang on a pipe.
+
+#### Scenario: a link or a pipe where the lock file goes
+
+- **WHEN** `<config>.lock.sqlite` is a symbolic link to another file, or a named pipe, and an administrator creates or revokes an account on the web
+- **THEN** the answer is 503 `config_lock_invalid`, no account or key digest exists afterwards, the revocation is in force in memory, the link's target is untouched, and once the unusable file is removed the next write stores the pending revocation
+
+#### Scenario: the command line meets the same file
+
+- **WHEN** `personal-config user … add` runs while the lock file is a link or a pipe
+- **THEN** it exits with an error in Chinese naming the lock file and what it is, within seconds, having written neither the configuration nor a key file, and it succeeds after the file is removed
+
+#### Scenario: another user's file
+
+- **WHEN** the lock file belongs to a user other than the effective user
+- **THEN** it is refused as `other_owner`, and a file of the effective user is used
+
+### Requirement: A configuration reached through a link is locked and rewritten as its real file
+
+The server and `personal-config` MUST resolve the configuration path once with `realpath` (for a file that does not exist yet, the real directory and the file name), MUST derive the lock path from the resolved path, and MUST write and rename the real file, so that a link stays a link and a writer that names the file by the link excludes one that names it by its real path. The account state database MUST stay beside the path as it was given. The server resolves the path once, at startup, so the deployment guide MUST say that re-pointing the link while the server runs needs a restart.
+
+#### Scenario: a symbolic link to the configuration
+
+- **WHEN** the configuration is a symbolic link to a file in another directory and an account is revoked on the web
+- **THEN** the real file holds the revocation, the link is still a link, the lock file is beside the real file, and no temporary file is left beside either
+
+#### Scenario: the link is re-pointed
+
+- **WHEN** an operator reads the guide's section on configurations reached through a link
+- **THEN** it says the path is resolved once at startup and that the server must be restarted after the link is pointed at another file
 
 ### Requirement: One account cannot fill the session table or the sign-in path for everyone
 
@@ -298,14 +418,19 @@ For a refused sign-in the server MUST record the username only when it is exactl
 - **WHEN** five sign-ins arrive while another is being checked, and administrators sign in
 - **THEN** the five leave no row, and the successful sign-ins are written as before
 
-### Requirement: The deployment guide says what the holder of an account's key can do to that account's sign-in
+### Requirement: The deployment guide says what the sign-in limits cannot prevent
 
-`docs/lan-deployment.md` MUST state that anyone who holds an account's key can end that account's sessions (the cap of 8 per account) and use up its budget of 20 sign-ins in 15 minutes, which keeps the account's real user from signing in for 15 minutes; that while an account is at its budget a wrong key is answered 429 and the name of no account 401, so account names are not secrets; and that an account should be given to one person, and a key that several people share rotated.
+`docs/lan-deployment.md` MUST state that anyone who holds an account's key can end that account's sessions (the cap of 8 per account) and use up its budget of 20 sign-ins in 15 minutes, which keeps the account's real user from signing in for 15 minutes; that while an account is at its budget a wrong key is answered 429 and the name of no account 401, so account names are not secrets; and that an account should be given to one person, and a key that several people share rotated. It MUST also state the residual risk of the failure limits: an attacker with at least ten distinct real addresses (or /64s) can use up one account's 50 failures and at least twenty-five can trip the server-wide 500, the limits are kept per process and start again on restart, the front must stay on the local network, and a per-device cookie is a possible follow-up that is not built. It MUST state that a proxy on this machine has to write `X-Forwarded-For` itself, and that the dev server's proxy does.
 
 #### Scenario: an operator plans accounts
 
 - **WHEN** an operator reads the sign-in limits section of the guide
 - **THEN** it says one account per person and rotate a shared key, and says why
+
+#### Scenario: an operator plans exposure
+
+- **WHEN** an operator reads the same section
+- **THEN** it gives the ten-address and twenty-five-address figures, says the counts are per process and reset on restart, says to keep the front on the local network, and names device cookies as not built
 
 ### Requirement: A limited credential is shown on the Services credentials panel and is reminded of nowhere
 

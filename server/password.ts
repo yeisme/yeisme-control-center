@@ -5,6 +5,8 @@ export const passwordOptions = {
   p: 1,
   maxmem: 192 * 1024 * 1024,
 };
+/** The longest secret that can be a password or an access key. A longer one is refused without any work, and can never match. */
+export const maxSecretBytes = 1024;
 const derive = (password: string, salt: Buffer) =>
   new Promise<Buffer>((resolve, reject) => {
     scrypt(password, salt, 32, passwordOptions, (error, key) =>
@@ -12,7 +14,7 @@ const derive = (password: string, salt: Buffer) =>
     );
   });
 export async function hashPassword(password: string): Promise<string> {
-  if (password.length < 12 || Buffer.byteLength(password) > 1024)
+  if (password.length < 12 || Buffer.byteLength(password) > maxSecretBytes)
     throw new Error("Password must contain 12–1024 bytes.");
   const salt = randomBytes(16);
   const key = await derive(password, salt);
@@ -23,7 +25,7 @@ export async function checkPassword(
   encoded: string,
 ): Promise<boolean> {
   const parts = /^scrypt-v1\$([a-f0-9]{32})\$([a-f0-9]{64})$/.exec(encoded);
-  if (!parts || Buffer.byteLength(password) > 1024) return false;
+  if (!parts || Buffer.byteLength(password) > maxSecretBytes) return false;
   const key = await derive(password, Buffer.from(parts[1], "hex"));
   return timingSafeEqual(key, Buffer.from(parts[2], "hex"));
 }
