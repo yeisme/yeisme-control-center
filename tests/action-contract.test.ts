@@ -68,7 +68,7 @@ describe("action HTTP contract", () => {
     origin: "http://127.0.0.1:4299",
     port: 4299,
     owners: {},
-    principals: [{ issuer: "https://id.example", subject: "one", name: "One", scopes: [{ id: "scope-1", tenant: "tenant", team: "team", project: "project", label: "Scope", owners: {} }] }],
+    principals: [{ issuer: "https://id.example", subject: "one", name: "One", role: "admin", scopes: [{ id: "scope-1", tenant: "tenant", team: "team", project: "project", label: "Scope", owners: {} }] }],
   };
   const session: Session = { id: "action-session", issuer: "https://id.example", subject: "one", name: "One", csrf: "csrf", accessToken: "token", accessAudience: [], expires: Date.now() + 60_000, epoch: 1 };
   const req = (path: string, method = "GET", body?: unknown) => new Request(config.origin + "/api/control-center/v1" + path, { method, headers: { Cookie: "yeisme_session=" + session.id, Origin: config.origin, "X-CSRF-Token": session.csrf }, body: body ? JSON.stringify(body) : undefined });

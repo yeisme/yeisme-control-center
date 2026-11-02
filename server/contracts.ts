@@ -35,7 +35,15 @@ export interface PrincipalBinding {
   role?: ControlCenterRole;
   scopes: ScopeBinding[];
 }
-export interface TaskConnection {
+/**
+ * When a credential stops working, as recorded by whoever issued it: owners do not report expiry over their APIs,
+ * so `personal-config` writes these next to the `credential_ref` they describe. RFC 3339; never sent to clients.
+ */
+export interface CredentialLifecycle {
+  credential_expires_at?: string;
+  credential_issued_at?: string;
+}
+export interface TaskConnection extends CredentialLifecycle {
   id: string;
   owner: "eikona" | "sonora" | "scaena" | "anatomia";
   instance_id: string;
@@ -52,7 +60,7 @@ export interface TaskConnection {
   studio_origin?: string;
 }
 /** A read-only link to an open tool that is not a task owner; see `src/shared/open-tools.ts`. */
-export interface OpenToolConnection {
+export interface OpenToolConnection extends CredentialLifecycle {
   /** Base address of the tool; the server appends its own fixed GET routes. */
   endpoint: string;
   /** A user-level 0600 file holding a read-only bearer credential issued by the tool. */
@@ -63,7 +71,7 @@ export interface OpenToolConnection {
 }
 export type ProviderOwner = "eikona" | "scaena" | "sonora";
 export type ProviderModality = "image" | "video" | "audio";
-export interface ProviderConnection {
+export interface ProviderConnection extends CredentialLifecycle {
   owner: ProviderOwner;
   endpoint: string;
   /** A user-level 0600 file reference. The file content never leaves the server. */
@@ -109,7 +117,7 @@ export interface ServerConfig {
         audience: string;
         /** Optional 0600 service credential for personal (non-OIDC) sessions. */
         credential_ref?: string;
-      }
+      } & CredentialLifecycle
     >
   >;
   collection?: Partial<Record<"auctra", {
@@ -119,15 +127,28 @@ export interface ServerConfig {
     credential_ref?: string;
     /** 0600 file holding a `service-consumer` key for `creative.flow.read`, which Auctra refuses to collector keys. */
     flow_credential_ref?: string;
+    flow_credential_expires_at?: string;
+    flow_credential_issued_at?: string;
     enabled?: boolean;
-  }>>;
+  } & CredentialLifecycle>>;
   clients?: Partial<Record<"muweave", {
     origin: string;
     enabled?: boolean;
   }>>;
   providers?: Partial<Record<ProviderOwner, ProviderConnection>>;
   open_tools?: Partial<Record<OpenToolKind, OpenToolConnection>>;
+  /** Server-side observation, so failures and credential problems become reminders with no browser open. */
+  observation?: ObservationConfig;
   allowInsecureLoopback?: boolean;
+}
+export interface ObservationConfig {
+  enabled: boolean;
+  /** Minutes between cycles; at least 5, default 10. */
+  interval_minutes?: number;
+  /** Open tools are read every Nth cycle (DriveBridge writes an audit row per authenticated call); default 3. */
+  open_tools_every?: number;
+  /** Reminder recipients as `issuer|subject`; default every enabled admin bound to the scope. */
+  recipients?: string[];
 }
 export interface PersonalUser {
   username: string;

@@ -646,6 +646,31 @@ try {
     assert.deepEqual([revoked.status, opened.status], [404, 404]);
     assert.deepEqual([revoked.json, opened.json].map((body) => JSON.stringify(body).includes(page.json.rows[0].name)), [false, false]);
   });
+  await check("a personal viewer can read but cannot run admin or paid actions", async () => {
+    const login = await app(new Request(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: "contract-viewer", password }) }));
+    assert.equal(login.status, 200);
+    const cookie = "yeisme_session=" + login.headers.getSetCookie().map((entry) => entry.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const as = async (pathname: string, body?: unknown) => {
+      const response = await app(new Request(origin + pathname, { method: body === undefined ? "GET" : "POST", headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }));
+      return { status: response.status, json: await response.json().catch(() => null) };
+    };
+    let csrf = "";
+    const session = await as("/api/control-center/v1/session");
+    assert.equal(session.status, 200);
+    assert.equal(session.json.role, "viewer");
+    csrf = session.json.csrf;
+    const scope = scopeIds[0];
+    const attempts = [
+      { owner: "control-center", target_kind: "personal_user", target_ref: "user:contract-admin", action: "admin.user.revoke", input: { username } },
+      { owner: "eikona", target_kind: "task", target_ref: "eikona:task-1", action: "task.cancel", input: { reason: "contract" } },
+    ];
+    for (const attempt of attempts) {
+      const refused = await as(`/api/control-center/v1/actions/preview?scope=${scope}`, { scope_id: scope, expected_revision: "0", idempotency_key: `contract_viewer_${attempt.action.replace(/\W/g, "_")}`, ...attempt });
+      assert.deepEqual([refused.status, refused.json?.error], [403, "control_center_admin_required"], attempt.action);
+    }
+    const run = await as(`/api/control-center/v1/provider-runs?scope=${scope}`, { owner: "eikona", modality: "image", prompt: "contract" });
+    assert.deepEqual([run.status, run.json?.error], [403, "control_center_admin_required"]);
+  });
   await check("only connected tool projects can be disconnected, and the template keeps working", async () => {
     const configured = await act("owner_project.disconnect", "owner_project", "fx-eikona", { connection_id: "fx-eikona" });
     assert.equal(configured.response.status, 404);

@@ -184,7 +184,7 @@ describe("ProviderRunManager", () => {
     const transport = fetcher();
     const scopedConfig: ServerConfig = {
       ...config,
-      principals: [{ issuer: "local", subject: "u", name: "U", scopes: [scope] }],
+      principals: [{ issuer: "local", subject: "u", name: "U", role: "admin", scopes: [scope] }],
     };
     const auth = new SessionAuth(scopedConfig);
     auth.sessions.set(session.id, session);

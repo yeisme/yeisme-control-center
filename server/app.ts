@@ -183,6 +183,11 @@ export function createApp(
     if (!found) throw new AuthError("owner_project_not_found", 404);
     return found;
   };
+  /** Collaboration actions carry their own project grants; every other action changes owner, Provider or account state and needs an admin. */
+  const authorizeAction = (s: Session, action: string) => {
+    if (isCollaborationAction(action)) return;
+    if (auth.role(s) !== "admin" || (action.startsWith("admin.") && !s.personal)) throw new AuthError("control_center_admin_required", 403);
+  };
   const scoped = (s: Session, id: string | null): ScopeBinding => {
     if (id?.startsWith("project_")) return collaboration.scope(s, id);
     const p = auth.principal(s);
@@ -814,6 +819,7 @@ export function createApp(
         if (!body || body.scope_id !== scope.id || typeof body.owner !== "string" || typeof body.target_kind !== "string" || typeof body.target_ref !== "string" || typeof body.action !== "string" || typeof body.expected_revision !== "string" || typeof body.idempotency_key !== "string" || !body.input || typeof body.input !== "object") throw new AuthError("invalid_action_request", 400);
         const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.preview", owner: body.owner, targetRef: body.target_ref, meta: { action: body.action, target_kind: body.target_kind } });
         try {
+          authorizeAction(session, body.action);
           if (isCollaborationAction(body.action)) collaboration.authorize(session, body.action, body.target_ref, body.input);
           if (body.action === "generation.batch.create") body.input.items = await generationBatches.verify(session, body.target_ref, body.input.items);
           if (body.action === "provider_runs.create" && scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
@@ -837,6 +843,7 @@ export function createApp(
         const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.confirm", targetRef: body.preview_ref });
         try {
           const original = actions.record(body.preview_ref, identityOf(session), scope.id);
+          authorizeAction(session, original.request.action);
           if (isCollaborationAction(original.request.action)) collaboration.authorize(session, original.request.action, original.request.target_ref, original.request.input);
           const local = isCollaborationAction(original.request.action) && !["generation.input.prepare", "generation.batch.submit", "generation.batch.reconcile"].includes(original.request.action);
           if (original.request.action === "generation.batch.create") original.request.input.items = await generationBatches.verify(session, original.request.target_ref, original.request.input.items);
@@ -990,6 +997,7 @@ export function createApp(
       if (path === "/provider-runs" && r.method === "POST") {
         if (scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
         auth.csrf(r, session);
+        authorizeAction(session, "provider_runs.create");
         const raw = await r.text();
         if (raw.length > 12000) throw new AuthError("invalid_provider_request", 400);
         let body: any;
@@ -1034,6 +1042,7 @@ export function createApp(
       }
       const providerRun = path.match(/^\/provider-runs\/([^/]+)(\/events|\/reconcile)?$/);
       if (providerRun) {
+        if (r.method === "POST") authorizeAction(session, "provider_runs.reconcile");
         const runRef = decodeURIComponent(providerRun[1]);
         const run = providers.get(runRef);
         if (!run || run.scope_id !== scope.id) throw new AuthError("run_not_found", 404);

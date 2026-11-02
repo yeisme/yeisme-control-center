@@ -28,7 +28,7 @@ describe("project metadata", () => {
       origin: "http://127.0.0.1:4392",
       port: 4392,
       owners: {},
-      principals: [{ issuer: "https://id.example", subject: "one", name: "One", scopes: [
+      principals: [{ issuer: "https://id.example", subject: "one", name: "One", role: "admin", scopes: [
         { id: "scope-a", tenant: "tenant", team: "team", project: "project", label: "Scope A", owners: {} },
         { id: "scope-b", tenant: "tenant", team: "team", project: "project", label: "Scope B", owners: {} },
       ] }],
