@@ -1,5 +1,5 @@
 import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
 import type { ControlCenterRole } from "../src/service-directory";
@@ -257,7 +257,8 @@ export class SessionAuth {
     if (!this.config.personal || !this.config.config_file) throw new AuthError("user_management_unavailable", 503);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(input.username) || !input.name.trim() || !["admin", "viewer"].includes(input.role))
       throw new AuthError("invalid_user", 400);
-    if (this.personalUsers().some((user) => user.username === input.username)) throw new AuthError("user_exists", 409);
+    // An account added with personal-config since the server started is in the file but not yet in memory.
+    if ([...this.personalUsers(), ...(this.readConfigFile().personal?.users || [])].some((user) => user.username === input.username)) throw new AuthError("user_exists", 409);
     const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
     if (!input.scope_ids.length || input.scope_ids.some((id) => !allowedScopes.has(id))) throw new AuthError("scope_not_found", 404);
     const accessKey = "yk_live_" + nonce();
@@ -265,27 +266,62 @@ export class SessionAuth {
     mkdirSync(dirname(keyHashRef), { recursive: true, mode: 0o700 });
     writeFileSync(keyHashRef, (await hashPassword(accessKey)) + "\n", { mode: 0o600, flag: "wx" });
     const user: PersonalUser = { username: input.username, name: input.name.trim(), role: input.role, key_hash_ref: keyHashRef, scope_ids: input.scope_ids, enabled: true, created_at: new Date().toISOString() };
-    this.config.personal.users = [...this.personalUsers(), user];
-    this.persistConfig();
+    try {
+      // Memory follows the file only once the file holds the account, so a failed write leaves no account that vanishes at restart.
+      this.config.personal.users = this.persistConfig((stored) => {
+        if (stored.some((existing) => existing.username === user.username)) throw new AuthError("user_exists", 409);
+        return [...stored, user];
+      });
+    } catch (error) {
+      rmSync(keyHashRef, { force: true });
+      throw error;
+    }
     return { user: { ...user, key_hash_ref: undefined }, access_key: accessKey };
   }
   revokePersonalUser(username: string) {
     if (!this.config.personal || !this.personalUsers().some((user) => user.username === username)) throw new AuthError("user_not_found", 404);
-    this.config.personal.users = this.personalUsers().map((user) => user.username === username ? { ...user, enabled: false } : user);
+    const revoke = (users: PersonalUser[]) => users.map((user) => user.username === username ? { ...user, enabled: false } : user);
+    // Effective at once, even when the file cannot be written: a revocation must not wait for the disk.
+    this.config.personal.users = revoke(this.personalUsers());
     for (const session of this.sessions.values()) if (session.personal && session.subject === username) this.sessions.delete(session.id);
-    this.persistConfig();
+    this.config.personal.users = this.persistConfig(revoke);
   }
-  private persistConfig() {
+  private readConfigFile(): ServerConfig {
     const path = this.config.config_file;
     if (!path) throw new AuthError("user_management_unavailable", 503);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const temp = path + "." + process.pid + ".users.tmp";
-    writeFileSync(temp, JSON.stringify({ ...this.config, config_file: undefined }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-    renameSync(temp, path);
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as ServerConfig;
+    } catch {
+      throw new AuthError("user_management_unavailable", 503);
+    }
+  }
+  /**
+   * Stores the account list in the configuration file as it is on disk now, and returns the list that was stored.
+   * The in-memory config is not the file: it also holds values that never lived there (providers and the bind address from the
+   * environment, `config_file` itself) and it lacks edits made with personal-config since the server started. Writing it back
+   * whole persisted the first and discarded the second. Here the file is read again, `change` is applied to its accounts, and only
+   * `personal.users` is replaced, through a temporary file renamed over the original, mode 0600.
+   */
+  private persistConfig(change: (stored: PersonalUser[]) => PersonalUser[]): PersonalUser[] {
+    const path = this.config.config_file;
+    if (!path) throw new AuthError("user_management_unavailable", 503);
+    const stored = this.readConfigFile();
+    if (!stored.personal) throw new AuthError("user_management_unavailable", 503);
+    const users = change(stored.personal.users || []);
+    const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.users.tmp`;
+    try {
+      writeFileSync(temp, JSON.stringify({ ...stored, personal: { ...stored.personal, users } }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      renameSync(temp, path);
+    } catch {
+      rmSync(temp, { force: true });
+      throw new AuthError("user_management_unavailable", 503);
+    }
     // Permission bindings changed: every live session moves to a new epoch so
     // connected clients refetch /session and drop stale scoped responses.
     this.sessions.bumpAll();
+    return users;
   }
+
   cookie(value: string, maxAge: number) {
     return `yeisme_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(this.config.origin).protocol === "https:" ? "; Secure" : ""}`;
   }

@@ -1,5 +1,9 @@
 import { existsSync, statSync } from "node:fs";
-import { extname, resolve, sep } from "node:path";
+import { extname, relative, resolve, sep } from "node:path";
+import { isServedPath } from "./served-entries.mjs";
+
+/** The one list of what the built directory may serve; the Vite build, release scripts and public-surface check read it too. */
+export { servedEntries, isServedPath, unservedPaths, unservedTopLevel } from "./served-entries.mjs";
 
 export const staticTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -52,10 +56,14 @@ export interface StaticPlan {
   end?: number;
 }
 
+const notFound = (): StaticPlan => ({ status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+
 /**
  * What to send for a static path. Pure apart from reading file metadata, so tests need no server.
  * Page addresses fall back to the app's index.html; a missing file with an extension (an image, a video, a script)
  * is a 404, never HTML that a media element would fail to decode.
+ * Only `servedEntries` are ever sent: a real file anywhere else under the root (a source archive, notes, test evidence that
+ * ended up in the directory) is a 404 as well, and does not fall back to the app either.
  */
 export function planStatic(root: string, pathname: string, request: { range?: string; ifModifiedSince?: string } = {}): StaticPlan {
   let path: string;
@@ -63,9 +71,11 @@ export function planStatic(root: string, pathname: string, request: { range?: st
   const target = resolve(root, "." + path);
   if (!target.startsWith(root + sep) && target !== root) return { status: 404, headers: {} };
   const exists = existsSync(target) && statSync(target).isFile();
+  // Judged on the resolved path, so `/assets/../docs/README.md` is the docs file and not an assets file.
+  if (exists && !isServedPath(relative(root, target).split(sep).join("/"))) return notFound();
   const ext = extname(path);
   const file = exists ? target : ext && ext !== ".html" ? null : resolve(root, "index.html");
-  if (!file) return { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } };
+  if (!file) return notFound();
   if (!existsSync(file)) return { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } };
   const stat = statSync(file);
   const modified = new Date(Math.floor(stat.mtimeMs / 1000) * 1000);

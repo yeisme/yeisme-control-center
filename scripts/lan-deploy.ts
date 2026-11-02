@@ -3,6 +3,7 @@ import { resolve, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { validateControlOrigin } from "../server/auth";
+import { servedEntries } from "../server/static";
 
 const [command, origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312"] = process.argv.slice(2);
 if (command !== "prepare" || process.argv.length > 4) throw new Error("Usage: bun scripts/lan-deploy.ts prepare [origin]");
@@ -36,12 +37,15 @@ if (existsSync(config)) {
 const releaseId = new Date().toISOString().replace(/[:.]/g, "-");
 const release = join(state, "releases", releaseId);
 mkdirSync(join(release, "dist"), { recursive: true, mode: 0o700 });
-// Deploy only application bytes, not source archives, internal docs or test evidence.
-cpSync(join(root, "dist/assets"), join(release, "dist/assets"), { recursive: true });
-for (const entry of ["index.html", "guide.html"]) {
-  cpSync(join(root, "dist", entry), join(release, "dist", entry));
+// Deploy only what the server serves (server/served-entries.mjs): never source archives, internal docs or test evidence.
+for (const entry of servedEntries) {
+  const name = entry.replace(/\/$/, "");
+  if (!existsSync(join(root, "dist", name))) {
+    if (["index.html", "guide.html", "assets/"].includes(entry)) throw new Error("Built directory is incomplete; run bun run build. Missing: " + name);
+    continue;
+  }
+  cpSync(join(root, "dist", name), join(release, "dist", name), { recursive: entry.endsWith("/") });
 }
-if (existsSync(join(root, "dist/guide"))) cpSync(join(root, "dist/guide"), join(release, "dist/guide"), { recursive: true });
 run(bun, ["build", "server/index.ts", "--target=bun", "--outfile=" + join(release, "server.mjs")]);
 // The bundled server migrates its database from ./migrations beside server.mjs on every start.
 cpSync(join(root, "server/db/migrations"), join(release, "migrations"), { recursive: true });

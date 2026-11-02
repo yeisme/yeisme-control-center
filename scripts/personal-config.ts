@@ -5,6 +5,7 @@ import {
   existsSync,
   statSync,
   renameSync,
+  rmSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -13,10 +14,13 @@ import { hashPassword } from "../server/password";
 import { connectionURL, endpointURL } from "../server/task-connections";
 import { isOpenToolKind } from "../src/shared/open-tools";
 import { clientOrigin } from "../src/task-links";
-import type { ServerConfig, TaskConnection, ProviderOwner } from "../server/contracts";
-const [command, file, ...args] = process.argv.slice(2);
+import type { ServerConfig, TaskConnection, ProviderOwner, ObservationConfig } from "../server/contracts";
+const [command, first, ...rest] = process.argv.slice(2);
+const userActions = ["add", "list", "revoke", "rotate", "enable"];
+// `user <config-file> add …` is the form every command uses; `user add <config-file> …` is accepted as well.
+const [file, ...args] = command === "user" && userActions.includes(first) && rest.length ? [rest[0], first, ...rest.slice(1)] : [first, ...rest];
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|studio|cancel|content|disable|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|studio|cancel|content|disable|observe|status <config-file> [arguments]";
 if (
   !file ||
   ![
@@ -32,6 +36,7 @@ if (
     "cancel",
     "disable",
     "content",
+    "observe",
     "status",
   ].includes(command)
 )
@@ -46,6 +51,33 @@ const save = (config: ServerConfig) => {
   });
   renameSync(temp, path);
   };
+/** Takes `--name <value>` out of an argument list; whatever else starts with `--` is not understood. */
+const takeOption = (list: string[], name: string) => {
+  const at = list.indexOf(name);
+  if (at < 0) return { rest: list, value: undefined as string | undefined };
+  const value = list[at + 1];
+  if (!value || value.startsWith("--")) throw Error(`${name} requires a value.`);
+  return { rest: [...list.slice(0, at), ...list.slice(at + 2)], value };
+};
+const newAccessKey = () => "yk_live_" + randomBytes(32).toString("base64url");
+/** Writes a one-time access key to a new 0600 file. Refuses to touch a file that exists, whoever made it. */
+const writeKeyFile = (target: string, key: string) => {
+  const resolved = resolve(target);
+  mkdirSync(dirname(resolved), { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(resolved, key + "\n", { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw Error("Key file exists; refusing overwrite.");
+    throw error;
+  }
+  return resolved;
+};
+/** Replaces a private file through a temporary file in the same directory, so a reader sees the old or the new content, never a mix. */
+const replacePrivate = (target: string, content: string) => {
+  const temp = target + "." + process.pid + ".tmp";
+  writeFileSync(temp, content, { mode: 0o600, flag: "wx" });
+  try { renameSync(temp, target); } catch (error) { rmSync(temp, { force: true }); throw error; }
+};
 if (command === "init") {
   if (existsSync(path)) throw Error("Target exists; refusing overwrite.");
   const origin = clientOrigin(args[0] || "http://127.0.0.1:4312");
@@ -163,33 +195,116 @@ if (command === "init") {
     );
   } else if (command === "user") {
     const action = args[0];
-    if (!config.personal || !["add", "list", "revoke"].includes(action || ""))
-      throw Error("user requires add|list|revoke in personal mode.");
+    if (!config.personal || !userActions.includes(action || ""))
+      throw Error("user requires add|list|revoke|rotate|enable in personal mode.");
     const users = config.personal.users || [];
+    const keyed = takeOption(args, "--key-file");
+    if (keyed.rest.some((arg) => arg.startsWith("--"))) throw Error("Unknown option for user " + action + ".");
+    // The key goes to a new 0600 file (and stays off the screen) when --key-file is given; without it, it is printed once.
+    if (keyed.value !== undefined && !["add", "rotate"].includes(action)) throw Error("--key-file only applies to user add and user rotate.");
+    const [, username, ...more] = keyed.rest;
     if (action === "list") {
       console.log(JSON.stringify(users.map(({ key_hash_ref: _key, ...user }) => ({ ...user, enabled: user.enabled !== false })), null, 2));
     } else if (action === "revoke") {
-      const username = args[1];
-      if (!username || args.length !== 2) throw Error("user revoke requires <username>.");
+      if (!username || keyed.rest.length !== 2) throw Error("user revoke requires <username>.");
       if (!users.some((user) => user.username === username)) throw Error("User not found.");
       config.personal.users = users.map((user) => user.username === username ? { ...user, enabled: false } : user);
       save(config);
       console.log(JSON.stringify({ username, enabled: false }));
+    } else if (action === "enable") {
+      if (!username || keyed.rest.length !== 2) throw Error("user enable requires <username>.");
+      const account = users.find((user) => user.username === username);
+      if (!account) throw Error("User not found.");
+      if (account.enabled !== false) {
+        console.log(JSON.stringify({ username, enabled: true, changed: false }));
+      } else {
+        config.personal.users = users.map((user) => user.username === username ? { ...user, enabled: true } : user);
+        save(config);
+        console.log(JSON.stringify({ username, enabled: true, changed: true, key_unchanged: true, note: "The account's previous access key works again; run user rotate if the key may have leaked.", next: "restart the control center to reload" }, null, 2));
+      }
+    } else if (action === "rotate") {
+      if (!username || keyed.rest.length !== 2) throw Error("user rotate requires <username> [--key-file <new file>].");
+      const user = users.find((entry) => entry.username === username);
+      if (!user) throw Error("User not found.");
+      if (!existsSync(user.key_hash_ref)) throw Error("The account's key digest is missing; refusing to rotate.");
+      const access_key = newAccessKey();
+      const digest = await hashPassword(access_key);
+      // Refuses an existing key file before anything changes. The running server compares every session with the digest file
+      // on each request, so replacing it ends the account's sessions at once and only the new key signs in again.
+      const key_file = keyed.value === undefined ? undefined : writeKeyFile(keyed.value, access_key);
+      try {
+        replacePrivate(user.key_hash_ref, digest + "\n");
+      } catch (error) {
+        if (key_file) rmSync(key_file, { force: true });
+        throw error;
+      }
+      console.log(JSON.stringify({ username, rotated: true, sessions_ended: true, ...(key_file ? { key_file } : { access_key, shown_once: true }) }, null, 2));
     } else {
-      const [_, username, role, name, ...scopeArgs] = args;
+      const [role, name, ...scopeArgs] = more;
       if (!username || !name || !["admin", "viewer"].includes(role || "") || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(username) || users.some((user) => user.username === username))
-        throw Error("user add requires <username> <admin|viewer> <display-name> [scope-id ...].");
+        throw Error("user add requires <username> <admin|viewer> <display-name> [scope-id ...] [--key-file <new file>].");
       const scopes = config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id));
       const scope_ids = scopeArgs.length ? scopeArgs : scopes;
       if (!scope_ids.length || scope_ids.some((id) => !scopes.includes(id))) throw Error("Unknown scope id.");
-      const access_key = "yk_live_" + randomBytes(32).toString("base64url");
+      const access_key = newAccessKey();
       const key_hash_ref = resolve(path + ".users", username + ".key");
-      mkdirSync(dirname(key_hash_ref), { recursive: true, mode: 0o700 });
-      writeFileSync(key_hash_ref, (await hashPassword(access_key)) + "\n", { mode: 0o600, flag: "wx" });
-      config.personal.users = [...users, { username, name, role: role as "admin" | "viewer", key_hash_ref, scope_ids, enabled: true, created_at: new Date().toISOString() }];
-      save(config);
-      console.log(JSON.stringify({ username, name, role, scope_ids, access_key, shown_once: true }, null, 2));
+      const digest = await hashPassword(access_key);
+      // Everything that can be refused is checked before the first file is made: the key file must be new, and so must the digest file.
+      if (existsSync(key_hash_ref)) throw Error("A key digest for this username already exists; refusing overwrite.");
+      const key_file = keyed.value === undefined ? undefined : writeKeyFile(keyed.value, access_key);
+      try {
+        mkdirSync(dirname(key_hash_ref), { recursive: true, mode: 0o700 });
+        writeFileSync(key_hash_ref, digest + "\n", { mode: 0o600, flag: "wx" });
+        config.personal.users = [...users, { username, name, role: role as "admin" | "viewer", key_hash_ref, scope_ids, enabled: true, created_at: new Date().toISOString() }];
+        save(config);
+      } catch (error) {
+        if (key_file) rmSync(key_file, { force: true });
+        throw error;
+      }
+      console.log(JSON.stringify({ username, name, role, scope_ids, ...(key_file ? { key_file, shown_once: false } : { access_key, shown_once: true }) }, null, 2));
     }
+  } else if (command === "observe") {
+    // Server-side observation (reminders with no browser open). The server reads this at start, so restart afterwards.
+    const [mode, ...flags] = args;
+    if (!["on", "off"].includes(mode || "")) throw Error("observe requires on|off [--interval-minutes N] [--open-tools-every N] [--recipients issuer|subject,...|default].");
+    const known = ["--interval-minutes", "--open-tools-every", "--recipients"];
+    const given: Record<string, string> = {};
+    for (let at = 0; at < flags.length; at += 2) {
+      const name = flags[at];
+      const value = flags[at + 1];
+      if (!known.includes(name) || value === undefined || value.startsWith("--") || name in given) throw Error("observe accepts each of " + known.join(", ") + " once, with a value.");
+      given[name] = value;
+    }
+    const whole = (name: string, min: number, max: number) => {
+      const value = given[name];
+      if (value === undefined) return undefined;
+      const number = Number(value);
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < min || number > max) throw Error(`${name} must be a whole number from ${min} to ${max}.`);
+      return number;
+    };
+    const interval = whole("--interval-minutes", 5, 1440);
+    const every = whole("--open-tools-every", 1, 1000);
+    let recipients: string[] | undefined | null;
+    if (given["--recipients"] !== undefined) {
+      if (given["--recipients"] === "default") recipients = null;
+      else {
+        recipients = [...new Set(given["--recipients"].split(",").map((entry) => entry.trim()))];
+        if (!recipients.length || recipients.some((entry) => !/^[^\s,|]+\|[^\s,|]+$/.test(entry))) throw Error("--recipients takes issuer|subject entries separated by commas, or default.");
+      }
+    }
+    const before: ObservationConfig = config.observation ?? { enabled: false };
+    const { recipients: kept, ...base } = before;
+    const next: ObservationConfig = { ...base, enabled: mode === "on" };
+    if (interval !== undefined) next.interval_minutes = interval;
+    if (every !== undefined) next.open_tools_every = every;
+    if (mode === "on") {
+      next.interval_minutes ??= 10;
+      next.open_tools_every ??= 3;
+    }
+    const chosen = recipients === undefined ? kept : recipients ?? undefined;
+    config.observation = { ...next, ...(chosen?.length ? { recipients: chosen } : {}) };
+    save(config);
+    console.log(JSON.stringify({ observation: config.observation, network_called: false, next: "restart the control center to reload" }, null, 2));
   } else if (command === "connect") {
     const [id, owner, endpoint, project, credential_ref, ...flags] = args;
     if (
@@ -391,6 +506,12 @@ if (command === "init") {
             private_http: entry?.allow_private_http === true,
             credential_configured: !!entry?.credential_ref && existsSync(entry.credential_ref),
           }])),
+          observation: config.observation ? {
+            enabled: config.observation.enabled === true,
+            interval_minutes: config.observation.interval_minutes ?? 10,
+            open_tools_every: config.observation.open_tools_every ?? 3,
+            recipients: config.observation.recipients ?? "default",
+          } : null,
           // Like connections, the address stays out of status output; only whether each piece is in place.
           auctra: config.collection?.auctra ? {
             origin_configured: !!config.collection.auctra.origin,

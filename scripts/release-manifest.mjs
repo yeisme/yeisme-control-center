@@ -15,7 +15,6 @@ function walk(dir) {
   }
 }
 for (const dir of ["dist", "dist-demo"]) if (statSafe(dir)) walk(dir);
-if (statSafe("public/source.zip")) files.push({ path: "public/source.zip", bytes: statSync("public/source.zip").size, sha256: sha256("public/source.zip") });
 const packages = new Map();
 for (const section of ["dependencies", "devDependencies"]) for (const [name, version] of Object.entries(pkg[section] || {})) packages.set(name, String(version));
 try {

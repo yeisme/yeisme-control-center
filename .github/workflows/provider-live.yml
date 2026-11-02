@@ -1,5 +1,7 @@
 name: Provider live canary
 
+# Real, paid Provider calls: one modality per run, budgets in USD (the currency owners cap a run in), a new label for every
+# attempt. Inputs reach the script through environment variables, never through the shell text of a step.
 on:
   workflow_dispatch:
     inputs:
@@ -8,25 +10,37 @@ on:
         required: true
         default: false
         type: boolean
-      total_cny:
-        description: Total budget in CNY
+      modality:
+        description: Which Provider to call (image is Eikona, video is Scaena, audio is Sonora)
         required: true
-        default: '30'
+        type: choice
+        options:
+          - audio
+          - image
+          - video
+      run_label:
+        description: New label for this attempt, 4 to 40 lowercase letters, digits or hyphens. A label that already ran only reconciles that run.
+        required: true
         type: string
-      image_cny:
-        description: Eikona budget in CNY
+      total_usd:
+        description: Total budget in USD
         required: true
-        default: '15'
+        default: '0.5'
         type: string
-      video_cny:
-        description: Scaena budget in CNY
-        required: true
-        default: '10'
+      image_usd:
+        description: Eikona budget in USD (needed when modality is image)
+        required: false
+        default: '0'
         type: string
-      audio_cny:
-        description: Sonora budget in CNY
-        required: true
-        default: '5'
+      video_usd:
+        description: Scaena budget in USD (needed when modality is video)
+        required: false
+        default: '0'
+        type: string
+      audio_usd:
+        description: Sonora budget in USD (needed when modality is audio)
+        required: false
+        default: '0.5'
         type: string
 
 permissions:
@@ -38,6 +52,13 @@ jobs:
     environment: provider-live
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CANARY_MODALITY: ${{ inputs.modality }}
+      CANARY_RUN_LABEL: ${{ inputs.run_label }}
+      CANARY_TOTAL_USD: ${{ inputs.total_usd }}
+      CANARY_IMAGE_USD: ${{ inputs.image_usd }}
+      CANARY_VIDEO_USD: ${{ inputs.video_usd }}
+      CANARY_AUDIO_USD: ${{ inputs.audio_usd }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,6 +68,9 @@ jobs:
           bun-version: '1.4.2'
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Check the declared budget (no calls, no secrets)
+        run: |
+          bun run test:provider-live -- --dry-run --modality "$CANARY_MODALITY" --run-label "$CANARY_RUN_LABEL" --total-usd "$CANARY_TOTAL_USD" --image-usd "$CANARY_IMAGE_USD" --video-usd "$CANARY_VIDEO_USD" --audio-usd "$CANARY_AUDIO_USD"
       - name: Write ephemeral login file
         env:
           CONTROL_CENTER_LOGIN_JSON: ${{ secrets.CONTROL_CENTER_LOGIN_JSON }}
@@ -60,7 +84,7 @@ jobs:
           YEISME_CONTROL_LOGIN_FILE: ${{ runner.temp }}/control-center-login.json
         run: |
           test -n "$YEISME_CONTROL_ORIGIN"
-          bun run test:provider-live -- --confirm-live --total-cny "${{ inputs.total_cny }}" --image-cny "${{ inputs.image_cny }}" --video-cny "${{ inputs.video_cny }}" --audio-cny "${{ inputs.audio_cny }}"
+          bun run test:provider-live -- --confirm-live --modality "$CANARY_MODALITY" --run-label "$CANARY_RUN_LABEL" --total-usd "$CANARY_TOTAL_USD" --image-usd "$CANARY_IMAGE_USD" --video-usd "$CANARY_VIDEO_USD" --audio-usd "$CANARY_AUDIO_USD"
       - name: Upload redacted canary evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionAuth } from "../server/auth";
@@ -7,6 +7,7 @@ import { hashPassword } from "../server/password";
 import { createApp } from "../server/app";
 import { TaskConnections } from "../server/task-connections";
 import { vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import type { ServerConfig } from "../server/contracts";
 const dir = mkdtempSync(join(tmpdir(), "yeisme-auth-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -87,6 +88,7 @@ describe("personal login", () => {
   it("authenticates a named user with an administrator-distributed key", async () => {
     const { app, auth, config } = await setup();
     config.config_file = join(dir, crypto.randomUUID() + ".json");
+    writeFileSync(config.config_file, JSON.stringify({ ...config, config_file: undefined }), { mode: 0o600 });
     const created = await auth.createPersonalUser({ username: "editor-01", name: "Editor", role: "viewer", scope_ids: ["personal"] });
     expect(created.access_key).toMatch(/^yk_live_/);
     expect(JSON.stringify(auth.listPersonalUsers())).not.toContain(created.access_key);
@@ -218,3 +220,101 @@ describe("personal login", () => {
     ).toBe(401);
   });
 });
+
+describe("account management and the configuration file", () => {
+  const stored = (config: ServerConfig) => JSON.parse(readFileSync(config.config_file!, "utf8")) as ServerConfig & Record<string, unknown>;
+  /** A server whose file was written by personal-config, whose memory also holds environment-derived values. */
+  async function running() {
+    const { app, auth, config } = await setup();
+    const file = join(dir, crypto.randomUUID() + ".json");
+    writeFileSync(file, JSON.stringify({ ...config, config_file: undefined }, null, 2) + "\n", { mode: 0o600 });
+    config.config_file = file;
+    // Values that came from the environment: never in the file.
+    config.bind = "0.0.0.0";
+    config.providers = { eikona: { owner: "eikona", endpoint: "http://127.0.0.1:1/mcp", credential_env: "YEISME_PROVIDER_EIKONA_TOKEN", enabled: true } };
+    return { app, auth, config, file };
+  }
+
+  it("keeps edits made with personal-config while the server runs and persists nothing from the environment", async () => {
+    const { auth, config, file } = await running();
+    // Edited on disk after the server started; memory does not know about them.
+    const edited = JSON.parse(readFileSync(file, "utf8"));
+    edited.observation = { enabled: true, interval_minutes: 15, open_tools_every: 4 };
+    edited.open_tools = { gateway: { endpoint: "https://gateway.example.test", credential_ref: "/tmp/gateway.key", enabled: true } };
+    edited.origin = "http://127.0.0.1:4312";
+    writeFileSync(file, JSON.stringify(edited, null, 2) + "\n", { mode: 0o600 });
+    const created = await auth.createPersonalUser({ username: "editor-02", name: "Editor", role: "viewer", scope_ids: ["personal"] });
+    expect(created.access_key).toMatch(/^yk_live_/);
+    const after = stored(config);
+    expect(after.observation).toEqual({ enabled: true, interval_minutes: 15, open_tools_every: 4 });
+    expect(after.open_tools).toEqual(edited.open_tools);
+    expect(after.bind).toBeUndefined();
+    expect(after.providers).toBeUndefined();
+    expect("config_file" in after).toBe(false);
+    expect(after.personal?.users?.map((user) => user.username)).toEqual(["editor-02"]);
+    expect(JSON.stringify(after)).not.toContain(created.access_key);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir).filter((name) => name.includes(".users.tmp"))).toEqual([]);
+    auth.revokePersonalUser("editor-02");
+    const revoked = stored(config);
+    expect(revoked.personal?.users).toMatchObject([{ username: "editor-02", enabled: false }]);
+    expect(revoked.observation).toEqual(after.observation);
+    expect(revoked.bind).toBeUndefined();
+    expect(revoked.providers).toBeUndefined();
+  });
+
+  it("keeps an account that personal-config added while the server runs, and refuses to create it twice", async () => {
+    const { auth, config, file } = await running();
+    const edited = JSON.parse(readFileSync(file, "utf8"));
+    edited.personal.users = [{ username: "cli-added", name: "From the CLI", role: "viewer", key_hash_ref: join(dir, "cli-added.key"), scope_ids: ["personal"], enabled: true }];
+    writeFileSync(file, JSON.stringify(edited, null, 2) + "\n", { mode: 0o600 });
+    await expect(auth.createPersonalUser({ username: "cli-added", name: "Again", role: "viewer", scope_ids: ["personal"] })).rejects.toMatchObject({ code: "user_exists", status: 409 });
+    await auth.createPersonalUser({ username: "editor-03", name: "Editor", role: "viewer", scope_ids: ["personal"] });
+    expect(stored(config).personal?.users?.map((user) => user.username)).toEqual(["cli-added", "editor-03"]);
+    expect(auth.listPersonalUsers().map((user) => user.username)).toEqual(["cli-added", "editor-03"]);
+  });
+
+  it("refuses account changes when the file cannot be read, and leaves no half-made account behind", async () => {
+    const { auth, config, file } = await running();
+    rmSync(file);
+    await expect(auth.createPersonalUser({ username: "editor-04", name: "Editor", role: "viewer", scope_ids: ["personal"] })).rejects.toMatchObject({ code: "user_management_unavailable", status: 503 });
+    expect(auth.listPersonalUsers()).toEqual([]);
+    expect(existsSync(join(file + ".users", "editor-04.key"))).toBe(false);
+    expect(config.personal?.users ?? []).toEqual([]);
+  });
+
+  it("still revokes at once when the file cannot be written", async () => {
+    const { app, auth, config, file } = await running();
+    await auth.createPersonalUser({ username: "editor-05", name: "Editor", role: "viewer", scope_ids: ["personal"] });
+    const key = (await auth.createPersonalUser({ username: "editor-06", name: "Editor", role: "viewer", scope_ids: ["personal"] })).access_key;
+    const login = await app(request("/auth/personal", "POST", { username: "editor-06", key }));
+    const cookie = login.headers.get("set-cookie")!;
+    expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(200);
+    writeFileSync(file, "{ not json");
+    expect(() => auth.revokePersonalUser("editor-06")).toThrow(/user_management_unavailable/);
+    expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(401);
+    expect(config.personal?.users?.find((user) => user.username === "editor-06")?.enabled).toBe(false);
+  });
+
+  it("stops a user's sessions the moment personal-config rotates the key, and accepts only the new key", async () => {
+    const { app, auth, config, file } = await running();
+    const old = (await auth.createPersonalUser({ username: "rotated-01", name: "Rotated", role: "viewer", scope_ids: ["personal"] })).access_key;
+    const first = await app(request("/auth/personal", "POST", { username: "rotated-01", key: old }));
+    expect(first.status).toBe(200);
+    const cookie = first.headers.get("set-cookie")!;
+    expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(200);
+    const keyFile = join(dir, crypto.randomUUID() + ".key");
+    const rotated = spawnSync("bun", ["scripts/personal-config.ts", "user", file, "rotate", "rotated-01", "--key-file", keyFile], { encoding: "utf8" });
+    expect(rotated.status, rotated.stderr).toBe(0);
+    // No restart and no call into the server: the next request already sees the new credential version.
+    expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(401);
+    const fresh = readFileSync(keyFile, "utf8").trim();
+    expect(fresh).not.toBe(old);
+    expect((await app(request("/auth/personal", "POST", { username: "rotated-01", key: old }))).status).toBe(401);
+    const again = await app(request("/auth/personal", "POST", { username: "rotated-01", key: fresh }));
+    expect(again.status).toBe(200);
+    expect(await (await app(request("/session", "GET", undefined, again.headers.get("set-cookie")!))).json()).toMatchObject({ username: "rotated-01", role: "viewer" });
+    expect(config.personal?.users?.find((user) => user.username === "rotated-01")?.enabled).toBe(true);
+  });
+});
+

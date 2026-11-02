@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { checkPassword } from "../server/password";
 
 const dir = mkdtempSync(join(tmpdir(), "control-config-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -154,3 +155,163 @@ describe("personal configuration CLI: Auctra collection", () => {
     expect(config.principals[0].scopes[0].owners.anatomia).toBeUndefined();
   });
 });
+
+describe("personal configuration CLI: accounts", () => {
+  const init = (name: string) => {
+    const file = join(dir, name);
+    expect(run("init", file, "http://127.0.0.1:4312", "test-admin").status).toBe(0);
+    return file;
+  };
+  const users = (file: string) => JSON.parse(readFileSync(file, "utf8")).personal.users as { username: string; enabled?: boolean; key_hash_ref: string }[];
+  const keyOf = (file: string) => readFileSync(file, "utf8").trim();
+
+  it("writes a new account's one-time key to a new private file and keeps it off the screen", async () => {
+    const file = init("keyfile.json");
+    const keyFile = join(dir, "account-reader.key");
+    const added = run("user", file, "add", "reader", "viewer", "Reader", "--key-file", keyFile);
+    expect(added.status, added.stderr).toBe(0);
+    const key = keyOf(keyFile);
+    expect(key).toMatch(/^yk_live_[A-Za-z0-9_-]{40,}$/);
+    expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(added.stdout).not.toContain(key);
+    expect(JSON.parse(added.stdout)).toMatchObject({ username: "reader", role: "viewer", key_file: keyFile, shown_once: false });
+    expect(JSON.parse(added.stdout).access_key).toBeUndefined();
+    const [account] = users(file);
+    expect(account).toMatchObject({ username: "reader", enabled: true });
+    expect(statSync(account.key_hash_ref).mode & 0o777).toBe(0o600);
+    expect(await checkPassword(key, readFileSync(account.key_hash_ref, "utf8").trim())).toBe(true);
+    // The digest and the key are different things: the file holds no key.
+    expect(readFileSync(file, "utf8")).not.toContain(key);
+    expect(readFileSync(account.key_hash_ref, "utf8")).not.toContain(key);
+  });
+
+  it("refuses an existing key file, or a missing value, before it writes anything", () => {
+    const file = init("keyfile-refuse.json");
+    const keyFile = join(dir, "taken.key");
+    writeFileSync(keyFile, "someone-elses-file\n", { mode: 0o600 });
+    const before = readFileSync(file, "utf8");
+    const refused = run("user", file, "add", "reader", "viewer", "Reader", "--key-file", keyFile);
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("refusing overwrite");
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(readFileSync(keyFile, "utf8")).toBe("someone-elses-file\n");
+    expect(existsSync(file + ".users") ? readdirSync(file + ".users") : []).toEqual([]);
+    for (const args of [["add", "reader", "viewer", "Reader", "--key-file"], ["add", "reader", "viewer", "Reader", "--key-file", "--other"], ["revoke", "reader", "--key-file", join(dir, "n.key")], ["add", "reader", "viewer", "Reader", "--unknown"]])
+      expect(run("user", file, ...args).status, args.join(" ")).not.toBe(0);
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("keeps printing the key once when no key file is given, and accepts the action before the file", () => {
+    const file = init("print-once.json");
+    const added = run("user", "add", file, "printed", "viewer", "Printed");
+    expect(added.status, added.stderr).toBe(0);
+    expect(JSON.parse(added.stdout)).toMatchObject({ username: "printed", shown_once: true, access_key: expect.stringMatching(/^yk_live_/) });
+    expect(run("user", file, "add", "printed", "viewer", "Again").status).not.toBe(0);
+  });
+
+  it("rotates a key into a new file: the old key stops matching, the new one matches, the configuration is untouched", async () => {
+    const file = init("rotate.json");
+    const first = join(dir, "rotate-first.key");
+    expect(run("user", file, "add", "rotated", "viewer", "Rotated", "--key-file", first).status).toBe(0);
+    const digestFile = users(file)[0].key_hash_ref;
+    const digestBefore = readFileSync(digestFile, "utf8");
+    const configBefore = readFileSync(file, "utf8");
+    const second = join(dir, "rotate-second.key");
+    const rotated = run("user", file, "rotate", "rotated", "--key-file", second);
+    expect(rotated.status, rotated.stderr).toBe(0);
+    expect(JSON.parse(rotated.stdout)).toMatchObject({ username: "rotated", rotated: true, sessions_ended: true, key_file: second });
+    expect(rotated.stdout).not.toContain(keyOf(second));
+    expect(statSync(second).mode & 0o777).toBe(0o600);
+    expect(statSync(digestFile).mode & 0o777).toBe(0o600);
+    expect(readFileSync(digestFile, "utf8")).not.toBe(digestBefore);
+    expect(await checkPassword(keyOf(first), readFileSync(digestFile, "utf8").trim())).toBe(false);
+    expect(await checkPassword(keyOf(second), readFileSync(digestFile, "utf8").trim())).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe(configBefore);
+    expect(readdirSync(join(dir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    // Printed once when no file is given.
+    const printed = run("user", file, "rotate", "rotated");
+    expect(printed.status).toBe(0);
+    const { access_key } = JSON.parse(printed.stdout);
+    expect(await checkPassword(access_key, readFileSync(digestFile, "utf8").trim())).toBe(true);
+  });
+
+  it("refuses to rotate an unknown account or into an existing file, and changes nothing", () => {
+    const file = init("rotate-refuse.json");
+    expect(run("user", file, "add", "kept", "viewer", "Kept", "--key-file", join(dir, "kept.key")).status).toBe(0);
+    const digestFile = users(file)[0].key_hash_ref;
+    const before = readFileSync(digestFile, "utf8");
+    const taken = join(dir, "rotate-taken.key");
+    writeFileSync(taken, "taken\n", { mode: 0o600 });
+    expect(run("user", file, "rotate", "kept", "--key-file", taken).status).not.toBe(0);
+    expect(run("user", file, "rotate", "nobody", "--key-file", join(dir, "nobody.key")).status).not.toBe(0);
+    expect(run("user", file, "rotate").status).not.toBe(0);
+    expect(run("user", file, "rotate", "kept", "extra", "--key-file", join(dir, "extra.key")).status).not.toBe(0);
+    expect(readFileSync(digestFile, "utf8")).toBe(before);
+    expect(existsSync(join(dir, "nobody.key"))).toBe(false);
+    expect(readFileSync(taken, "utf8")).toBe("taken\n");
+  });
+
+  it("re-enables a revoked account, which cannot be added again", () => {
+    const file = init("enable.json");
+    expect(run("user", file, "add", "returning", "viewer", "Returning", "--key-file", join(dir, "returning.key")).status).toBe(0);
+    expect(run("user", file, "revoke", "returning").status).toBe(0);
+    expect(users(file)[0].enabled).toBe(false);
+    expect(run("user", file, "add", "returning", "viewer", "Returning").status).not.toBe(0);
+    const enabled = run("user", file, "enable", "returning");
+    expect(enabled.status, enabled.stderr).toBe(0);
+    expect(JSON.parse(enabled.stdout)).toMatchObject({ username: "returning", enabled: true, changed: true, key_unchanged: true });
+    expect(users(file)[0].enabled).toBe(true);
+    expect(JSON.parse(run("user", file, "list").stdout)[0]).toMatchObject({ username: "returning", enabled: true });
+    // Enabling an account that is already enabled changes nothing and rewrites nothing.
+    const before = readFileSync(file, "utf8");
+    expect(JSON.parse(run("user", file, "enable", "returning").stdout)).toEqual({ username: "returning", enabled: true, changed: false });
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(run("user", file, "enable", "nobody").status).not.toBe(0);
+    expect(run("user", file, "enable").status).not.toBe(0);
+  });
+});
+
+describe("personal configuration CLI: observation", () => {
+  const observation = (file: string) => JSON.parse(readFileSync(file, "utf8")).observation;
+  it("turns server-side observation on with its defaults, off again without losing the settings, and reports it in status", () => {
+    const file = join(dir, "observe.json");
+    expect(run("init", file).status).toBe(0);
+    expect(observation(file)).toBeUndefined();
+    const on = run("observe", file, "on");
+    expect(on.status, on.stderr).toBe(0);
+    expect(observation(file)).toEqual({ enabled: true, interval_minutes: 10, open_tools_every: 3 });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(run("observe", file, "on", "--interval-minutes", "15", "--open-tools-every", "2", "--recipients", "yeisme:personal|test-admin,config|personal").status).toBe(0);
+    expect(observation(file)).toEqual({ enabled: true, interval_minutes: 15, open_tools_every: 2, recipients: ["yeisme:personal|test-admin", "config|personal"] });
+    expect(run("observe", file, "off").status).toBe(0);
+    expect(observation(file)).toMatchObject({ enabled: false, interval_minutes: 15, open_tools_every: 2 });
+    // Turning it back on without flags keeps what was chosen; `default` returns the recipients to every enabled admin.
+    expect(run("observe", file, "on").status).toBe(0);
+    expect(observation(file)).toMatchObject({ enabled: true, interval_minutes: 15, recipients: ["yeisme:personal|test-admin", "config|personal"] });
+    expect(run("observe", file, "on", "--recipients", "default").status).toBe(0);
+    expect(observation(file).recipients).toBeUndefined();
+    expect(JSON.parse(run("status", file).stdout).observation).toEqual({ enabled: true, interval_minutes: 15, open_tools_every: 2, recipients: "default" });
+  });
+
+  it("rejects out-of-range or malformed settings without rewriting the configuration", () => {
+    const file = join(dir, "observe-reject.json");
+    expect(run("init", file).status).toBe(0);
+    expect(run("observe", file, "on").status).toBe(0);
+    const before = readFileSync(file, "utf8");
+    const inode = statSync(file).ino;
+    const bad = [
+      ["maybe"], [], ["on", "--interval-minutes", "4"], ["on", "--interval-minutes", "0"], ["on", "--interval-minutes", "-10"], ["on", "--interval-minutes", "1.5"], ["on", "--interval-minutes", "abc"], ["on", "--interval-minutes", "1441"],
+      ["on", "--open-tools-every", "0"], ["on", "--open-tools-every", "x"], ["on", "--recipients", "nobody"], ["on", "--recipients", "a|b,c"], ["on", "--recipients", "|b"], ["on", "--recipients", ""],
+      ["on", "--interval-minutes"], ["on", "--interval-minutes", "10", "--interval-minutes", "20"], ["on", "--unknown", "1"], ["on", "extra"],
+    ];
+    for (const args of bad) {
+      expect(run("observe", file, ...args).status, args.join(" ")).not.toBe(0);
+      expect(readFileSync(file, "utf8")).toBe(before);
+      expect(statSync(file).ino).toBe(inode);
+    }
+    // The lower bounds are accepted exactly.
+    expect(run("observe", file, "on", "--interval-minutes", "5", "--open-tools-every", "1").status).toBe(0);
+    expect(observation(file)).toMatchObject({ interval_minutes: 5, open_tools_every: 1 });
+  });
+});
+

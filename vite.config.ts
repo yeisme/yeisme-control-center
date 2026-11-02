@@ -2,8 +2,9 @@ import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
-import { cpSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { unservedTopLevel } from "./server/served-entries.mjs";
 
 // Machine-specific dev-preview settings stay out of git (.local/ is ignored):
 // { "control_origin": "https://<host>:<port>", "allowed_hosts": ["<host>"] }
@@ -13,6 +14,7 @@ const local: { control_origin?: string; allowed_hosts?: string[] } = (() => {
 const controlOrigin = process.env.V18_CONTROL_ORIGIN || local.control_origin || "http://127.0.0.1:4312";
 const controlOriginUrl = new URL(controlOrigin);
 const apiOrigin = process.env.V18_API_ORIGIN || "http://127.0.0.1:4312";
+let outDir = resolve("dist");
 
 export default defineConfig(() => ({
   root: "app",
@@ -31,19 +33,20 @@ export default defineConfig(() => ({
       },
     },
     {
-      name: "control-center-docs",
+      name: "control-center-served-entries",
       apply: "build",
-      writeBundle(options) {
-        // Review notes stay in the repository; they are working records, not part of the built docs.
-        if (options.dir)
-          cpSync(
-            fileURLToPath(new URL("./docs", import.meta.url)),
-            join(options.dir, "docs"),
-            { recursive: true, filter: (source) => !/[\\/]docs[\\/]reviews(?:[\\/]|$)/.test(source) },
-          );
+      configResolved(config) {
+        outDir = resolve(config.root, config.build.outDir);
+      },
+      closeBundle() {
+        // public/ is copied whole, and holds files that must not be served: an ignored source archive and licence texts.
+        // Nothing but the server's served entries stays in dist/; the files in public/ itself are left alone.
+        if (!existsSync(outDir)) return;
+        for (const name of unservedTopLevel(readdirSync(outDir))) rmSync(join(outDir, name), { recursive: true, force: true });
       },
     },
   ],
+
   resolve: {
     alias: { "/src": fileURLToPath(new URL("./src", import.meta.url)) },
   },

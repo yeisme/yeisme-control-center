@@ -1,26 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { modalities, parseProviderLiveArgs } from "./provider-live-args";
 
-const args = new Set(process.argv.slice(2));
-const dryRun = args.has("--dry-run");
-const value = (name: string, fallback: string) => {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] || fallback : fallback;
-};
-if (!dryRun && !args.has("--confirm-live")) throw Error("Refusing live calls. Re-run with --confirm-live and explicit budget flags.");
-// Owners cap a live run in USD, so budgets are given in USD and handed over unconverted; CNY flags are refused, not converted.
-if (process.argv.some((arg) => arg.endsWith("-cny"))) throw Error("Budgets are in USD, the currency owners cap runs in. Use --total-usd and --image-usd/--video-usd/--audio-usd.");
-const modalities = { eikona: "image", scaena: "video", sonora: "audio" } as const;
-const only = new Set(value("--modality", "image,video,audio").split(","));
-const selected = (["eikona", "scaena", "sonora"] as const).filter((owner) => only.has(modalities[owner]));
-// The original keys are those of the 2026-10-14 canary: re-running without a label only reconciles those runs.
-const label = value("--run-label", "20261014");
-const total = Number(value("--total-usd", "0"));
-const caps = { eikona: Number(value("--image-usd", "0")), scaena: Number(value("--video-usd", "0")), sonora: Number(value("--audio-usd", "0")) };
-if (!selected.length || !/^[a-z0-9-]{4,40}$/.test(label) || !Number.isFinite(total) || total <= 0 || selected.some((owner) => !Number.isFinite(caps[owner]) || caps[owner] <= 0) || selected.reduce((sum, owner) => sum + caps[owner], 0) > total)
-  throw Error("Invalid budget. Example: --modality audio --run-label 20261030 --total-usd 0.5 --audio-usd 0.5");
-const command = `bun run test:provider-live -- --confirm-live --modality ${selected.map((owner) => modalities[owner]).join(",")} --run-label ${label} --total-usd ${total} ${selected.map((owner) => `--${modalities[owner]}-usd ${caps[owner]}`).join(" ")}`;
+// The flags and their rules live in provider-live-args.ts, where the workflow that calls this script is checked against them.
+const { dryRun, selected, label, total, caps, command } = parseProviderLiveArgs(process.argv.slice(2));
 const origin = process.env.YEISME_CONTROL_ORIGIN || "http://127.0.0.1:4312";
 const loginFile = process.env.YEISME_CONTROL_LOGIN_FILE || join(homedir(), ".config/yeisme-control-center/test-login.json");
 if (dryRun) {

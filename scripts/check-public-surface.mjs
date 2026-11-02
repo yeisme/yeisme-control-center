@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { unservedPaths } from "../server/served-entries.mjs";
 
 const tracked = execFileSync("git", ["ls-files", "-z"], { encoding: "buffer" })
   .toString("utf8")
@@ -11,6 +12,12 @@ const files = [...new Set([...tracked, ...["dist", "dist-demo"].flatMap((dir) =>
   return execFileSync("find", [dir, "-type", "f"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 })])];
 const findings = [];
+// A built dist/ holds only what the server serves (server/served-entries.mjs): a source archive, docs or test evidence in it
+// would ship with the release. Checked only when a build exists; dist-demo is an old local build the release never uses.
+if (existsSync("dist")) {
+  const built = execFileSync("find", ["dist", "-type", "f"], { encoding: "utf8" }).trim().split("\n").filter(Boolean).map((file) => path.relative("dist", file).split(path.sep).join("/"));
+  for (const stray of unservedPaths(built)) findings.push({ file: path.join("dist", stray), rule: "unserved-dist-entry", value: stray.slice(0, 120) });
+}
 // Generic shapes only: the rules themselves are public, so they never name a real host.
 const rules = [
   { name: "private-host", pattern: /10\.10\.1\.101/g },

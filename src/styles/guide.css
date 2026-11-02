@@ -70,7 +70,8 @@
   .guide-command { border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); padding: 8px 8px 8px 12px; }
   .guide-command code { font-family: var(--font-mono); font-size: 12.5px; line-height: 20px; color: var(--ink); }
   .guide-command-prompt { font-family: var(--font-mono); font-size: 12.5px; line-height: 20px; color: var(--faint); user-select: none; }
-  .guide-command-note { margin: 4px 0 0 18px; font-size: 12px; line-height: 16px; color: var(--muted); text-wrap: pretty; }
+  /* A note may carry an environment variable name with no break point in it; it wraps there rather than widening the page. */
+  .guide-command-note { margin: 4px 0 0 18px; font-size: 12px; line-height: 16px; color: var(--muted); text-wrap: pretty; overflow-wrap: anywhere; }
   .guide-command.is-dark { border-color: transparent; background: var(--sidebar); }
   .guide-command.is-dark code { color: var(--sidebar-ink); }
   .guide-command.is-dark .guide-command-prompt { color: var(--accent); }
