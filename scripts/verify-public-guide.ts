@@ -46,10 +46,14 @@ await new Promise<void>((resolve, reject) => {
 
 const axeSource = await fs.readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
 async function axe(page: Page) {
-  await page.evaluate(() => Promise.race([
-    Promise.all(document.getAnimations().filter((animation) => Number.isFinite(Number(animation.effect?.getComputedTiming().endTime))).map((animation) => animation.finished.catch(() => undefined))),
-    new Promise((resolve) => setTimeout(resolve, 2_000)),
-  ]));
+  // Scan only once no finite animation is running, twice in a row 200 ms apart: a scroll reveal starts from an
+  // IntersectionObserver callback after the key press that scrolled it into view, so a single snapshot of the running
+  // animations misses it on a slow machine and axe measures text halfway through its fade. Infinite loops never count.
+  const running = () => page.evaluate(() => document.getAnimations().filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime))).length);
+  for (let quiet = 0, tries = 0; quiet < 2 && tries < 30; tries++) {
+    quiet = (await running()) ? 0 : quiet + 1;
+    await page.waitForTimeout(quiet ? 200 : 150);
+  }
   // Evaluated through DevTools rather than an inline <script>, which the page's own content policy rightly blocks.
   if (!await page.evaluate(() => "axe" in window)) await page.evaluate(axeSource);
   return page.evaluate(async () => {
