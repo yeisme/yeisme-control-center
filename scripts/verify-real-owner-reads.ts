@@ -258,6 +258,16 @@ try {
       usage_calls: tool.usage?.calls ?? null,
     };
   });
+  // Credential states as an admin sees them on Services: slot ids, states and days only, never paths or addresses.
+  const credentials = (Array.isArray(services.body?.credentials) ? services.body.credentials : []).map((row: any) => ({
+    id: row.id,
+    state: row.state,
+    reason: row.reason ?? null,
+    stage: row.stage ?? null,
+    days_left: row.days_left ?? null,
+    never_expires: row.never_expires === true,
+  }));
+  if (/https?:\/\/|\/home\/|token/i.test(JSON.stringify(credentials))) throw new Error("credential_status_leak");
   for (const entry of openTools) {
     const body = JSON.stringify(entry);
     if (/https?:\/\/|\/home\/|token/i.test(body)) throw new Error(`open_tool_projection_leak:${entry.tool}`);
@@ -275,6 +285,7 @@ try {
     collection_sync: collectionSync,
     drama_board: dramaBoard,
     open_tools: openTools,
+    credentials,
     task_rows: { active: activeRows.length, history: historyRows.length },
     task_checks: taskChecks,
     boundary_checks: boundaryChecks,
@@ -288,8 +299,10 @@ try {
     boundary_checks: boundaryChecks,
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
+    collection_sync: collectionSync,
     drama_board: dramaBoard,
     open_tools: openTools,
+    credentials,
   }, null, 2) + "\n");
   status = "passed";
   record({ status, owners: ownerRows, provider_discovery: providerStates, task_rows: summary.task_rows, task_checks: taskChecks });
