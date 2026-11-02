@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApp } from "../server/app";
 import { SessionAuth } from "../server/auth";
-import type { ScopeBinding, ServerConfig, Session } from "../server/contracts";
+import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "../server/contracts";
 import type { TaskSnapshot } from "../src/task-observation";
 
 const origin = "https://control.example.test";
@@ -75,5 +78,49 @@ describe("work queue route", () => {
     expect((await filtered.json()).items.every((item: { kind: string }) => item.kind === "task_unknown")).toBe(true);
     expect((await app(request("/work-queue?scope=scope-a&kind=not-a-kind"))).status).toBe(400);
     expect((await app(request("/work-queue?scope=other"))).status).toBe(404);
+  });
+});
+
+describe("work queue route: credentials", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-queue-credentials-"));
+  const key = join(dir, "observer.key");
+  writeFileSync(key, "queue-test-key\n", { mode: 0o600 });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  /** One Eikona connection whose owner has turned the credential away, read by a personal admin or a personal viewer. */
+  function withRefusedCredential(role: "admin" | "viewer") {
+    const connection: TaskConnection = { id: "eikona", owner: "eikona", instance_id: "instance-a", label: "Eikona", environment: "fixture", endpoint: "http://127.0.0.1:9/mcp", credential_ref: key, project: "project-a", enabled: true, allow_private_http: true };
+    const config: ServerConfig = {
+      origin, port: 4312, auth_mode: "personal",
+      personal: { name: "Owner", password_hash_ref: "/unused", scope_ids: [scope.id], role },
+      principals: [{ issuer: "yeisme:personal", subject: "owner", name: "Owner", role, scopes: [scope] }],
+      owners: {}, connections: [connection],
+    };
+    const auth = new SessionAuth(config);
+    const session: Session = { id: "session-a", issuer: "yeisme:personal", subject: "owner", name: "Owner", csrf: "csrf", accessToken: "", accessAudience: [], expires: Date.now() + 60_000, personal: true, epoch: 7 };
+    vi.spyOn(auth, "current").mockReturnValue(session);
+    const runtime = { state: "needs_authorization", checked_at: "2026-11-01T12:00:00.000Z", last_success_at: null, transport: "verified", authorization: "denied", contract: "unknown", task_families: [], content: "not_requested", reason: "needs_authorization" };
+    const tasks = {
+      list: async () => ({ rows: [], connections: [], next_cursors: {} }),
+      observe: async () => [{ id: "eikona", owner: "eikona", instance_id: "instance-a", label: "Eikona", environment: "fixture", project: "project-a", state: "needs_authorization", observed_at: "2026-11-01T12:00:00.000Z", runtime }],
+    };
+    const app = createApp(config, { auth, tasks: tasks as never });
+    return async () => (await app(new Request(origin + "/api/control-center/v1/work-queue?scope=scope-a", { headers: { Cookie: "yeisme_session=" + session.id } }))).json() as Promise<{ items: { kind: string; source_ref: string; title: string; safe_links: { target: string; ref?: string }[] }[]; counts: { blocked: number } }>;
+  }
+
+  it("gives an administrator one renewal item for a refused credential, in place of the blocked-service item", async () => {
+    const body = await withRefusedCredential("admin")();
+    expect(body.items.map((item) => `${item.kind}:${item.source_ref}`)).toEqual(["credential_renewal:connection:eikona"]);
+    expect(body.items[0]).toMatchObject({ title: "Eikona · 凭据被拒" });
+    expect(body.items[0].safe_links.map((link) => `${link.target}:${link.ref}`)).toEqual(["services:connection:eikona", "guide:guide-renew"]);
+    expect(body.counts.blocked).toBe(1);
+    // Nothing about where the credential lives.
+    expect(JSON.stringify(body)).not.toContain(key);
+    expect(JSON.stringify(body)).not.toContain("credential_ref");
+  });
+
+  it("gives a viewer none of it: the blocked service stays, as before", async () => {
+    const body = await withRefusedCredential("viewer")();
+    expect(body.items.map((item) => `${item.kind}:${item.source_ref}`)).toEqual(["service_blocked:eikona"]);
   });
 });

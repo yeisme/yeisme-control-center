@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, Clock3, Eye, LockKeyhole, Route, ShieldQuestion } from "../../icons";
+import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, Clock3, Eye, KeyRound, LockKeyhole, Route, ShieldQuestion } from "../../icons";
 import { api, errorCode } from "../../shared/api/control-center-client";
-import type { WorkQueueAction, WorkQueueItem, WorkQueueKind, WorkQueuePreviewState, WorkQueuePriority } from "../../shared/work-queue";
+import type { WorkQueueAction, WorkQueueItem, WorkQueueKind, WorkQueueLink, WorkQueuePreviewState, WorkQueuePriority } from "../../shared/work-queue";
 import type { ActionOwner, ControlAction } from "../../shared/action-contract";
 import { creativeFlowStages } from "../../shared/creative-flow";
 import { TaskInspectorFrame, type TaskInspectorMode } from "../tasks/TaskDetail";
@@ -13,6 +13,8 @@ import { formatFullTime, formatRelative } from "../../shared/read-model/format";
 import { freshnessLabels, needsContractLabel, reasonLabel } from "../../shared/read-model/labels";
 import { actionReasonLabel, connectionStateLabel, connectionTone } from "../../shared/read-model/tasks";
 import { taskStateLabels } from "../../task-observation";
+import { credentialReasonLabels, credentialStateLabels, credentialTone, formatCredentialExpiry, type CredentialReason, type CredentialState } from "../../shared/credentials";
+import { appGuidePath } from "../guide/guide-location";
 
 const knownActions = new Set<string>([
   "task.cancel",
@@ -36,6 +38,7 @@ export const workQueueKindLabels: Record<WorkQueueKind, string> = {
   service_blocked: "来源受阻",
   contract_gap: "合同缺口",
   operation_failure: "运行失败",
+  credential_renewal: "凭据续签",
 };
 export const workQueuePriorityLabels: Record<WorkQueuePriority, string> = { critical: "紧急", high: "较高", normal: "普通", low: "较低" };
 export const workQueuePriorityTone: Record<WorkQueuePriority, Tone> = { critical: "danger", high: "warning", normal: "neutral", low: "neutral" };
@@ -86,7 +89,7 @@ const reasonWords: Record<string, string> = {
   unknown: "结果未知",
   unavailable: "来源不可用",
   forbidden: "无读取权限",
-  needs_contract: "缺少观测合同",
+  needs_contract: needsContractLabel,
   not_exported: "未导出",
 };
 const readableToken = /^[a-z][a-z0-9]*(?:[_.:-][a-z0-9]+)*$/;
@@ -95,10 +98,14 @@ export function workQueueOwnerLabel(owner: string) {
   return owner === "control-center" ? "控制中心" : ownerLabel(owner);
 }
 
-/** Owner-provided reasons are sometimes machine codes; readable owner text passes through unchanged. */
-export function workQueueReasonLabel(reason: string | null | undefined) {
+/**
+ * Owner-provided reasons are sometimes machine codes; readable owner text passes through unchanged. A credential item's
+ * reason is one of the credential reasons, or its state when nothing more specific is known.
+ */
+export function workQueueReasonLabel(reason: string | null | undefined, kind?: WorkQueueKind) {
   const text = (reason || "").trim();
   if (!text) return "原因未提供";
+  if (kind === "credential_renewal") return credentialReasonLabels[text as CredentialReason] || credentialStateLabels[text as CredentialState] || text;
   if (!readableToken.test(text)) return text;
   if (reasonWords[text]) return reasonWords[text];
   const connection = connectionStateLabel(text);
@@ -106,13 +113,20 @@ export function workQueueReasonLabel(reason: string | null | undefined) {
   return taskStateLabels[text] || reasonLabel(text) || text;
 }
 
+/** The in-app address a control-center link opens. `guide` opens the 接入 chapter at the section named by `ref`. */
+function controlLinkPath(link: WorkQueueLink) {
+  if (link.target === "guide") return appGuidePath({ chapter: "connect", page: null, tool: null, client: "claude", section: link.ref || null });
+  return `/${link.target}${link.ref ? `?${link.target === "tasks" ? "task" : "ref"}=${encodeURIComponent(link.ref)}` : ""}`;
+}
+
 const actionLabel = (action: string) => actionLabels[action] || action.replace(/[._]/g, " ");
 const labelFor = (map: Record<string, string>, key: string) => map[key] || key.replace(/_/g, " ");
 
 const workStateIcons: Record<Tone, ReactNode> = { success: <CheckCircle2 />, info: <Clock3 />, warning: <ShieldQuestion />, danger: <CircleAlert />, review: <Eye />, neutral: <CircleDashed /> };
 
-/** Work items mix task states with connection and workflow states; none of them may render as a raw code. */
-export function WorkStatePill({ state }: { state: string }) {
+/** Work items mix task states with connection, workflow and credential states; none of them may render as a raw code. */
+export function WorkStatePill({ state, kind }: { state: string; kind?: WorkQueueKind }) {
+  if (kind === "credential_renewal") return <Pill tone={credentialTone({ state: state as CredentialState })} icon={<KeyRound />}>{credentialStateLabels[state as CredentialState] || state}</Pill>;
   if (taskStateLabels[state]) return <TaskStatePill state={state} />;
   const connection = connectionStateLabel(state);
   const known = connection !== state;
@@ -168,7 +182,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
   const episodeRef = item.workflow_stage ? item.safe_links.find((link) => link.kind === "owner" && link.launch?.episode_ref)?.launch?.episode_ref : undefined;
   const internalLinks = item.safe_links.filter((link) => link.kind === "control-center");
   const ownerLinks = item.safe_links.filter((link) => link.kind === "owner");
-  const reason = workQueueReasonLabel(item.attention_reason);
+  const reason = workQueueReasonLabel(item.attention_reason, item.kind);
   return <TaskInspectorFrame
     open={open}
     mode={mode}
@@ -178,7 +192,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
     onClose={onClose}
     eyebrow={<span>{workQueueOwnerLabel(item.owner)} · {workQueueKindLabels[item.kind] || item.kind.replace(/_/g, " ")}</span>}
     title={item.title}
-    description={<span className="inline-flex flex-wrap items-center gap-2"><span>{reason}</span><WorkStatePill state={item.state} /><Pill tone={workQueuePriorityTone[item.priority]}>优先级 {workQueuePriorityLabels[item.priority] || item.priority}</Pill></span>}
+    description={<span className="inline-flex flex-wrap items-center gap-2"><span>{reason}</span><WorkStatePill state={item.state} kind={item.kind} /><Pill tone={workQueuePriorityTone[item.priority]}>优先级 {workQueuePriorityLabels[item.priority] || item.priority}</Pill></span>}
     context={<span className="inline-flex min-w-0 items-center gap-1.5"><span>工作台</span><ArrowRight className="size-3 shrink-0 text-faint" /><span>{item.project || "项目未提供"}</span></span>}
     icon={<span className="grid size-8 place-items-center rounded-control bg-panel-soft text-info"><Eye className="size-4" /></span>}
     reference={<CopyRef value={item.source_ref} label="来源引用" />}
@@ -190,11 +204,13 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
       <section id="work-queue-inspector-overview" data-inspector-section="overview" tabIndex={-1} className="scroll-mt-24 space-y-2">
         <h3 className="text-body-sm font-semibold text-ink">工作项概况</h3>
         <Facts columns={2} items={[
-          { label: "状态", value: <WorkStatePill state={item.state} /> },
+          { label: "状态", value: <WorkStatePill state={item.state} kind={item.kind} /> },
+          ...(item.credential?.expires_at ? [{ label: "到期", value: <span title={formatFullTime(item.credential.expires_at)}>{formatCredentialExpiry(item.credential.expires_at, Date.now())}</span> }] : []),
           { label: "覆盖度", value: <CoverageChip state={item.coverage} /> },
           { label: "来源新鲜度", value: <Pill tone={freshnessTone[item.freshness] || "neutral"}>{freshnessLabels[item.freshness] || "未观察"}</Pill> },
           { label: "观察时间", value: <span title={formatFullTime(item.observed_at)}>{formatRelative(item.observed_at)}</span> },
-          { label: "Revision", value: item.revision ? <span className="font-mono text-xs break-all">{item.revision}</span> : <Unknown /> },
+          // A credential has no revision to show.
+          ...(item.kind === "credential_renewal" ? [] : [{ label: "Revision", value: item.revision ? <span className="font-mono text-xs break-all">{item.revision}</span> : <Unknown /> }]),
           { label: "项目", value: item.project || <Unknown /> },
         ]} />
       </section>
@@ -250,7 +266,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
       <section id="work-queue-inspector-handoff" data-inspector-section="handoff" tabIndex={-1} className="scroll-mt-24 space-y-2">
         <h3 className="text-body-sm font-semibold text-ink">安全交接</h3>
         <div className="space-y-2">
-          {internalLinks.map((link) => <Button key={`${link.target}:${link.ref || ""}`} size="sm" variant="secondary" onClick={() => onNavigate(`/${link.target}${link.ref ? `?${link.target === "tasks" ? "task" : "ref"}=${encodeURIComponent(link.ref)}` : ""}`)} icon={<ArrowRight className="size-3.5" />}>{link.label}</Button>)}
+          {internalLinks.map((link) => <Button key={`${link.target}:${link.ref || ""}`} size="sm" variant="secondary" onClick={() => onNavigate(controlLinkPath(link))} icon={<ArrowRight className="size-3.5" />}>{link.label}</Button>)}
           {ownerLinks.map((link) => <OwnerLinkRow key={`${link.target}:${link.launch?.target_route || ""}`} link={link} />)}
           {!internalLinks.length && !ownerLinks.length && <p className="text-body-sm text-muted">当前工作项没有安全交接入口。</p>}
         </div>

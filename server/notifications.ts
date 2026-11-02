@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { AuthError } from "./auth";
 import type { ControlDB } from "./db/client";
 import { notificationMuteRules, taskNotifications } from "./db/schema";
@@ -27,6 +27,19 @@ export type NotificationPriority = "normal" | "low" | "history";
 export const HOUR_MS = 60 * 60 * 1000;
 export const DEMOTE_AFTER_MS = 24 * HOUR_MS;
 export const HISTORY_AFTER_MS = 7 * 24 * HOUR_MS;
+/** A reminder can be snoozed at most this far ahead. */
+export const MAX_SNOOZE_MS = 30 * 24 * HOUR_MS;
+
+/**
+ * The time a snooze lasts until, as an ISO string, from what a client sent: an RFC 3339 time in the future and at most
+ * 30 days away. Anything else is `invalid_snooze_until`, so a typo can neither unsnooze nor hide a reminder for good.
+ */
+export function snoozeDeadline(value: unknown, now = Date.now()): string {
+  // A time without a zone would mean different instants on different machines, so it is refused like any other typo.
+  const at = typeof value === "string" && value.length <= 64 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i.test(value) ? Date.parse(value) : NaN;
+  if (!Number.isFinite(at) || at <= now || at - now > MAX_SNOOZE_MS) throw new AuthError("invalid_snooze_until", 400);
+  return new Date(at).toISOString();
+}
 
 export interface FailureFact {
   scope_id: string;
@@ -139,6 +152,12 @@ export interface ReminderEvent {
   nativeState?: string;
   /** What wrote the row: browsers leave it empty and the background observation loop writes "background". */
   sessionId?: string;
+  /**
+   * The event is a condition that can end (`recoverEvents`) and come back, like a credential that was renewed and later
+   * runs out again. When it comes back after being recovered it opens as a new, unread reminder instead of staying
+   * the old, handled one. Without it an event is written once, ever.
+   */
+  recurs?: boolean;
   now?: string;
 }
 
@@ -520,7 +539,10 @@ export class NotificationStore {
     return this.requireView(id);
   }
 
-  /** Explicit reopen: unread again, including for the badge. The next new failure version may notify again. */
+  /**
+   * Explicit reopen: unread again, including for the badge, whether it was acknowledged, muted, archived or snoozed (a
+   * snooze ends now). The next new failure version may notify again.
+   */
   reopen(id: string, scopeId: string, sessionId: string, subject: string) {
     this.owned(id, scopeId, sessionId, subject);
     this.db.update(taskNotifications).set({
@@ -529,8 +551,21 @@ export class NotificationStore {
       acknowledgedAt: null,
       mutedAt: null,
       archivedAt: null,
+      snoozedUntil: null,
       readAt: null,
     }).where(eq(taskNotifications.id, id)).run();
+    return this.requireView(id);
+  }
+
+  /**
+   * Quiet until `until` (see `snoozeDeadline`): the reminder stays unread but stops counting, shows with the quiet ones,
+   * and counts again once the time has passed. Only an unread reminder that has not recovered can be snoozed; a
+   * handled one is already quiet, and `reopen` brings it back. A later snooze replaces the earlier one.
+   */
+  snooze(id: string, scopeId: string, sessionId: string, subject: string, until: string) {
+    const row = this.owned(id, scopeId, sessionId, subject);
+    if (row.state !== "unread" || row.recoveredAt) throw new AuthError("notification_not_snoozable", 409);
+    this.db.update(taskNotifications).set({ snoozedUntil: until }).where(eq(taskNotifications.id, id)).run();
     return this.requireView(id);
   }
 
@@ -586,12 +621,40 @@ export class NotificationStore {
     if (!eventTargets.test(input.path)) throw new AuthError("invalid_notification_target", 400);
     const now = input.now || new Date().toISOString();
     const key = notificationId(input.recipient, input.scope + "|" + input.event);
-    if (this.db.select({ id: taskNotifications.id }).from(taskNotifications).where(eq(taskNotifications.id, key)).get()) return { id: key, created: false };
+    const existing = this.db.select({ id: taskNotifications.id, recoveredAt: taskNotifications.recoveredAt }).from(taskNotifications).where(eq(taskNotifications.id, key)).get();
+    if (existing) {
+      if (!(input.recurs && existing.recoveredAt)) return { id: key, created: false };
+      // The condition ended and is back: a new incident, so nothing the old one was handled with carries over.
+      this.db.update(taskNotifications).set({
+        state: "unread", priority: "normal", presence: "live", reopened: false,
+        acknowledgedAt: null, mutedAt: null, archivedAt: null, snoozedUntil: null, readAt: null, recoveredAt: null,
+        firstSeenAt: now, lastSeenAt: now, title: clip(input.title, 240), owner: clip(input.owner, 64) || "control-center",
+        taskState: input.taskState || "succeeded", nativeState: clip(input.nativeState, 120), lastErrorCode: clip(input.errorCode, 120),
+      }).where(eq(taskNotifications.id, key)).run();
+      return { id: key, created: true };
+    }
     this.db.insert(taskNotifications).values({ id: key, scopeId: input.scope, sessionId: input.sessionId ?? "", subject: input.recipient,
       taskKey: "", failureFingerprint: input.event, category: input.category, title: clip(input.title, 240), targetPath: input.path,
       firstSeenAt: now, lastSeenAt: now, project: input.scope, owner: clip(input.owner, 64) || "control-center", taskState: input.taskState || "succeeded",
       nativeState: clip(input.nativeState, 120), lastErrorCode: clip(input.errorCode, 120) }).onConflictDoNothing().run();
     return { id: key, created: true };
+  }
+
+  /**
+   * Ends the open reminders of a condition that no longer holds: this recipient's reminders of the category in the scope
+   * whose event is not in `keep`. They stay in the ledger, marked recovered, and stop counting; the same event coming
+   * back later opens again (see `ReminderEvent.recurs`). Returns the ids it ended.
+   */
+  recoverEvents(input: { scope: string; recipient: string; category: string; keep: string[]; now?: string }): string[] {
+    const keep = new Set(input.keep);
+    const ended = this.db.select().from(taskNotifications).where(and(
+      eq(taskNotifications.scopeId, input.scope),
+      eq(taskNotifications.subject, input.recipient),
+      eq(taskNotifications.category, input.category),
+      isNull(taskNotifications.recoveredAt),
+    )).all().filter((row) => !keep.has(row.failureFingerprint)).map((row) => row.id);
+    if (ended.length) this.db.update(taskNotifications).set({ recoveredAt: input.now || new Date().toISOString() }).where(inArray(taskNotifications.id, ended)).run();
+    return ended;
   }
 }
 

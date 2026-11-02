@@ -5,6 +5,7 @@ import { createReadStream, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createControlCenter } from "./app";
 import { createObservationLoop, observationSettings } from "./observation-loop";
+import { credentialReminders } from "./observation-credentials";
 import { planStatic } from "./static";
 import { validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
@@ -61,7 +62,9 @@ const backgroundOff = process.env.YEISME_CONTROL_BACKGROUND === "off";
 // never an error for the server or for /observation/status.
 const observationConfig = observationSettings(config);
 if (!observationConfig.valid) console.log(`[control-center] background observation is off: the observation block in the config is invalid (${observationConfig.problems.join(", ")})`);
-const observation = observationConfig.enabled && !backgroundOff ? createObservationLoop(services) : undefined;
+// Credential problems become reminders too; they are worked out from what the control center already holds, so they
+// add no owner request to a cycle.
+const observation = observationConfig.enabled && !backgroundOff ? createObservationLoop(services, { credentials: credentialReminders(services) }) : undefined;
 if (observation) services.observation = observation;
 if (observationConfig.enabled && backgroundOff) console.log("[control-center] background observation is configured but switched off by YEISME_CONTROL_BACKGROUND=off");
 const server = createServer(async (req, res) => {

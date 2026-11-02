@@ -359,6 +359,36 @@ export interface NotificationPage extends Epoch {
   attention?: number;
 }
 
+/** `GET /observation/status`: counts and times only, never an address, a path, a key or a reminder's text. */
+export interface ObservationStatus extends Epoch {
+  schema_version: "yeisme.observation_status.v1";
+  enabled: boolean;
+  config_valid: boolean;
+  running: boolean;
+  interval_minutes: number;
+  open_tools_every: number;
+  scope: string | null;
+  /** Someone receives background reminders for the scope asked about. */
+  observed: boolean;
+  /** The signed-in account is one of them. */
+  recipient: boolean;
+  next_run_at: string | null;
+  last_cycle: null | {
+    started_at: string;
+    finished_at: string;
+    calls: number;
+    pages_read: number;
+    pages_skipped: number;
+    reminders_opened: number;
+    reminders_recovered: number;
+    connections_read: number;
+    connections_skipped: number;
+    scan_incomplete: number;
+    open_tools_read: boolean;
+    errors: Record<string, number>;
+  };
+}
+
 export interface NotificationMuteRule {
   id: string;
   scope_id: string;
@@ -552,6 +582,10 @@ export const api = {
     post<{ notification: TaskNotification; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/archive", { scope }, {}, csrf),
   reopenNotification: (scope: string, id: string, csrf: string) =>
     post<{ notification: TaskNotification; task_states_changed: number }>("/notifications/" + encodeURIComponent(id) + "/reopen", { scope }, {}, csrf),
+  /** Quiet until `until` (RFC 3339, in the future, within 30 days); the reminder stays unread and counts again after it. */
+  snoozeNotification: (scope: string, id: string, until: string, csrf: string) =>
+    post<{ notification: TaskNotification; task_states_changed: number; owner_writes: number }>("/notifications/" + encodeURIComponent(id) + "/snooze", { scope }, { until }, csrf),
+  observationStatus: (scope: string, signal?: AbortSignal) => get<ObservationStatus>("/observation/status", { scope }, signal),
   bulkNotifications: (scope: string, body: { action: "acknowledge" | "archive" | "mute"; ids?: string[]; all?: boolean }, csrf: string) =>
     post<{ updated: string[]; owner_writes: number; task_states_changed: number }>("/notifications/bulk", { scope }, body, csrf),
   muteRules: (scope: string, signal?: AbortSignal) => get<{ rows: NotificationMuteRule[] } & Epoch>("/notifications/mute-rules", { scope }, signal),

@@ -1177,7 +1177,7 @@ describe("running in the background", () => {
 
   it("hands credential reminders from the lifecycle to every recipient once, under the credential:<slot>:<state>:<stage> key", async () => {
     const facts = [{ slot: "eikona-a", state: "expiring", stage: "7d", title: "Eikona 凭据将在 7 天后到期", owner: "eikona" }];
-    const { loop, services } = setup({ users: [user("alice", "admin"), user("bob", "viewer")], world: { "eikona-a": {} }, loop: { credentials: () => facts } });
+    const { loop, services } = setup({ users: [user("alice", "admin"), user("bob", "viewer")], world: { "eikona-a": {} }, loop: { credentials: () => ({ facts, unknown: [] }) } });
     expect((await loop.runCycle()).reminders_opened).toBe(2);
     expect((await loop.runCycle()).reminders_opened).toBe(0);
     expect(rows(services, owner)[0]).toMatchObject({ category: "credential", title: "Eikona 凭据将在 7 天后到期", target_path: "/services", owner: "eikona", session_id: "background", failure_fingerprint: "credential:eikona-a:expiring:7d" });

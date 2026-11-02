@@ -9,6 +9,7 @@ export const workQueueKinds = [
   "service_blocked",
   "contract_gap",
   "operation_failure",
+  "credential_renewal",
 ] as const;
 export type WorkQueueKind = (typeof workQueueKinds)[number];
 
@@ -41,7 +42,8 @@ export interface WorkQueueLaunchContext {
 export interface WorkQueueLink {
   kind: "control-center" | "owner";
   label: string;
-  target: "home" | "tasks" | "requests" | "services" | "review" | "muweave" | "auctra" | "scaena";
+  /** `guide` opens the 接入 chapter of the guide at the section named by `ref` (a credential's renewal steps). */
+  target: "home" | "tasks" | "requests" | "services" | "review" | "guide" | "muweave" | "auctra" | "scaena";
   ref?: string;
   command?: string;
   launch?: WorkQueueLaunchContext;
@@ -52,6 +54,17 @@ export interface WorkQueueAction {
   enabled: boolean;
   preview_state: WorkQueuePreviewState;
   reason?: string;
+}
+
+/** What a `credential_renewal` item says about its credential: the row `GET /services` gives administrators, less the label. */
+export interface WorkQueueCredential {
+  /** The credential slot id, such as `open_tool:gateway`; the same as the item's `source_ref`. */
+  slot: string;
+  state: string;
+  stage?: string;
+  reason?: string;
+  expires_at?: string;
+  days_left?: number;
 }
 
 export interface WorkQueueItem {
@@ -78,6 +91,8 @@ export interface WorkQueueItem {
   digest?: string;
   task_ref?: string;
   operation_ref?: string;
+  /** Only on `credential_renewal` items. */
+  credential?: WorkQueueCredential;
   safe_links: WorkQueueLink[];
   allowed_actions: WorkQueueAction[];
   preview_state: WorkQueuePreviewState;
@@ -161,7 +176,8 @@ export function summarizeWorkQueue(items: WorkQueueItem[]): WorkQueueCounts {
   return {
     total: items.length,
     actionable: items.filter((item) => item.priority !== "low" && item.preview_state !== "not_applicable").length,
-    blocked: items.filter((item) => ["blocked", "unavailable", "conflict"].includes(item.state) || item.kind === "service_blocked").length,
+    // A refused, unreadable or expired credential blocks its tool as surely as an unavailable one; it replaced that item.
+    blocked: items.filter((item) => ["blocked", "unavailable", "conflict"].includes(item.state) || item.kind === "service_blocked" || (item.kind === "credential_renewal" && ["rejected", "unreadable", "expired"].includes(item.state))).length,
     review_required: items.filter((item) => item.kind === "review_required").length,
     unknown: items.filter((item) => item.kind === "task_unknown" || item.state === "unknown").length,
     handoff_ready: items.filter((item) => item.kind === "handoff_ready").length,

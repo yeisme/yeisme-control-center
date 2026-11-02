@@ -23,6 +23,17 @@ export const openToolChecks: Record<OpenToolKind, { open: string[]; optional: st
   gateway: { open: ["health"], optional: ["usage"] },
 };
 
+/**
+ * Whether a reading says anything about the credential: a read that needs it was answered, accepted or refused (401 or
+ * 403), or the credential could not be read at all. A reading that only failed to get an answer (the network, a 5xx, a
+ * 429, a route that is not there) says nothing, and a credential judged from it would be called fine, then refused again,
+ * with every blip. The optional reads do not count: a refusal of one is about a scope the credential may simply lack.
+ */
+export function carriesCredentialVerdict(projection: Pick<OpenToolProjection, "tool" | "checks">): boolean {
+  const reads = openToolChecks[projection.tool];
+  return projection.checks.some((check) => !reads.open.includes(check.id) && !reads.optional.includes(check.id) && (check.state === "ok" || check.state === "forbidden"));
+}
+
 const coverageFor: Record<OpenToolState, CoverageState> = {
   ready: "complete",
   degraded: "partial",

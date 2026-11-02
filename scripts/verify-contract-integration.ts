@@ -18,6 +18,7 @@ import { SessionStore } from "../server/db/session-store";
 import { createMemoryDB, type ControlDB } from "../server/db/client";
 import { taskNotifications } from "../server/db/schema";
 import { createObservationLoop } from "../server/observation-loop";
+import { credentialReminders } from "../server/observation-credentials";
 import {
   delegationToken,
   observerToken,
@@ -116,7 +117,8 @@ const config: ServerConfig = {
   // Background observation is configured but never started here: the checks run one cycle by hand.
   observation: { enabled: true },
   open_tools: {
-    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+    // DriveBridge's token was issued to run out in three days, so the credential lifecycle has something to remind about.
+    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, credential_expires_at: new Date(Date.now() + 3 * 86_400_000).toISOString(), allow_private_http: true, enabled: true },
     gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
   },
   connections: [
@@ -137,7 +139,7 @@ const db: ControlDB = createMemoryDB();
 const auth = new SessionAuth(config, undefined, new SessionStore(db));
 const audit = new AuditStore(db);
 const { handle: app, services } = createControlCenter(config, { db, auth });
-const loop = createObservationLoop(services, { log: () => undefined });
+const loop = createObservationLoop(services, { log: () => undefined, credentials: credentialReminders(services) });
 services.observation = loop;
 
 let cookie = "";
@@ -527,6 +529,73 @@ try {
     assert.equal((await viewer.json()).recipient, false);
     assert.equal(JSON.stringify(owners.hits()), JSON.stringify(before));
     assert.equal((await app(new Request(origin + "/api/control-center/v1/observation/status", { headers: { Origin: origin } }))).status, 401);
+  });
+
+  // Credential reminders (W3 finish): worked out from memory in the same cycle, so the request count asserted above
+  // (the owners' own count equals the cycle's `calls`, 40 at most) already holds with the credential step on.
+  await check("observation: the token that is running out is one credential reminder, written by the loop in the same cycle", async () => {
+    const { json } = await call(`/api/control-center/v1/notifications?scope=${scopeIds[0]}&limit=100`);
+    const credentials = json.rows.filter((row: { category: string }) => row.category === "credential");
+    assert.deepEqual(credentials.map((row: { title: string }) => row.title), ["DriveBridge · 即将到期（7 天内）"]);
+    assert.equal(credentials[0].failure_fingerprint, "credential:open_tool:drivebridge:expiring:7d");
+    assert.deepEqual([credentials[0].session_id, credentials[0].target_path, credentials[0].owner, credentials[0].state, credentials[0].recovered_at], ["background", "/services", "drivebridge", "unread", null]);
+    for (const leaked of [openToolRef, openToolToken, owners.origin, temp]) assert.equal(JSON.stringify(credentials).includes(leaked), false, leaked);
+  });
+
+  await check("work queue: the same token is one credential_renewal item, linked to the credentials and the renewal steps", async () => {
+    const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}&kind=credential_renewal`);
+    assert.deepEqual(json.items.map((item: { source_ref: string; state: string; priority: string }) => `${item.source_ref}:${item.state}:${item.priority}`), ["open_tool:drivebridge:expiring:normal"]);
+    const [item] = json.items;
+    assert.deepEqual(item.safe_links.map((link: { target: string; ref: string }) => `${link.target}:${link.ref}`), ["services:open_tool:drivebridge", "guide:guide-renew-drivebridge"]);
+    assert.equal(item.credential.days_left, 3);
+    for (const leaked of [openToolRef, openToolToken, owners.origin, temp, "credential_ref"]) assert.equal(JSON.stringify(json).includes(leaked), false, leaked);
+  });
+
+  await check("reminders: snoozing sets a reminder aside until a time and reopening brings it back, with no owner call; a bad time or no CSRF token is refused", async () => {
+    const list = async () => (await call(`/api/control-center/v1/notifications?scope=${scopeIds[0]}&limit=100`)).json as { unread: number; rows: { id: string; category: string; state: string; snoozed_until: string | null }[] };
+    const before = owners.hits();
+    const start = await list();
+    const reminder = start.rows.find((row) => row.category === "credential")!;
+    const path = `/api/control-center/v1/notifications/${reminder.id}/snooze?scope=${scopeIds[0]}`;
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const bare = await app(new Request(origin + path, { method: "POST", headers: { "Content-Type": "application/json", Origin: origin, Cookie: cookie }, body: JSON.stringify({ until }) }));
+    assert.equal(bare.status, 403);
+    const tooFar = await call(path, "POST", { until: new Date(Date.now() + 31 * 86_400_000).toISOString() });
+    assert.deepEqual([tooFar.response.status, tooFar.json.error], [400, "invalid_snooze_until"]);
+    const snoozed = await call(path, "POST", { until });
+    assert.equal(snoozed.response.status, 200);
+    assert.deepEqual([snoozed.json.notification.state, snoozed.json.notification.snoozed_until, snoozed.json.owner_writes, snoozed.json.task_states_changed], ["unread", until, 0, 0]);
+    const during = await list();
+    assert.equal(during.unread, start.unread - 1);
+    assert.equal(during.rows.find((row) => row.id === reminder.id)!.snoozed_until, until);
+    const again = await call(path, "POST", { until: new Date(Date.now() + 7_200_000).toISOString() });
+    assert.equal(again.response.status, 200, "a later snooze replaces the earlier one");
+    const reopened = await call(`/api/control-center/v1/notifications/${reminder.id}/reopen?scope=${scopeIds[0]}`, "POST", {});
+    assert.equal(reopened.response.status, 200);
+    assert.deepEqual([reopened.json.notification.state, reopened.json.notification.snoozed_until], ["unread", null]);
+    assert.equal((await list()).unread, start.unread);
+    const archived = await call(`/api/control-center/v1/notifications/${reminder.id}/archive?scope=${scopeIds[0]}`, "POST", {});
+    assert.equal(archived.response.status, 200);
+    const refused = await call(path, "POST", { until });
+    assert.deepEqual([refused.response.status, refused.json.error], [409, "notification_not_snoozable"]);
+    await call(`/api/control-center/v1/notifications/${reminder.id}/reopen?scope=${scopeIds[0]}`, "POST", {});
+    // Reminder actions change the control center's own ledger and nothing at any owner.
+    assert.deepEqual(owners.hits(), before);
+  });
+
+  await check("observation: when the token is renewed the reminder is recovered by the next cycle, still with no owner request of its own", async () => {
+    (config.open_tools!.drivebridge as { credential_expires_at?: string }).credential_expires_at = new Date(Date.now() + 90 * 86_400_000).toISOString();
+    const before = owners.hits();
+    const next = await loop.runCycle();
+    assert.equal(next.reminders_recovered, 1);
+    assert.equal(next.reminders_opened, 0);
+    const requests = Object.entries(owners.hits()).reduce((sum, [key, n]) => sum + (n - (before[key] || 0)), 0);
+    assert.equal(requests, next.calls, `the cycle reported ${next.calls} calls and the owners got ${requests} requests`);
+    const { json } = await call(`/api/control-center/v1/notifications?scope=${scopeIds[0]}&limit=100`);
+    const credential = json.rows.find((row: { category: string }) => row.category === "credential");
+    assert.ok(credential.recovered_at, "the credential reminder is marked recovered");
+    const queue = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}&kind=credential_renewal`);
+    assert.deepEqual(queue.json.items, []);
   });
 
   await check("episode board: explicit Auctra sync, then rails built from live Auctra + Scaena reads", async () => {

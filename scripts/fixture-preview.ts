@@ -6,7 +6,9 @@ import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createServer as createViteServer } from "vite";
-import { createApp } from "../server/app";
+import { createControlCenter } from "../server/app";
+import { createObservationLoop } from "../server/observation-loop";
+import { credentialReminders } from "../server/observation-credentials";
 import { SessionAuth } from "../server/auth";
 import { createMemoryDB } from "../server/db/client";
 import { SessionStore } from "../server/db/session-store";
@@ -46,6 +48,12 @@ const openToolRef = join(temp, "open-tool");
 await writeFile(openToolRef, openToolToken + "\n", { mode: 0o600 });
 // FIXTURE_CREDENTIALS=lifecycle: DriveBridge's token runs out in three days, and the Gateway's is one the fake owner refuses (401).
 const lifecycle = process.env.FIXTURE_CREDENTIALS === "lifecycle";
+// FIXTURE_BACKGROUND=on: the server's background observation is on, but its cycle runs only when a check asks for it
+// (POST /__fixture/observe with the key printed at start), so what it writes appears at a moment the check chooses.
+const background = process.env.FIXTURE_BACKGROUND === "on";
+const observeKey = randomBytes(12).toString("base64url");
+// The loop's clock can be moved forward by a check (`?skew_days=`), to let a recorded expiry come closer without waiting.
+let skewMs = 0;
 const revokedToolRef = join(temp, "open-tool-revoked");
 await writeFile(revokedToolRef, revokedOpenToolToken + "\n", { mode: 0o600 });
 process.env.YEISME_FIXTURE_PROVIDER_TOKEN = providerToken;
@@ -119,6 +127,7 @@ const config: ServerConfig = {
     // Anatomia refuses a key without observer scope with a tool error, not an HTTP status.
     connection("fx-anatomia-denied", "anatomia", "rain-reunion-ref", "Anatomia · 参考片（未授权）"),
   ],
+  ...(background ? { observation: { enabled: true } } : {}),
   providers: Object.fromEntries((["eikona", "scaena", "sonora"] as const).map((owner) => [owner, {
     owner, endpoint: `${owners.origin}/provider/${owner}`, credential_env: "YEISME_FIXTURE_PROVIDER_TOKEN", enabled: true,
     ...(owner === "scaena" ? { project: "rain-reunion" } : {}),
@@ -137,7 +146,10 @@ for (const scope of scopes.filter((candidate) => candidate.id === "fixture-a")) 
   if (data) collection.upsertSnapshot(scope.id, { schema_version: "auctra.collection.snapshot.v1", owner: "auctra", scope: scope.id, project_ref: data.project_ref, observed_at: new Date().toISOString(), coverage: "complete", freshness: "fresh", returned: data.records.length, total: data.total, records: data.records });
 }
 const auth = new SessionAuth(config, undefined, new SessionStore(db));
-const app = createApp(config, { db, auth, providers: new ProviderRunManager(config, undefined, runs) });
+const { handle: app, services } = createControlCenter(config, { db, auth, providers: new ProviderRunManager(config, undefined, runs), clock: () => Date.now() + skewMs });
+// The first cycle is an hour away, so nothing runs by itself during a check.
+const loop = background ? createObservationLoop(services, { credentials: credentialReminders(services), firstCycleMs: 3_600_000, log: () => undefined }) : undefined;
+if (loop) { services.observation = loop; loop.start(); }
 
 // Fixture-only shim: personal sessions carry no OIDC token, so grant a fixture delegation after login.
 async function handle(request: Request) {
@@ -154,6 +166,13 @@ const api = createHttpServer(async (req, res) => {
   try {
     if (req.headers.host !== new URL(origin).host) { res.writeHead(421).end(); return; }
     const url = new URL(req.url || "/", origin);
+    if (loop && req.method === "POST" && url.pathname === "/__fixture/observe") {
+      if (req.headers["x-fixture-key"] !== observeKey) { res.writeHead(403).end(); return; }
+      skewMs += Math.max(0, Number(url.searchParams.get("skew_days") || 0)) * 86_400_000;
+      const summary = await loop.runCycle();
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ opened: summary.reminders_opened, recovered: summary.reminders_recovered, calls: summary.calls, errors: summary.errors }));
+      return;
+    }
     if (!url.pathname.startsWith("/api/control-center/")) { res.writeHead(404).end(); return; }
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -196,6 +215,7 @@ async function stop(code: number) {
   if (stopping) return;
   stopping = true;
   // Keep-alive browser sockets would otherwise hold the ports open after exit is requested.
+  await loop?.stop();
   api.closeAllConnections();
   api.close();
   owners.stop();
@@ -215,5 +235,6 @@ console.log(JSON.stringify({
   username,
   password,
   video_fixture: videoBytes ? "ffmpeg" : "unavailable",
+  ...(loop ? { observe_key: observeKey } : {}),
   note: "Fixture owners only; no real owner, provider or paid call is made.",
 }, null, 2));

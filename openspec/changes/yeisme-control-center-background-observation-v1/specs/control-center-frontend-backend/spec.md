@@ -186,12 +186,56 @@ Every `open_tools_every` cycles (default 3, the first cycle included) the loop M
 
 ### Requirement: Credential reminders are delivered by the loop
 
-When a credential lifecycle supplies credential problems, the loop MUST write each as a reminder of category `credential` with the event key `credential:<slot>:<state>:<stage>`, once per recipient and scope, and a failure of that supplier MUST cost the cycle one error code, not the cycle.
+For each observed scope and cycle the loop MUST ask the credential lifecycle for that scope's credential problems and write each as a reminder of category `credential` with the event key `credential:<slot>:<state>:<stage>` (`stage` is `-` when the state has none), once per recipient and scope. Only states that need attention are problems: `unreadable`, `rejected`, `expired`, `expiring` at its `7d` and `1d` stages, and `limited`. Working out the problems MUST make no owner request and MUST NOT use the cycle's request budget: it MUST read the latest task connection observation of each connection and, for each open tool, the latest reading that said whether the credential was accepted or refused, from memory. A reading says so when a read that needs the credential (an optional read does not count) was answered, accepted or refused with 401 or 403, or when the credential could not be read; a reading that only failed to get an answer (the network, a 5xx, a 429, a missing route) says nothing, and the credential MUST then still be judged by the last reading that did. When a slot is no longer a problem, or has moved to another state or stage, the reminder written for the earlier one MUST be marked recovered and stop counting as unread. Not knowing MUST NOT be taken for recovery: the lifecycle also reports the reminders it has no reading of this cycle (a connection nothing has read since the process started, one whose reads since got no answer, an open tool none of whose readings was answered), and the cycle MUST leave an open reminder of the refused, unreadable or limited kind under such a slot exactly as it is, so that whatever the person did with it (acknowledged, muted, snoozed) survives a blip or a restart and a refusal that comes back is the same reminder, not a new unread one. When the same slot, state and stage is a problem again after it was recovered, it MUST open again as a new unread reminder that keeps nothing the earlier one was handled with. When the lifecycle cannot be read for a scope, the cycle MUST count one `credentials_unreadable` error for that scope and MUST neither open nor recover credential reminders there.
 
 #### Scenario: a credential moves to a later stage
 
-- **WHEN** the supplier first reports slot `s` expiring at stage `7d` and later also at stage `1d`
-- **THEN** each recipient has one reminder per stage and none is written twice
+- **WHEN** a connection's credential first expires within seven days and, three days later, within one day
+- **THEN** each recipient has one reminder per stage, none is written twice, and the seven-day reminder is recovered when the one-day reminder opens
+
+#### Scenario: a credential is replaced and later runs out again
+
+- **WHEN** a reminder for an expiring credential was acknowledged, the credential was replaced, and months later the new credential is within seven days of expiring
+- **THEN** the first reminder was recovered when it was replaced, and the second incident is the same reminder opened again as unread, not acknowledged and not recovered
+
+#### Scenario: a tool stops answering after it refused the credential
+
+- **WHEN** an open tool's credential was refused and the person acknowledged the reminder, and the next readings fail with a network error, a 503 or a 429, then the tool refuses the credential again
+- **THEN** the reminder is neither recovered nor reopened at any step, it is still acknowledged with its first-seen time unchanged, and only a reading that accepts the credential recovers it, after which a new refusal opens a new unread reminder
+
+#### Scenario: the process restarts
+
+- **WHEN** the process restarts while twelve connections' credentials are refused and acknowledged, and its first cycle reads only the connections its budget allows
+- **THEN** the reminders of the connections not read yet are kept as they were, and the one connection that is then read and accepted is the only one recovered
+
+#### Scenario: the owner turns the credential away in the background
+
+- **WHEN** only the loop's own list reads have touched a connection and its owner answered 401
+- **THEN** a `rejected` reminder with the reason `owner_denied` opens for each recipient, and the cycle's owner requests are the same as without credential reminders
+
+#### Scenario: the lifecycle cannot be read
+
+- **WHEN** the credential lifecycle fails for one scope in a cycle
+- **THEN** that scope's open credential reminders are left as they are and the cycle counts one `credentials_unreadable`
+
+### Requirement: A credential that needs attention is one work queue item
+
+For a personal administrator, `GET /work-queue` MUST contain one item of kind `credential_renewal` for each credential of the scope that needs attention, worked out from the connection observations and open-tool readings the request already took, with no further owner request. Its `source_ref` MUST be the credential's slot id, its `work_ref` MUST not change with the credential's state, and it MUST carry the credential's state, reason, stage, expiry and days left but no path, address or token. It MUST link to the credentials on the services page and to the guide's renewal section for the tool. A `rejected` or `unreadable` connection or open-tool credential MUST replace the `service_blocked` item for the same connection or tool when that item's own reason is the one the credential row explains (a refusal by the owner or the tool for `rejected`; a credential that could not be read for `unreadable`); a blocked item with another reason (the tool is down, its address is refused) is a separate fault and MUST stay beside the credential item, and the other credential states MUST NOT replace anything. Other sessions MUST NOT get these items.
+
+#### Scenario: a refused credential
+
+- **WHEN** an administrator's scope has a connection whose owner refuses its credential
+- **THEN** the queue has one `credential_renewal` item for it and no `service_blocked` item for the same connection, and a personal viewer still gets the `service_blocked` item
+
+#### Scenario: a credential problem that does not explain why the service is blocked
+
+- **WHEN** a connection is refused by its owner and its credential file is also not private, or a tool's address is refused and its credential file is not private
+- **THEN** the queue has the `credential_renewal` item and the `service_blocked` item both, because the file alone does not explain the refusal or the address
+
+#### Scenario: an expiring credential of a tool that is reachable
+
+- **WHEN** an open tool answers and its credential is within a day of expiring
+- **THEN** the queue has the `credential_renewal` item with priority `high`, and the tool has no `service_blocked` item because it is not blocked
 
 ### Requirement: A malformed observation block turns observation off
 

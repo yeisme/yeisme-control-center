@@ -46,8 +46,9 @@ export const lastCycleState = "observation_last_cycle_at";
 export const backgroundSession = "background";
 
 /**
- * One credential problem to remind about. The credential lifecycle fills these in once `server/credentials.ts` exists;
- * the loop only delivers them, to every recipient of every observed scope, as category `credential` reminders.
+ * One credential problem to remind about. `server/observation-credentials.ts` works them out from the credential
+ * lifecycle; the loop only delivers them, to every recipient of the scope they were asked for, as category `credential`
+ * reminders, and ends the ones that are no longer in the list.
  */
 export interface CredentialReminderFact {
   slot: string;
@@ -56,6 +57,17 @@ export interface CredentialReminderFact {
   title: string;
   owner?: string;
   error_code?: string;
+}
+
+/**
+ * What a cycle could say about credentials for one scope. `unknown` holds the event keys of reminders about things the
+ * control center has no reading of this cycle (a connection not read since the process started, a tool whose only reading
+ * got no answer): the loop leaves an open reminder under such a key as it is. Not knowing is not recovery; ending one
+ * on a guess, and opening it again at the next refusal, would hand the person back an unread reminder they had handled.
+ */
+export interface CredentialReading {
+  facts: CredentialReminderFact[];
+  unknown: string[];
 }
 
 /** The event name that makes one credential reminder per slot, state and stage. */
@@ -117,8 +129,12 @@ export interface ObservationLoopOptions {
   random?: () => number;
   timers?: Timers;
   log?: (line: string) => void;
-  /** Filled by the credential lifecycle: problems to remind about, read once per cycle. Nothing by default. */
-  credentials?: (nowMs: number) => CredentialReminderFact[];
+  /**
+   * The credential problems of one observed scope, asked once per scope and cycle. It must not call an owner. Nothing by
+   * default; when it is given, a credential reminder of that scope that is neither among the facts nor under an unknown
+   * key is recovered, and when it throws nothing is opened or recovered for that scope in the cycle.
+   */
+  credentials?: (nowMs: number, scope: ScopeBinding) => CredentialReading;
 }
 
 const systemTimers: Timers = {
@@ -401,26 +417,36 @@ export class ObservationLoop {
         }
       }
 
-      // Credential reminders: the credential lifecycle supplies the facts, the loop delivers them.
-      let credentials: CredentialReminderFact[] = [];
-      try { credentials = this.options.credentials?.(startedMs) ?? []; } catch { fail("credentials_unreadable"); }
-      for (const fact of credentials) {
-        for (const target of targets) {
-          for (const recipient of target.recipients) {
-            const { created } = notifications.openEvent({
-              scope: target.scope.id,
-              recipient,
-              event: credentialEventKey(fact),
-              category: "credential",
-              title: fact.title,
-              path: "/services",
-              owner: fact.owner,
-              errorCode: fact.error_code,
-              taskState: fact.state,
-              sessionId: backgroundSession,
-              now: iso(startedMs),
-            });
-            if (created) bump([target.scope.id], "reminders_opened");
+      // Credential reminders: the credential lifecycle supplies the facts, the loop delivers them and ends the ones that
+      // no longer hold. A scope whose facts could not be worked out is left as it is: not knowing is not recovery.
+      const credentials = this.options.credentials;
+      if (credentials) for (const target of targets) {
+        let reading: CredentialReading;
+        try { reading = credentials(startedMs, target.scope); } catch { fail("credentials_unreadable", target.scope.id); continue; }
+        const { facts } = reading;
+        const keep = [...facts.map(credentialEventKey), ...reading.unknown];
+        for (const recipient of target.recipients) {
+          try {
+            for (const fact of facts) {
+              const { created } = notifications.openEvent({
+                scope: target.scope.id,
+                recipient,
+                event: credentialEventKey(fact),
+                category: "credential",
+                title: fact.title,
+                path: "/services",
+                owner: fact.owner,
+                errorCode: fact.error_code,
+                taskState: fact.state,
+                sessionId: backgroundSession,
+                recurs: true,
+                now: iso(startedMs),
+              });
+              if (created) bump([target.scope.id], "reminders_opened");
+            }
+            bump([target.scope.id], "reminders_recovered", notifications.recoverEvents({ scope: target.scope.id, recipient, category: "credential", keep, now: iso(startedMs) }).length);
+          } catch {
+            fail("reminder_write_failed", target.scope.id);
           }
         }
       }

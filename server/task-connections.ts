@@ -314,22 +314,57 @@ export class TaskConnections {
       ...await this.observeConnection(c),
     })));
   }
+  /**
+   * The latest observation of each connection of the scope, from memory. It makes no owner request and never waits for
+   * one: whoever needs fresher facts calls `observe()`. A connection that was observed shows that observation; one that
+   * only list reads (a browser's, or the background loop's) have touched shows what its read channels and a denial say;
+   * one nothing has been read through yet is left out.
+   */
+  cached(scope: ScopeBinding): TaskConnectionState[] {
+    return this.connections(scope).flatMap((c) => {
+      const previous = this.observations.get(c.id);
+      const channels = this.channels.get(c.id);
+      if (!previous && !channels && !this.denied.has(c.id)) return [];
+      return [{
+        id: c.id, owner: c.owner, instance_id: c.instance_id, label: c.label,
+        environment: c.environment, project: c.project,
+        ...this.projectObservation(c, previous ?? this.fromChannels(c, channels)),
+      }];
+    });
+  }
+  /** What the channels alone say about a connection that was never observed as a whole. */
+  private fromChannels(c: TaskConnection, channels: Partial<Record<TaskReadChannel, TaskChannelObservation>> = {}): ConnectionObservation {
+    const seen = Object.values(channels).filter((channel): channel is TaskChannelObservation => !!channel);
+    const bad = seen.find((channel) => channel.state !== "ready");
+    const times = seen.filter((channel) => channel.state === "ready").map((channel) => channel.observed_at).sort();
+    return {
+      state: bad ? bad.state : seen.length ? "ready" : "not_checked",
+      checked_at: seen.map((channel) => channel.observed_at).sort().pop() ?? "",
+      last_success_at: times.pop() ?? null,
+      transport: "unknown", authorization: "unknown", contract: "unknown", task_families: [],
+      content: c.allow_content === true ? "not_verified" : "not_requested",
+      channels: { ...channels },
+      ...(bad?.reason ? { reason: bad.reason } : {}),
+    };
+  }
+  /** An observation as browsers see it: with the live read channels, the content verdict and a denial laid over it. */
+  private projectObservation(c: TaskConnection, observation: ConnectionObservation) {
+    const runtime: ConnectionObservation = {
+      ...observation,
+      channels: { ...this.channels.get(c.id), ...observation.channels },
+      content: c.allow_content !== true
+        ? "not_requested"
+        : this.contentDenied.has(c.id) ? "denied" : observation.content,
+      ...(this.denied.has(c.id) ? {
+        state: "needs_authorization", authorization: "denied" as const,
+        last_success_at: null, task_families: [], reason: "needs_authorization",
+      } : {}),
+    };
+    return { state: runtime.state, observed_at: runtime.last_success_at || "", channels: runtime.channels, runtime };
+  }
   private async observeConnection(c: TaskConnection) {
     const previous = this.observations.get(c.id);
-    const project = (observation: ConnectionObservation) => {
-      const runtime: ConnectionObservation = {
-        ...observation,
-        channels: { ...this.channels.get(c.id), ...observation.channels },
-        content: c.allow_content !== true
-          ? "not_requested"
-          : this.contentDenied.has(c.id) ? "denied" : observation.content,
-        ...(this.denied.has(c.id) ? {
-          state: "needs_authorization", authorization: "denied" as const,
-          last_success_at: null, task_families: [], reason: "needs_authorization",
-        } : {}),
-      };
-      return { state: runtime.state, observed_at: runtime.last_success_at || "", channels: runtime.channels, runtime };
-    };
+    const project = (observation: ConnectionObservation) => this.projectObservation(c, observation);
     // The same fixed credential/project can be shared by authorized scopes;
     // only non-content connection facts are cached, never task rows or grants.
     if (!this.denied.has(c.id) && previous && Date.now() - Date.parse(previous.checked_at) < 15_000)

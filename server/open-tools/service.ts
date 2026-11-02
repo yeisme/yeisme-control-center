@@ -2,7 +2,7 @@ import type { ScopeBinding, ServerConfig } from "../contracts";
 import { openToolKinds, type OpenToolKind, type OpenToolProjection } from "../../src/shared/open-tools";
 import { DriveBridgeAdapter } from "./drivebridge";
 import { GatewayAdapter } from "./gateway";
-import { unreadableProjection } from "./projection";
+import { carriesCredentialVerdict, unreadableProjection } from "./projection";
 import type { Fetcher, OpenToolAdapter, OpenToolObservation } from "./types";
 
 const observationTtlMs = 60_000;
@@ -28,6 +28,8 @@ interface Entry {
   at: number;
   forcedAt: number;
   lastGood: OpenToolObservation | null;
+  /** The latest reading that said whether the credential was accepted (`carriesCredentialVerdict`); what the credential is judged by. */
+  lastVerdict: OpenToolObservation | null;
 }
 
 /** Reads that may pass on their own; the last good reading stays on screen, marked stale, while they last. */
@@ -87,15 +89,43 @@ export class OpenToolService {
       const latest = await pending;
       if (before !== undefined) requests = (this.made.get(kind) ?? 0) - before;
       const previous = this.entries.get(kind);
-      entry = { latest, at: Date.now(), forcedAt: forced ? Date.now() : previous?.forcedAt ?? 0, lastGood: transient(latest.projection) ? previous?.lastGood ?? null : latest };
+      entry = {
+        latest, at: Date.now(), forcedAt: forced ? Date.now() : previous?.forcedAt ?? 0,
+        lastGood: transient(latest.projection) ? previous?.lastGood ?? null : latest,
+        lastVerdict: carriesCredentialVerdict(latest.projection) ? latest : previous?.lastVerdict ?? null,
+      };
       this.entries.set(kind, entry);
     }
+    return this.present(entry, { forced, throttled, requests });
+  }
+
+  /** How a stored reading is shown: the last good runs and backends stay on screen, marked stale, while the tool is not answering. */
+  private present(entry: Entry, call: Pick<OpenToolResult, "forced" | "throttled" | "requests">): OpenToolResult {
     if (transient(entry.latest.projection) && entry.lastGood) {
       // Keep the last good runs and backends, but say plainly that the tool is not answering now.
       const { state, reason, checks } = entry.latest.projection;
-      return { observation: { projection: { ...entry.lastGood.projection, state, ...(reason ? { reason } : {}), checks, freshness: "stale" }, tools: entry.lastGood.tools }, freshness: "stale", forced, throttled, requests };
+      return { observation: { projection: { ...entry.lastGood.projection, state, ...(reason ? { reason } : {}), checks, freshness: "stale" }, tools: entry.lastGood.tools }, freshness: "stale", ...call };
     }
-    return { observation: entry.latest, freshness: transient(entry.latest.projection) ? "unknown" : "fresh", forced, throttled, requests };
+    return { observation: entry.latest, freshness: transient(entry.latest.projection) ? "unknown" : "fresh", ...call };
+  }
+
+  /**
+   * The reading to judge a tool's credential by, from memory only: the latest if it says whether the credential was
+   * accepted or refused, else the last one that did. A reading that got no answer (the network, a 5xx, a 429, a missing
+   * route) leaves the verdict as it was, so one blip neither clears a refusal nor invents one. Null when no reading has
+   * said anything yet, which is not the same as "fine": the caller keeps what it knows. It makes no owner request.
+   * What the tool looks like to a person is `observe`; the checks in this projection are the ones of the reading that
+   * carried the verdict, not necessarily the latest.
+   */
+  credentialProjection(kind: OpenToolKind): OpenToolProjection | null {
+    const entry = this.adapters.get(kind) && this.entries.get(kind);
+    if (!entry) return null;
+    return (carriesCredentialVerdict(entry.latest.projection) ? entry.latest : entry.lastVerdict)?.projection ?? null;
+  }
+
+  /** `credentialProjection` of each open tool in scope that has one, in the fixed order. */
+  credentialProjections(scope: ScopeBinding): OpenToolProjection[] {
+    return this.inScope(scope).flatMap((kind) => this.credentialProjection(kind) ?? []);
   }
 
   /** The most owner requests one reading of this tool makes, for a caller that keeps a budget; none when it is not configured. */

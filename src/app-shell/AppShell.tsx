@@ -12,7 +12,8 @@ import { api, errorCode, type TaskNotification } from "../shared/api/control-cen
 import { ActionsContextMenu, Button, DetailSheet, Dot, Kbd, MenuContent, MenuItem, MenuLabel, MenuRoot, MenuSeparator, MenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger, TaskStatePill, cx, ownerLabel, type ItemAction } from "../components/ui";
 import { linkActions, useCopy } from "../app/item-actions";
 import { cjkSpaced, formatRelative, initials } from "../shared/read-model/format";
-import { countsAsUnread, reminderStateLabels } from "../notifications";
+import { countsAsUnread, isSnoozed, reminderKind, reminderKindLabels, reminderStateLabel } from "../notifications";
+import { reopenActions, snoozeActions } from "../app/reminder-actions";
 import { useTheme, type ThemePreference } from "./theme";
 import { useObservationCache } from "../app/observation-cache";
 import { toolCatalogCacheKey, type ToolCatalog } from "../shared/tool-catalog";
@@ -319,28 +320,43 @@ function AttentionPopover({ onNavigate }: { onNavigate: (page: WorkspacePage) =>
     void api.readNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => { reminders.update(notification); setOpen(false); navigate(item.target_path || `/tasks?task=${encodeURIComponent(item.task_key)}`); }).catch((error) => setFailure(errorCode(error)));
   };
   // The same handling as on the reminders page, without leaving the popover.
-  const handle = (item: TaskNotification, action: "acknowledge" | "mute" | "archive") => {
+  const handle = (item: TaskNotification, action: "acknowledge" | "mute" | "archive" | "reopen" | "snooze", until = "") => {
     if (!session) return;
     setFailure("");
-    const done = action === "acknowledge" ? api.acknowledgeNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => reminders.update(notification))
-      : action === "archive" ? api.archiveNotification(item.scope_id, item.id, session.csrf).then(({ notification }) => reminders.update(notification))
-        : api.muteNotification(item.scope_id, item.id, session.csrf, "fingerprint").then(() => reminders.refresh());
+    // A re-read that began before this action may carry the state from before it: from here on it is dropped.
+    reminders.beginChange();
+    const update = ({ notification }: { notification: TaskNotification }) => reminders.update(notification);
+    const done = action === "acknowledge" ? api.acknowledgeNotification(item.scope_id, item.id, session.csrf).then(update)
+      : action === "archive" ? api.archiveNotification(item.scope_id, item.id, session.csrf).then(update)
+        : action === "reopen" ? api.reopenNotification(item.scope_id, item.id, session.csrf).then(update)
+          : action === "snooze" ? api.snoozeNotification(item.scope_id, item.id, until, session.csrf).then(update)
+            : api.muteNotification(item.scope_id, item.id, session.csrf, "fingerprint").then(() => reminders.refresh());
     void done.catch((error) => setFailure(errorCode(error)));
   };
-  const itemActions = (item: TaskNotification): ItemAction[] => [
-    { id: "open", label: "打开任务", icon: <ArrowRight />, group: "open", run: () => openItem(item) },
-    ...(item.category === "failure" ? [
-      { id: "acknowledge", label: "确认", icon: <Check />, group: "resolve", disabled: item.state === "acknowledged", run: () => handle(item, "acknowledge") },
-      { id: "mute", label: "仅对这次失败免提醒", icon: <BellOff />, group: "resolve", disabled: item.state === "muted", run: () => handle(item, "mute") },
-      { id: "archive", label: "归档", icon: <Archive />, group: "resolve", disabled: item.state === "archived", run: () => handle(item, "archive") },
-    ] : []),
-    { id: "reminders", label: "在提醒中心查看", icon: <BellRing />, group: "more", run: () => { setOpen(false); navigate(`/reminders?focus=${encodeURIComponent(item.id)}`); } },
-  ];
+  const openLabels = { failure: "打开任务", operation: "查看服务", credential: "查看凭据状态", collaboration: "打开" } as const;
+  const itemActions = (item: TaskNotification): ItemAction[] => {
+    const kind = reminderKind(item);
+    return [
+      { id: "open", label: openLabels[kind], icon: <ArrowRight />, group: "open", run: () => openItem(item) },
+      // Collaboration reminders (a batch finished, a project was shared) have nothing to confirm or mute, only to open.
+      ...(kind !== "collaboration" ? [{ id: "acknowledge", label: "确认", icon: <Check />, group: "resolve", disabled: item.state === "acknowledged", run: () => handle(item, "acknowledge") }] : []),
+      ...(kind === "failure" ? [{ id: "mute", label: "仅对这次失败免提醒", icon: <BellOff />, group: "resolve", disabled: item.state === "muted", run: () => handle(item, "mute") }] : []),
+      ...(kind !== "collaboration" ? [{ id: "archive", label: "归档", icon: <Archive />, group: "resolve", disabled: item.state === "archived", run: () => handle(item, "archive") }] : []),
+      ...reopenActions(item, () => handle(item, "reopen")),
+      ...snoozeActions(item, (until) => handle(item, "snooze", until)),
+      { id: "reminders", label: "在提醒中心查看", icon: <BellRing />, group: "more", run: () => { setOpen(false); navigate(`/reminders?focus=${encodeURIComponent(item.id)}`); } },
+    ];
+  };
+  /** Where a reminder comes from, in the line under its title. */
+  const sourceLine = (item: TaskNotification) => {
+    const kind = reminderKind(item);
+    return kind === "failure" ? `${ownerLabel(item.owner)} · ${reminderStateLabel(item)}` : kind === "collaboration" ? "项目协作" : `${ownerLabel(item.owner)} · ${reminderKindLabels[kind]}`;
+  };
   const content = <div className="min-w-0">
     <div className="border-b border-line px-4 py-3"><p className="text-[13px] font-semibold">通知 · {reminders.unread} 条未读</p><p className="text-2xs text-muted">{reminders.error ? "部分来源暂不可用" : reminders.syncing ? "正在核验来源" : "阅读通知不会确认处理提醒"}</p></div>
     <div className="flex gap-2 p-2"><Button size="sm" variant={!all ? "secondary" : "ghost"} onClick={() => { setAll(false); setLimit(10); }}>未读</Button><Button size="sm" variant={all ? "secondary" : "ghost"} onClick={() => { setAll(true); setLimit(10); }}>全部</Button></div>
     {failure && <p role="alert" className="px-4 text-xs text-danger">{failure}</p>}
-    {filtered.length ? <ul className="max-h-[60dvh] divide-y divide-line overflow-y-auto">{filtered.slice(0, limit).map((item) => <ActionsContextMenu key={item.id} actions={itemActions(item)}><li data-notification={item.id}><button className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => openItem(item)}><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span><span className="block text-2xs text-muted">{item.category === "failure" ? `${ownerLabel(item.owner)} · ${reminderStateLabels[item.state]}` : "项目协作"} · {countsAsUnread(item) ? "未读" : item.recovered_at ? "已恢复" : "已读"}</span></span>{countsAsUnread(item) && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />}</button></li></ActionsContextMenu>)}</ul> : <p className="p-8 text-center text-sm text-muted">{all ? "暂无通知" : "没有未读通知"}</p>}
+    {filtered.length ? <ul className="max-h-[60dvh] divide-y divide-line overflow-y-auto">{filtered.slice(0, limit).map((item) => <ActionsContextMenu key={item.id} actions={itemActions(item)}><li data-notification={item.id}><button className="flex w-full min-w-0 items-start gap-3 px-4 py-3 text-left hover:bg-panel-soft" onClick={() => openItem(item)}><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || item.task_key}</span><span className="block text-2xs text-muted">{sourceLine(item)} · {countsAsUnread(item) ? "未读" : isSnoozed(item) ? "稍后提醒" : item.recovered_at ? "已恢复" : "已读"}</span></span>{countsAsUnread(item) && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-accent" />}</button></li></ActionsContextMenu>)}</ul> : <p className="p-8 text-center text-sm text-muted">{all ? "暂无通知" : "没有未读通知"}</p>}
     {(filtered.length > limit || reminders.hasMore) && <Button size="sm" variant="ghost" className="w-full" onClick={() => { setLimit((n) => n + 10); if (filtered.length <= limit) reminders.loadMore(); }}>加载更多</Button>}
     <div className="border-t border-line p-2"><Button variant="ghost" size="sm" className="w-full justify-between" onClick={() => { setOpen(false); onNavigate("reminders"); }}>打开提醒中心<ArrowRight className="size-4" /></Button></div>
   </div>;

@@ -20,6 +20,9 @@ const results: { name: string; status: "passed" | "failed"; detail?: string }[] 
 const stdout: string[] = [];
 const stderr: string[] = [];
 
+/** The key the last fixture printed for running its background observation by hand (`FIXTURE_BACKGROUND=on`). */
+let observeKey = "";
+
 async function startFixture(scenario: string, latency = 0, extraEnv: Record<string, string> = {}) {
   const child = spawn("bun", ["scripts/fixture-preview.ts"], {
     cwd: root,
@@ -34,9 +37,42 @@ async function startFixture(scenario: string, latency = 0, extraEnv: Record<stri
     if (Date.now() > deadline || child.exitCode !== null) throw new Error(`fixture_start_failed (exit ${child.exitCode}): ` + (log + stderr.join("")).slice(-600));
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  observeKey = /"observe_key": "([^"]+)"/.exec(log)?.[1] ?? "";
   await fetch(`http://127.0.0.1:${ports.ui}/`).catch(() => {});
   return child;
 }
+
+/** One background observation cycle of the fixture server, now; `skewDays` moves the loop's clock forward first. */
+async function observeNow(skewDays = 0) {
+  const response = await fetch(`http://127.0.0.1:${ports.api}/__fixture/observe${skewDays ? `?skew_days=${skewDays}` : ""}`, { method: "POST", headers: { "x-fixture-key": observeKey } });
+  if (!response.ok) throw new Error(`observe_failed:${response.status}`);
+  return await response.json() as { opened: number; recovered: number; calls: number; errors: Record<string, number> };
+}
+
+/**
+ * A page where notifications are a recording stand-in: it keeps what was shown, counts the times permission was asked
+ * for, and can be made to look hidden and unfocused. Nothing real is shown on the desktop.
+ */
+const notificationMock = `(() => {
+  const shown = [];
+  const state = { permission: "default", requests: 0, hidden: false };
+  class FakeNotification {
+    static get permission() { return state.permission; }
+    static async requestPermission() { state.requests += 1; state.permission = "granted"; return "granted"; }
+    constructor(title, options = {}) { this.title = title; this.options = options; shown.push({ title, body: options.body, tag: options.tag }); }
+    close() {}
+  }
+  window.Notification = FakeNotification;
+  window.__notify = { shown, state };
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (state.hidden ? "hidden" : "visible") });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => state.hidden });
+  document.hasFocus = () => !state.hidden;
+  window.__setHidden = (hidden) => {
+    state.hidden = hidden;
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event(hidden ? "blur" : "focus"));
+  };
+})();`;
 
 async function portsFree() {
   const deadline = Date.now() + 15_000;
@@ -1655,7 +1691,7 @@ try {
 
   // Credential lifecycle: DriveBridge's token runs out in three days, and the token the Gateway is configured with is one its owner refuses.
   await stopFixture(fixture);
-  fixture = await startFixture("rich", 0, { FIXTURE_CREDENTIALS: "lifecycle" });
+  fixture = await startFixture("rich", 0, { FIXTURE_CREDENTIALS: "lifecycle", FIXTURE_BACKGROUND: "on" });
   const lifecycle = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const lifecyclePage = await lifecycle.newPage();
   const lifecycleErrors: string[] = [];
@@ -1712,6 +1748,331 @@ try {
     await expectAccessible(lifecyclePage, "services-credentials@dark");
   }));
   await lifecycle.close();
+
+  // Reminder delivery: the same fixture, whose background observation is run by hand, read by a page with a recording
+  // stand-in for desktop notifications and a clock the checks move forward.
+  const delivery = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  await delivery.addInitScript(notificationMock);
+  const deliveryPage = await delivery.newPage();
+  const deliveryErrors: string[] = [];
+  deliveryPage.on("pageerror", (error) => deliveryErrors.push(error.message));
+  await deliveryPage.clock.install();
+  type Shown = { title: string; body: string; tag: string };
+  const shownNotices = () => deliveryPage.evaluate(() => (window as unknown as { __notify: { shown: Shown[] } }).__notify.shown);
+  const permissionAsked = () => deliveryPage.evaluate(() => (window as unknown as { __notify: { state: { requests: number } } }).__notify.state.requests);
+  const hidePage = (hidden: boolean) => deliveryPage.evaluate((value) => (window as unknown as { __setHidden: (hidden: boolean) => void }).__setHidden(value), hidden);
+  /** A minute and a bit passes in the page: the re-read of reminders runs once. */
+  const aMinute = () => deliveryPage.clock.fastForward(61_000);
+  /** Whether the baseline the page keeps for this scope holds a reminder: it holds what the page has seen or was there when the switch was turned on. */
+  const baselineHas = (id: string) => deliveryPage.evaluate((value) => {
+    const key = Object.keys(localStorage).find((name) => name.startsWith("yeisme.control.desktop-notifications"));
+    return !!key && ((JSON.parse(localStorage.getItem(key) || "{}").baselines || {})["fixture-a"] || []).includes(value);
+  }, id);
+  /** Lets minutes pass, one at a time, until the page's baseline does (or does not) hold the reminder: a read still on its way is waited for, not raced. */
+  const untilBaseline = async (id: string, wanted: boolean) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await aMinute();
+      const stop = Date.now() + 4_000;
+      while (Date.now() < stop) {
+        if (await baselineHas(id) === wanted) return;
+        await deliveryPage.waitForTimeout(150);
+      }
+    }
+    throw new Error(`baseline_${wanted ? "lacks" : "keeps"}:${id.slice(-6)}`);
+  };
+  type Listed = { id: string; state: string; category: string; title: string; snoozed_until: string | null; recovered_at: string | null };
+  const listed = () => deliveryPage.evaluate(async () => (await (await fetch("/api/control-center/v1/notifications?scope=fixture-a&limit=100", { credentials: "same-origin" })).json()).rows as Listed[]);
+  const unreadNow = (rows: Listed[]) => rows.filter((row) => row.state === "unread" && !row.recovered_at && !(row.snoozed_until && Date.parse(row.snoozed_until) > Date.now()));
+  const counts = async () => ({
+    page: Number(await deliveryPage.locator("[data-page=reminders]").getAttribute("data-unread")),
+    nav: Number(await deliveryPage.locator("[data-nav=reminders]").getAttribute("data-badge") || 0),
+    bell: Number(await deliveryPage.locator("[data-attention-count]").getAttribute("data-attention-count") || 0),
+  });
+  const openReminders = async () => {
+    await deliveryPage.goto(`${ui}/#/reminders`, { waitUntil: "domcontentloaded" });
+    await deliveryPage.locator("[data-page=reminders]").waitFor({ timeout: 30_000 });
+    await deliveryPage.locator("[data-reminder]").first().waitFor({ timeout: 30_000 });
+  };
+  const rowMenu = async (row: ReturnType<Page["locator"]>) => { await row.getByRole("button", { name: /^更多操作/ }).click(); };
+  /** Opens one group of reminders and waits until it is the one shown, so no row of the group left behind is read. */
+  const openGroup = async (name: RegExp) => {
+    await deliveryPage.getByRole("tab", { name }).click();
+    await deliveryPage.getByRole("tab", { name, selected: true }).waitFor();
+  };
+
+  /** The reminders that were unread when the switch was turned on: the ones that never notify. */
+  let unreadAtSwitchOn: string[] = [];
+  await check("desktop notifications: permission is asked only by the switch, and each new unread reminder notifies once while the page is hidden", async () => {
+    await login(deliveryPage);
+    await openReminders();
+    if (await permissionAsked() !== 0) throw new Error("permission_asked_on_load");
+    const toggle = deliveryPage.getByRole("switch", { name: "桌面通知" });
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await expect(toggle).toBeEnabled();
+    unreadAtSwitchOn = unreadNow(await listed()).map((row) => row.id);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    if (await permissionAsked() !== 1) throw new Error(`permission_asked:${await permissionAsked()}`);
+    // In view, a minute passes and nothing is shown.
+    await aMinute();
+    if ((await shownNotices()).length) throw new Error("notified_while_in_view");
+    // Out of view, the server's background observation writes a burst of new reminders.
+    const before = new Set((await listed()).map((row) => row.id));
+    await hidePage(true);
+    const cycle = await observeNow();
+    if (cycle.opened < 5) throw new Error(`expected_a_burst:${cycle.opened}`);
+    await aMinute();
+    await deliveryPage.waitForFunction(() => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > 0, undefined, { timeout: 15_000 });
+    await deliveryPage.waitForTimeout(500);
+    const fresh = unreadNow(await listed()).filter((row) => !before.has(row.id));
+    const shown = await shownNotices();
+    const individual = shown.filter((notice) => notice.tag !== "reminders-summary");
+    const summary = shown.filter((notice) => notice.tag === "reminders-summary");
+    // At most three of them, one each; the rest of the burst is one summary that says how many.
+    if (individual.length !== Math.min(3, fresh.length) || new Set(individual.map((notice) => notice.tag)).size !== individual.length) throw new Error(`individual:${individual.length} of ${fresh.length}`);
+    if (fresh.length > 3 ? summary.length !== 1 || !summary[0].body.startsWith(`另有 ${fresh.length - 3} 条新提醒`) : summary.length !== 0) throw new Error(`summary:${JSON.stringify(summary)}`);
+    for (const notice of individual) if (!fresh.some((row) => row.id === notice.tag)) throw new Error(`not_a_new_reminder:${notice.tag}`);
+    // Names and counts only: no reminder's own title, no task text.
+    for (const notice of shown) for (const row of fresh) if (row.title && (notice.body.includes(row.title) || notice.title.includes(row.title))) throw new Error(`title_in_notification:${row.title}`);
+    if (!shown.every((notice) => notice.title === "控制中心提醒" && /共 \d+ 条未读/.test(notice.body))) throw new Error(`notification_shape:${JSON.stringify(shown)}`);
+    // Another minute, or two, shows nothing again.
+    await aMinute();
+    await aMinute();
+    if ((await shownNotices()).length !== shown.length) throw new Error("notified_twice");
+    // One new reminder gives exactly one notification, with the reminder's own tag. DriveBridge's token comes within a day of running out.
+    const known = new Set((await listed()).map((row) => row.id));
+    const next = await observeNow(2.5);
+    if (next.opened !== 1) throw new Error(`expected_one_new_reminder:${next.opened}`);
+    await aMinute();
+    await deliveryPage.waitForFunction((count) => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > count, shown.length, { timeout: 15_000 });
+    const added = (await shownNotices()).slice(shown.length);
+    const newest = (await listed()).filter((row) => !known.has(row.id));
+    if (added.length !== 1 || newest.length !== 1 || added[0].tag !== newest[0].id || !added[0].body.startsWith("DriveBridge · 凭据")) throw new Error(`one_notification:${JSON.stringify(added)} for ${JSON.stringify(newest.map((row) => row.title))}`);
+    await aMinute();
+    if ((await shownNotices()).length !== shown.length + 1) throw new Error("new_reminder_notified_twice");
+    // What arrives while the page is in view is seen there: it does not notify later, when the page is hidden again.
+    await hidePage(false);
+    const seen = await observeNow(2);
+    if (seen.opened !== 1) throw new Error(`expected_one_more_reminder:${seen.opened}`);
+    const arrived = (await listed()).find((row) => row.state === "unread" && !row.recovered_at && /已过期/.test(row.title));
+    if (!arrived) throw new Error("expected_the_expired_reminder");
+    // The page has seen it once it is in the baseline the page keeps; a read still on its way would otherwise land after the page was hidden.
+    await untilBaseline(arrived.id, true);
+    await hidePage(true);
+    await aMinute();
+    await aMinute();
+    const late = (await shownNotices()).slice(shown.length + 1);
+    if (late.length) throw new Error(`notified_for_what_was_in_view:${JSON.stringify(late)}`);
+    await hidePage(false);
+    if (deliveryErrors.length) throw new Error(deliveryErrors.join(" | "));
+  });
+  await check("reminders: a snoozed reminder leaves the count and comes back, an archived one is reopened, and they say where they came from", async () => {
+    await openReminders();
+    await expect(deliveryPage.locator("[data-reminder-kind=credential]").first()).toBeVisible({ timeout: 20_000 });
+    const start = await counts();
+    if (start.page === 0 || start.nav !== start.page || start.bell !== start.page) throw new Error(`counts_disagree:${JSON.stringify(start)}`);
+    // A credential reminder is its own kind: no task version, no per-task mute, snooze choices instead.
+    const credentialRow = deliveryPage.locator("[data-reminder-kind=credential][data-reminder]").first();
+    if (await credentialRow.locator("[data-reminder-version]").count()) throw new Error("credential_shows_task_version");
+    await rowMenu(credentialRow);
+    for (const gone of ["此任务以后都免提醒", /^相同错误码/]) if (await deliveryPage.getByRole("menuitem", { name: gone }).count()) throw new Error(`credential_offers:${gone}`);
+    for (const offered of ["稍后提醒：1 小时后", "稍后提醒：明天上午", "稍后提醒：下周一上午", "归档"]) await deliveryPage.getByRole("menuitem", { name: offered }).waitFor({ timeout: 5_000 });
+    await deliveryPage.keyboard.press("Escape");
+    if (!(await credentialRow.innerText()).includes("凭据")) throw new Error("credential_row_unlabelled");
+    // Snooze it for an hour: the count drops everywhere, and the row moves to the quiet ones.
+    const snoozedId = await credentialRow.getAttribute("data-reminder");
+    await rowMenu(credentialRow);
+    await deliveryPage.getByRole("menuitem", { name: "稍后提醒：1 小时后" }).click();
+    await deliveryPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was - 1, start.page, { timeout: 15_000 });
+    const snoozed = await counts();
+    if (snoozed.nav !== start.page - 1 || snoozed.bell !== start.page - 1) throw new Error(`snooze_not_counted_everywhere:${JSON.stringify(snoozed)}`);
+    await openGroup(/已降噪/);
+    const quiet = deliveryPage.locator(`[data-reminder="${snoozedId}"]`);
+    await expect(quiet).toHaveAttribute("data-snoozed", "true", { timeout: 10_000 });
+    if (!(await quiet.innerText()).includes("稍后提醒")) throw new Error("snooze_not_shown");
+    // Reopened early, it counts again.
+    await rowMenu(quiet);
+    await deliveryPage.getByRole("menuitem", { name: "重新打开" }).click();
+    await deliveryPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was, start.page, { timeout: 15_000 });
+    // Archive one, then reopen it from the archived group with its own button.
+    await openGroup(/新失败/);
+    const archivedRow = deliveryPage.locator("[data-reminder]").first();
+    const archivedId = await archivedRow.getAttribute("data-reminder");
+    await rowMenu(archivedRow);
+    await deliveryPage.getByRole("menuitem", { name: "归档" }).click();
+    await deliveryPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was - 1, start.page, { timeout: 15_000 });
+    await openGroup(/已归档/);
+    const archived = deliveryPage.locator(`[data-reminder="${archivedId}"]`);
+    await archived.waitFor({ timeout: 10_000 }).catch(async (error) => {
+      const rowsHere = await deliveryPage.locator("[data-reminder]").evaluateAll((rows) => rows.map((row) => `${row.getAttribute("data-reminder")?.slice(-6)}:${row.getAttribute("data-reminder-kind")}`));
+      const tabs = await deliveryPage.getByRole("tab").allInnerTexts();
+      await shot(deliveryPage, "reminders-archived-missing");
+      throw new Error(`archived_row_missing:${archivedId?.slice(-6)} rows=${rowsHere.join(",")} tabs=${tabs.join("|").replace(/\s+/g, " ")} url=${deliveryPage.url()} (${String(error).slice(0, 80)})`);
+    });
+    await archived.getByRole("button", { name: "重新打开", exact: true }).click();
+    await archived.waitFor({ state: "detached", timeout: 10_000 });
+    await deliveryPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was, start.page, { timeout: 15_000 });
+    const end = await counts();
+    if (end.nav !== start.page || end.bell !== start.page) throw new Error(`counts_after_reopen:${JSON.stringify(end)}`);
+    // An open-tool run that failed is its own kind too, with the same pieces missing.
+    await openGroup(/新失败/);
+    const operationRow = deliveryPage.locator("[data-reminder-kind=operation][data-reminder]").first();
+    await operationRow.waitFor({ timeout: 10_000 });
+    if (await operationRow.locator("[data-reminder-version]").count() || !(await operationRow.innerText()).includes("工具运行")) throw new Error("operation_row_shape");
+    // The bell names credential reminders by what they are, not as project collaboration.
+    await deliveryPage.getByRole("button", { name: /^需要关注/ }).click();
+    const bellRows = deliveryPage.locator("[data-notification]");
+    await bellRows.first().waitFor({ timeout: 10_000 });
+    const lines = await bellRows.allInnerTexts();
+    if (!lines.some((line) => /· 凭据 · 未读/.test(line))) throw new Error(`bell_labels:${lines.slice(0, 6).join(" // ")}`);
+    if (lines.some((line) => /项目协作/.test(line))) throw new Error(`bell_calls_them_collaboration:${lines.join(" // ")}`);
+    await deliveryPage.keyboard.press("Escape");
+    await shot(deliveryPage, "reminders-delivery");
+    await expectAccessible(deliveryPage, "reminders-delivery");
+    // The same page in the dark theme, with the switch on and the credential pills in view.
+    await inDarkTheme(deliveryPage, async () => {
+      await openReminders();
+      await settled(deliveryPage);
+      await deliveryPage.locator("[data-reminder-kind=credential]").first().waitFor({ timeout: 20_000 });
+      await expectAccessible(deliveryPage, "reminders-delivery@dark");
+    });
+    if (deliveryErrors.length) throw new Error(deliveryErrors.join(" | "));
+  });
+  // The browser clock the checks above moved belongs to this context, not to one page of it: a check that needs the
+  // time to run at the server's pace uses a context of its own. The cross-tab check below uses a second tab of this one.
+  const postVia = (page: Page, route: string, body: unknown = {}) => page.evaluate(async ({ route, body }) => {
+    const csrf = (await (await fetch("/api/control-center/v1/session", { credentials: "same-origin" })).json()).csrf as string;
+    const response = await fetch(`/api/control-center/v1${route}?scope=fixture-a`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) });
+    if (!response.ok) throw new Error(`${route}:${response.status}`);
+  }, { route, body });
+  /** A page that gains focus reads the reminders again at once. */
+  const wakeUp = (page: Page) => page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const unreadOf = async (page: Page) => Number(await page.locator("[data-page=reminders]").getAttribute("data-unread"));
+  const tabCount = async (page: Page, name: RegExp) => Number((await page.getByRole("tab", { name }).innerText()).replace(/\D+/g, ""));
+  const tabOf = async (page: Page, name: RegExp) => { await page.getByRole("tab", { name }).click(); await page.getByRole("tab", { name, selected: true }).waitFor(); };
+
+  const real = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  const realPage = await real.newPage();
+  const realErrors: string[] = [];
+  realPage.on("pageerror", (error) => realErrors.push(error.message));
+  await check("reminders: a snooze that ends on its own moves the row out of the quiet group and into the count again, with no reload and no click", async () => {
+    await login(realPage);
+    await realPage.goto(`${ui}/#/reminders`, { waitUntil: "domcontentloaded" });
+    await realPage.locator("[data-page=reminders]").waitFor({ timeout: 30_000 });
+    const row = realPage.locator("[data-reminder]").first();
+    await row.waitFor({ timeout: 30_000 });
+    const id = (await row.getAttribute("data-reminder"))!;
+    const start = await unreadOf(realPage);
+    const before = { fresh: await tabCount(realPage, /新失败/), quiet: await tabCount(realPage, /已降噪/) };
+    // The page's own sync of the task list hands it fresh rows now and then, which would regroup them by accident; what the
+    // end of a snooze does by itself is what is looked at here, so the sync is held off for the length of the check.
+    const syncRoute = /\/notifications\/sync(\?|$)/;
+    await realPage.route(syncRoute, (route) => route.abort());
+    await tabOf(realPage, /已降噪/);
+    // The menu starts at an hour; the route takes any time ahead, so a few seconds are asked for directly.
+    await postVia(realPage, `/notifications/${encodeURIComponent(id)}/snooze`, { until: new Date(Date.now() + 5_000).toISOString() });
+    await wakeUp(realPage);
+    const quiet = realPage.locator(`[data-reminder="${id}"]`);
+    await expect(quiet).toHaveAttribute("data-snoozed", "true", { timeout: 10_000 });
+    await realPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was - 1, start, { timeout: 10_000 });
+    if (await tabCount(realPage, /已降噪/) !== before.quiet + 1 || await tabCount(realPage, /新失败/) !== before.fresh - 1) throw new Error(`tabs_while_snoozed:${await tabCount(realPage, /新失败/)}/${await tabCount(realPage, /已降噪/)}`);
+    // The snooze runs out. Nothing is clicked and nothing is reloaded: the row leaves the quiet group, the tabs and the count follow.
+    await quiet.waitFor({ state: "detached", timeout: 20_000 });
+    await realPage.waitForFunction((was) => Number(document.querySelector("[data-page=reminders]")?.getAttribute("data-unread")) === was, start, { timeout: 10_000 });
+    if (await tabCount(realPage, /已降噪/) !== before.quiet || await tabCount(realPage, /新失败/) !== before.fresh) throw new Error(`tabs_after_expiry:${await tabCount(realPage, /新失败/)}/${await tabCount(realPage, /已降噪/)}`);
+    await tabOf(realPage, /新失败/);
+    const back = realPage.locator(`[data-reminder="${id}"]`);
+    await back.waitFor({ timeout: 10_000 });
+    if (await back.getAttribute("data-snoozed") !== null || !(await back.innerText()).includes("未查看")) throw new Error(`not_an_ordinary_new_reminder:${(await back.innerText()).replace(/\s+/g, " ")}`);
+    const nav = Number(await realPage.locator("[data-nav=reminders]").getAttribute("data-badge") || 0);
+    const bell = Number(await realPage.locator("[data-attention-count]").getAttribute("data-attention-count") || 0);
+    if (nav !== start || bell !== start) throw new Error(`badge_and_bell_after_expiry:${nav}/${bell} vs ${start}`);
+    await realPage.unroute(syncRoute);
+    if (realErrors.length) throw new Error(realErrors.join(" | "));
+  });
+  await real.close();
+
+  // The same account in a second tab of the delivery context: the switch lives in storage the tabs share.
+  const live = await delivery.newPage();
+  const liveErrors: string[] = [];
+  live.on("pageerror", (error) => liveErrors.push(error.message));
+  await check("desktop notifications: turning the switch off in one tab stops a tab that is out of sight", async () => {
+    await openReminders();
+    // The stand-in forgets its permission with each document, as a real browser would not: grant it again, as it still is.
+    const grant = (page: Page) => page.evaluate(() => (window as unknown as { Notification: { requestPermission: () => Promise<string> } }).Notification.requestPermission());
+    await grant(deliveryPage);
+    await wakeUp(deliveryPage);
+    const toggle = deliveryPage.getByRole("switch", { name: "桌面通知" });
+    await expect(toggle).toHaveAttribute("aria-checked", "true", { timeout: 10_000 });
+    const now = await listed();
+    const candidates = now.filter((row) => unreadAtSwitchOn.includes(row.id) && row.state === "unread" && !row.recovered_at && !(row.snoozed_until && Date.parse(row.snoozed_until) > Date.now()));
+    if (candidates.length < 2) throw new Error(`need_two_old_unread_reminders:${candidates.length}`);
+    const [first, second] = candidates;
+    await live.goto(`${ui}/#/reminders`, { waitUntil: "domcontentloaded" });
+    await live.locator("[data-page=reminders]").waitFor({ timeout: 30_000 });
+    await hidePage(true);
+    const shownBefore = (await shownNotices()).length;
+    // Both are handled while the tab is out of sight; it notices that they are no longer unread.
+    for (const row of [first, second]) await postVia(live, `/notifications/${encodeURIComponent(row.id)}/archive`);
+    await untilBaseline(first.id, false);
+    await untilBaseline(second.id, false);
+    // With the switch on, a reminder that becomes unread again is news: one notification, with its own tag.
+    await postVia(live, `/notifications/${encodeURIComponent(first.id)}/reopen`);
+    await aMinute();
+    await deliveryPage.waitForFunction((count) => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > count, shownBefore, { timeout: 15_000 }).catch(async () => { await aMinute(); await deliveryPage.waitForFunction((count) => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > count, shownBefore, { timeout: 10_000 }); });
+    const added = (await shownNotices()).slice(shownBefore);
+    if (added.length !== 1 || added[0].tag !== first.id) throw new Error(`control_notification:${JSON.stringify(added)}`);
+    // The person turns the switch off in the other tab (where the browser's permission is the same).
+    await grant(live);
+    await wakeUp(live);
+    const liveToggle = live.getByRole("switch", { name: "桌面通知" });
+    await expect(liveToggle).toHaveAttribute("aria-checked", "true", { timeout: 10_000 });
+    await liveToggle.click();
+    await expect(liveToggle).toHaveAttribute("aria-checked", "false");
+    // The tab that is out of sight hears of it, without a reload, and does not notify for what becomes unread afterwards.
+    await expect(toggle).toHaveAttribute("aria-checked", "false", { timeout: 10_000 });
+    await postVia(live, `/notifications/${encodeURIComponent(second.id)}/reopen`);
+    await aMinute();
+    await aMinute();
+    if ((await shownNotices()).length !== shownBefore + 1) throw new Error(`notified_after_the_switch_was_turned_off:${JSON.stringify((await shownNotices()).slice(shownBefore + 1))}`);
+    await hidePage(false);
+    if (deliveryErrors.length || liveErrors.length) throw new Error([...deliveryErrors, ...liveErrors].join(" | "));
+  });
+  await check("the reminders page says what background observation did, in counts", async () => {
+    await openReminders();
+    const line = deliveryPage.locator("[data-observation-line]");
+    await line.waitFor({ timeout: 20_000 });
+    const text = await line.innerText();
+    if (!/每 10 分钟观察一次/.test(text) || !/上次.*读了 \d+ 页，新增 \d+ 条、恢复 \d+ 条/.test(text) || !/下次/.test(text) || !text.includes("发给你")) throw new Error(`observation_line:${text}`);
+    for (const leaked of ["127.0.0.1", "/tmp/", "needs_authorization", "open_tool_", "fx-", "InvalidApiKey"]) if (text.includes(leaked)) throw new Error(`observation_line_leak:${leaked}`);
+  });
+  await check("the work queue shows a refused or expiring credential as one renewal item, in place of the blocked service, and links to the renewal steps", async () => {
+    await deliveryPage.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" });
+    await deliveryPage.locator("#home-work-queue").waitFor({ timeout: 30_000 });
+    // The route: one item per credential that needs attention, and the blocked-service item for the refused Gateway is gone.
+    const queue = await deliveryPage.evaluate(async () => (await (await fetch("/api/control-center/v1/work-queue?scope=fixture-a&limit=100", { credentials: "same-origin" })).json()).items as { kind: string; owner: string; source_ref: string; title: string; state: string }[]);
+    const renewals = queue.filter((item) => item.kind === "credential_renewal").map((item) => `${item.source_ref}:${item.state}`).sort();
+    if (!renewals.includes("open_tool:gateway:rejected") || !renewals.includes("open_tool:drivebridge:expiring") || !renewals.includes("connection:fx-eikona-denied:rejected")) throw new Error(`renewal_items:${renewals.join(",")}`);
+    if (queue.some((item) => item.kind === "service_blocked" && item.owner === "gateway" && item.source_ref === "gateway")) throw new Error("gateway_listed_twice");
+    if (queue.some((item) => item.kind === "service_blocked" && item.source_ref === "fx-eikona-denied")) throw new Error("denied_connection_listed_twice");
+    // The page: they have a tab of their own, and an item opens its panel with both links.
+    await deliveryPage.getByRole("radio", { name: "凭据" }).click();
+    const items = deliveryPage.locator('[data-work-kind="credential_renewal"]');
+    await expect(items.first()).toBeVisible({ timeout: 30_000 });
+    const texts = await items.allInnerTexts();
+    if (!texts.some((text) => text.includes("MCP Gateway · 凭据被拒")) || !texts.some((text) => text.includes("DriveBridge · 即将到期"))) throw new Error(`credential_items:${texts.join(" // ")}`);
+    if ((await deliveryPage.locator("[data-work-kind]").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-work-kind")))).some((kind) => kind !== "credential_renewal")) throw new Error("credential_filter_shows_others");
+    await deliveryPage.locator('[data-work-kind="credential_renewal"]', { hasText: "MCP Gateway · 凭据被拒" }).getByRole("button").first().click();
+    const links = deliveryPage.getByRole("button", { name: "续签方法" });
+    await links.waitFor({ timeout: 10_000 });
+    await deliveryPage.getByRole("button", { name: "查看凭据状态" }).waitFor();
+    await shot(deliveryPage, "home-credential-renewal");
+    await links.click();
+    await deliveryPage.waitForURL(/#\/guide\/connect\?section=guide-renew-gateway/, { timeout: 15_000 });
+    if (deliveryErrors.length) throw new Error(deliveryErrors.join(" | "));
+  });
+  await live.close();
+  await delivery.close();
 } finally {
   await stopFixture(fixture);
   await browser.close();

@@ -11,9 +11,11 @@ import type {
   WorkQueueLaunchContext,
   WorkQueueOwner,
   WorkQueuePreviewState,
+  WorkQueuePriority,
   WorkQueueResponse,
 } from "../src/shared/work-queue";
 import { priorityForWorkItem, sortWorkQueueItems, summarizeWorkQueue } from "../src/shared/work-queue";
+import { credentialStateLabels, isCredentialProblem, renewSection, type CredentialStatus } from "../src/shared/credentials";
 import { dramaStageLabels } from "../src/shared/read-model/drama";
 import type { CoverageState } from "../src/request-visibility";
 import type { CreativeFlowProjection, CreativeFlowStageProjection } from "../src/shared/creative-flow";
@@ -94,7 +96,7 @@ function configuredClientURL(origin: string | undefined, route: "script" | "stor
   return url.href;
 }
 
-function controlLink(label: string, target: "home" | "tasks" | "requests" | "services" | "review", ref?: string) {
+function controlLink(label: string, target: "home" | "tasks" | "requests" | "services" | "review" | "guide", ref?: string) {
   return { kind: "control-center" as const, label, target, ...(ref ? { ref } : {}) };
 }
 
@@ -289,6 +291,63 @@ function itemsFromOpenTool(tool: OpenToolProjection, scope: ScopeBinding): WorkQ
   return items;
 }
 
+/** A credential the owner or tool turns away: the connection or tool item for the same slot says the same, less usefully. */
+/**
+ * The reasons a service_blocked item gives when the credential is the trouble, by what the credential's own row says:
+ * the owner refused it, or the control center could not read it. A blocked item with another reason (the tool is down,
+ * its address is refused) is a separate outage that a credential row does not explain, and it stays.
+ */
+const explainedBy: Record<string, ReadonlySet<string>> = {
+  rejected: new Set(["needs_authorization", "owner_action_denied", "open_tool_unauthenticated", "open_tool_forbidden"]),
+  unreadable: new Set(["credential_unreadable", "open_tool_credential_unreadable"]),
+};
+
+function credentialPriority(row: CredentialStatus): WorkQueuePriority {
+  if (row.state === "unreadable" || row.state === "rejected" || row.state === "expired") return "critical";
+  return row.state === "expiring" && row.stage === "1d" ? "high" : "normal";
+}
+
+/** "MCP Gateway · 凭据被拒", "DriveBridge · 即将到期，还剩 3 天": the slot's label, then what is wrong with it. */
+function credentialTitle(row: CredentialStatus) {
+  return `${row.label} · ${row.state === "expiring" && row.days_left !== undefined ? `${credentialStateLabels.expiring}，还剩 ${row.days_left} 天` : credentialStateLabels[row.state]}`;
+}
+
+/**
+ * One item per credential that needs attention. It is worked out by the caller from observations the queue already has
+ * (`credentialStatuses`), so building it costs no owner request; it links to the credentials on the services page and to
+ * the guide's renewal steps for the tool.
+ */
+function itemFromCredential(row: CredentialStatus, scope: ScopeBinding, now: number): WorkQueueItem {
+  return {
+    work_ref: opaqueRef({ kind: "credential_renewal", owner: row.owner, ref: `${scope.id}:${row.id}` }),
+    kind: "credential_renewal",
+    owner: row.owner as WorkQueueOwner,
+    project: scope.project,
+    scope_id: scope.id,
+    title: credentialTitle(row),
+    state: row.state,
+    native_state: row.reason || row.stage || row.state,
+    priority: credentialPriority(row),
+    attention_reason: row.reason || row.state,
+    observed_at: new Date(now).toISOString(),
+    freshness: "fresh",
+    coverage: "complete",
+    revision: "",
+    source_ref: row.id,
+    credential: {
+      slot: row.id,
+      state: row.state,
+      ...(row.stage ? { stage: row.stage } : {}),
+      ...(row.reason ? { reason: row.reason } : {}),
+      ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+      ...(row.days_left !== undefined ? { days_left: row.days_left } : {}),
+    },
+    safe_links: [controlLink("查看凭据状态", "services", row.id), controlLink("续签方法", "guide", renewSection(row))],
+    allowed_actions: [],
+    preview_state: "not_applicable",
+  };
+}
+
 function sourceCoverage(owner: WorkQueueOwner, state: CoverageState, observedAt: string, reason?: string) {
   return { owner, state, observed_at: observedAt, ...(reason ? { reason } : {}) };
 }
@@ -306,6 +365,11 @@ export interface WorkQueueInput {
   flowSample?: { checked: number; total: number };
   /** Open tools in scope (DriveBridge, MCP Gateway), read by the server. */
   openTools?: OpenToolProjection[];
+  /**
+   * The scope's credential rows, for personal administrators only (the rows `GET /services` carries). Each problem row
+   * becomes a `credential_renewal` item; a refused or unreadable one replaces the `service_blocked` item for its tool.
+   */
+  credentials?: CredentialStatus[];
   clientOrigins?: { muweave?: string };
 }
 
@@ -439,6 +503,19 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     if (item) items.push(item);
   }
   for (const tool of input.openTools || []) items.push(...itemsFromOpenTool(tool, input.scope));
+  const problems = (input.credentials || []).filter((row) => isCredentialProblem(row.state));
+  if (problems.length) {
+    // The slot a service_blocked item reports on: a task connection (its id) or an open tool (its kind as owner and source).
+    const connectionIds = new Set(input.connections.map((connection) => connection.id));
+    const toolKinds = new Set((input.openTools || []).map((tool) => tool.tool));
+    const slotOf = (item: WorkQueueItem) => connectionIds.has(item.source_ref) ? `connection:${item.source_ref}` : toolKinds.has(item.source_ref as never) && item.owner === item.source_ref ? `open_tool:${item.source_ref}` : "";
+    const refused = new Map(problems.filter((row) => explainedBy[row.state]).map((row) => [row.id, explainedBy[row.state]]));
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind === "service_blocked" && refused.get(slotOf(item))?.has(item.attention_reason)) items.splice(index, 1);
+    }
+    for (const row of problems) items.push(itemFromCredential(row, input.scope, now));
+  }
   const flows = [...(input.creativeFlows || []), ...(input.creativeFlow ? [input.creativeFlow] : [])];
   const flowKeys = new Set<string>();
   let gapEmitted = false;

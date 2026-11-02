@@ -19,10 +19,11 @@
   - **收尾（第二轮评审）**：一个接收人写入失败（`reminder_write_failed`）不影响同一范围的其他接收人，下个周期补写；退避与滚动位置只在所有范围的连接都列得出来时才清理已离开配置的连接，某个范围这次列不出来时什么也不丢；状态里同一个范围出现几次只算一次。
   - **配置校验（评审发现：`recipients` 写成字符串会让每个周期失败、状态 503）**：启动时一次性检查 `observation` 块（`enabled` 布尔，`interval_minutes` 5–1440 的数，`open_tools_every` 1–1000 的整数，`recipients` 至多 100 个非空字符串的数组；缺省的可选键不算问题）。有问题的块按问题代码写日志（不写值）并当作未启用；不再把越界的周期悄悄夹到范围内。接收人查找与 `GET /observation/status` 通过同一个不会抛错的读取函数（`server/observation-config.ts`）读配置，任何配置内容都不会让它们 5xx，也不会让 `live-readback` 误判回滚。
   - **开放工具**：DriveBridge、MCP Gateway 每 `open_tools_every` 个周期（默认 3，第一个周期会读）读一次（DriveBridge 每次带凭据的调用都会在它那边留一条审计）；`operations.attention` 里失败或结果未知的运行变成类别 `operation` 的提醒，每个工具每个周期至多 10 条，点开进入 `/services`。
-  - **凭据提醒挂钩**：循环接受一个由“凭据生命周期”提供的事实列表，写成类别 `credential`、键为 `credential:<slot>:<state>:<stage>` 的提醒。本变更不实现凭据状态本身。
+  - **凭据提醒**：循环对每个被观察的范围向“凭据生命周期”（`server/observation-credentials.ts`，用 `credentialStatuses()`）要需要处理的凭据，写成类别 `credential`、键为 `credential:<slot>:<state>:<stage>` 的提醒；不再是问题或进入另一个状态/阶段时，原来那条标为已恢复，同一步以后再出现则重新打开成新的未读提醒。事实只用内存里已有的最新观测算出（`TaskConnections.cached()`、`OpenToolService.credentialProjections()`：每个开放工具里最近一次说得清凭据有没有被接受的读数），不发 owner 请求，不占预算；没有读数（重启后还没读过的连接、读取都没得到回答的连接或工具）的槽位，底下还开着的被拒、读不到、部分被拒提醒原样保留，不知道不等于恢复。
 - **启动**（`server/index.ts`）：仅当 `observation.enabled`、`observation` 块有效且环境变量 `YEISME_CONTROL_BACKGROUND` 不为 `off` 时启动循环（发布候选检查把它设为 `off`）；块无效时写一行日志说明问题代码并当作未启用；收到 SIGTERM / SIGINT 时先 `server.close()` 不再接新连接，再停循环，再退出（最长等 8 秒）。
 - **新路由** `GET /observation/status`：个人会话可读（任意角色），返回是否启用、配置是否有效、是否在运行、周期参数、下一次运行时间、被问范围是否有人接收、当前用户是否是接收人，以及上一个周期的摘要。摘要按范围分开记数（评审发现：全局一份 `last_cycle` 会把别的范围的提醒数、错误码和连接数泄露给只能看一个范围的会话）；响应只含被问范围（`?scope=`，会话没有该范围返回 404）或会话自己所有范围相加的数，不含别的范围的数据。不调用任何 owner，不含地址、路径或密钥。
 - **修复工作队列**：只有失败类别的提醒才会在没有对应任务时变成 `task_failure` / `task_unknown` 工作项。
+- **凭据续签工作项**：`GET /work-queue` 对个人管理员多一种 `credential_renewal` 项，由路由用本次请求已经读到的观测算出（见 `docs/interfaces.md`）。
 - **接缝整理（行为不变）**：
   - `createApp` 拆成 `createControlCenter(config, deps) → { handle, services }`，`createApp` 仍返回 `handle`。
   - `failureOf` 移到 `server/notifications.ts`，成为导出的 `failureFact()`，浏览器同步与后台循环共用。
@@ -36,5 +37,5 @@
 - 默认关闭：没有 `observation` 配置或 `enabled` 不为真时，行为与之前完全一致。
 - 打开后会多出对 owner 的周期性只读调用，上限见上；DriveBridge 的审计行数随 `open_tools_every` 增加而减少。
 - 浏览器同步与后台共用账本：用户在浏览器里确认、归档、免提醒的结果，后台不会改回去。
-- 提醒页与铃铛目前把非失败类别统一标成“项目协作”，`operation` 与 `credential` 的专属标签留给界面部分。
-- 凭据提醒与 `credential_renewal` 工作队列类型留到凭据生命周期完成后（见 tasks.md 末项）。
+- 提醒页与铃铛给 `operation`（“工具运行”）与 `credential`（“凭据”）各自的标签（见 `yeisme-control-center-reminder-delivery-v1`）。
+- 工作队列新增 `credential_renewal` 类型：个人管理员每个需要处理的凭据一项，链接到服务页的凭据与指南的续签小节；被拒或读不到的连接、工具原有的 `service_blocked` 项被它替换。

@@ -23,11 +23,79 @@ export function countsAsUnread(item: { state: string; read_at?: string | null; s
 
 export type ReminderGroup = "new" | "open" | "quiet" | "archived";
 
-export function reminderGroup(item: { state: string; priority: string; recovered_at?: string | null }): ReminderGroup {
+/** True while a reminder is snoozed: it stays unread but quiet until the time has passed. */
+export function isSnoozed(item: { snoozed_until?: string | null }, now = Date.now()) {
+  return !!item.snoozed_until && Date.parse(item.snoozed_until) > now;
+}
+
+export function reminderGroup(item: { state: string; priority: string; recovered_at?: string | null; snoozed_until?: string | null }, now = Date.now()): ReminderGroup {
   if (item.state === "archived") return "archived";
-  if (item.state === "muted" || item.state === "snoozed" || item.recovered_at || item.priority === "history" || item.priority === "low") return "quiet";
+  if (item.state === "muted" || item.state === "snoozed" || isSnoozed(item, now) || item.recovered_at || item.priority === "history" || item.priority === "low") return "quiet";
   if (item.state === "unread" && item.priority === "normal") return "new";
   return "open";
+}
+
+/** A handled or snoozed reminder can be put back among the unread ones. */
+export function canReopen(item: { state: string; snoozed_until?: string | null; recovered_at?: string | null }, now = Date.now()) {
+  return !item.recovered_at && (item.state === "archived" || item.state === "acknowledged" || item.state === "muted" || item.state === "snoozed" || isSnoozed(item, now));
+}
+
+/** Only an unread reminder that has not recovered can be snoozed (the server refuses the rest). */
+export function canSnooze(item: { state: string; recovered_at?: string | null }) {
+  return item.state === "unread" && !item.recovered_at;
+}
+
+/**
+ * Where a reminder comes from. A task failure (the default category) is about one task and has a failure version;
+ * `operation` is a failed run of an open tool, `credential` a credential that needs attention, and the rest
+ * (`generation_batch`, `project_assignment`) are project collaboration.
+ */
+export type ReminderKind = "failure" | "operation" | "credential" | "collaboration";
+
+export function reminderKind(item: { category?: string }): ReminderKind {
+  return !item.category || item.category === "failure" ? "failure" : item.category === "operation" ? "operation" : item.category === "credential" ? "credential" : "collaboration";
+}
+
+export const reminderKindLabels: Record<ReminderKind, string> = {
+  failure: "任务失败",
+  operation: "工具运行",
+  credential: "凭据",
+  collaboration: "项目协作",
+};
+
+/** Failure reminders carry the task's failure version (revision, error code, owner state); the others have no task. */
+export const hasFailureVersion = (item: { category?: string }) => reminderKind(item) === "failure";
+
+/** A state label that tells a snoozed reminder from an unread one. */
+export function reminderStateLabel(item: { state: string; snoozed_until?: string | null }, now = Date.now()) {
+  return isSnoozed(item, now) ? "稍后提醒" : reminderStateLabels[item.state] || item.state;
+}
+
+/** Where a snooze can be chosen to end: an hour from now, tomorrow morning, next Monday morning (local time). */
+export interface SnoozeChoice {
+  id: "hour" | "tomorrow" | "next-week";
+  label: string;
+  /** RFC 3339, in UTC. */
+  until: string;
+}
+
+const morning = 9;
+const snoozeLabels: Record<SnoozeChoice["id"], string> = { hour: "1 小时后", tomorrow: "明天上午", "next-week": "下周一上午" };
+
+/**
+ * When a snooze chosen at `now` ends. Work it out when the choice is made: a time worked out when a menu was drawn is
+ * stale by the time a page that stayed open is used again (an hour that has gone by, a "tomorrow" that is today).
+ */
+export function snoozeUntil(id: SnoozeChoice["id"], now = new Date()): string {
+  if (id === "hour") return new Date(now.getTime() + 3_600_000).toISOString();
+  if (id === "tomorrow") return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, morning, 0, 0, 0).toISOString();
+  // The coming Monday, a full week away when today is Monday.
+  const toMonday = (8 - now.getDay()) % 7 || 7;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + toMonday, morning, 0, 0, 0).toISOString();
+}
+
+export function snoozeChoices(now = new Date()): SnoozeChoice[] {
+  return (Object.keys(snoozeLabels) as SnoozeChoice["id"][]).map((id) => ({ id, label: snoozeLabels[id], until: snoozeUntil(id, now) }));
 }
 
 export const reminderStateLabels: Record<string, string> = {

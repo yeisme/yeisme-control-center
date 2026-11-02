@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useOverlayParams } from "../../app/overlay-history";
-import { Activity, ArrowRight, CircleAlert, CircleHelp, ClipboardCheck, Clock3, Eye, Images, ListTodo, Plug, Route, ScrollText, ServerCog, ShieldQuestion, TriangleAlert, Unplug, Wallet } from "../../icons";
+import { Activity, ArrowRight, CircleAlert, CircleHelp, ClipboardCheck, Clock3, Eye, Images, KeyRound, ListTodo, Plug, Route, ScrollText, ServerCog, ShieldQuestion, TriangleAlert, Unplug, Wallet } from "../../icons";
 import { api, type UsageProjection } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace, type ScopedRead } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
@@ -19,12 +19,13 @@ import type { WorkQueueItem, WorkQueueKind } from "../../shared/work-queue";
 import { matchesWorkQueueFilters } from "../../shared/work-queue";
 import type { TaskInspectorMode } from "../tasks/TaskDetail";
 
-type QueueFilter = "all" | "review_required" | "handoff_ready" | "service_blocked";
+type QueueFilter = "all" | "review_required" | "handoff_ready" | "service_blocked" | "credential_renewal";
 const queueFilters: { id: QueueFilter; label: string }[] = [
   { id: "all", label: "全部" },
   { id: "review_required", label: "待审阅" },
   { id: "handoff_ready", label: "交接" },
   { id: "service_blocked", label: "阻塞" },
+  { id: "credential_renewal", label: "凭据" },
 ];
 const queueLimit = 8;
 const workOverlays = ["work_item"] as const;
@@ -36,6 +37,7 @@ const queueKindIcons: Record<WorkQueueKind, ReactNode> = {
   service_blocked: <Unplug />,
   contract_gap: <Plug />,
   operation_failure: <TriangleAlert />,
+  credential_renewal: <KeyRound />,
 };
 const stateText: Record<string, string> = { success: "text-success", danger: "text-danger", warning: "text-warning", neutral: "text-muted" };
 const sourceDownStatuses = ["forbidden", "unavailable", "unknown", "needs_contract", "login_required"];
@@ -85,7 +87,7 @@ export default function HomePage() {
   const [inspectorMode, setInspectorMode] = useState<TaskInspectorMode>(() => typeof window !== "undefined" && window.localStorage.getItem("yeisme.control.tasks.inspector-mode") === "floating" ? "floating" : "fixed");
 
   const active = useMemo(() => tasks.rows.filter(taskInProgress), [tasks.rows]);
-  const attention = useMemo(() => reminders.rows.filter((item) => countsAsHomeAttention(item)), [reminders.rows]);
+  const attention = useMemo(() => reminders.rows.filter((item) => countsAsHomeAttention(item, reminders.now)), [reminders.rows, reminders.now]);
   const unknown = attention.filter((item) => item.task_state === "unknown").length;
   const results = useMemo(() => collectResults(tasks.rows.filter((task) => !taskIsActive(task))).slice(0, 6), [tasks.rows]);
   const observedCount = useMemo(() => tasks.rows.reduce((sum, task) => sum + task.results.length, 0), [tasks.rows]);
@@ -255,17 +257,17 @@ export default function HomePage() {
 function QueueRow({ item, selected, onSelect }: { item: WorkQueueItem; selected: boolean; onSelect: () => void }) {
   const critical = item.priority === "critical";
   const high = item.priority === "high";
-  return <li>
+  return <li data-work-kind={item.kind}>
     <button type="button" aria-current={selected || undefined} onClick={onSelect} className={cx("group flex w-full items-center gap-3 px-5 py-3 text-left transition-colors hover:bg-panel-soft", selected && "bg-primary-soft/50 hover:bg-primary-soft/60")}>
       <span aria-hidden="true" className={cx("grid size-8 shrink-0 place-items-center rounded-control [&>svg]:size-4", critical ? "bg-danger-soft text-danger" : high ? "bg-warning-soft text-warning" : "bg-panel-sunken text-ink-soft")}>{queueKindIcons[item.kind]}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-body-sm font-medium text-ink">{item.title}</span>
         <span className="block truncate text-2xs text-muted">
           {(critical || high) && <><span className={cx("font-semibold", critical ? "text-danger" : "text-warning")}>{workQueuePriorityLabels[item.priority]}</span> · </>}
-          <span className="font-medium text-ink-soft">{workQueueKindLabels[item.kind]}</span> · {workQueueOwnerLabel(item.owner)} · {item.project || "项目未提供"} · {workQueueReasonLabel(item.attention_reason)} · {formatRelative(item.observed_at)}
+          <span className="font-medium text-ink-soft">{workQueueKindLabels[item.kind]}</span> · {workQueueOwnerLabel(item.owner)} · {item.project || "项目未提供"} · {workQueueReasonLabel(item.attention_reason, item.kind)} · {formatRelative(item.observed_at)}
         </span>
       </span>
-      <WorkStatePill state={item.state} />
+      <WorkStatePill state={item.state} kind={item.kind} />
     </button>
   </li>;
 }

@@ -3,6 +3,7 @@ import { buildWorkQueue, filterAndPageWorkQueue } from "../server/work-queue";
 import type { ScopeBinding, Session } from "../server/contracts";
 import type { TaskSnapshot, TaskConnectionState } from "../src/task-observation";
 import { sortWorkQueueItems, type WorkQueueItem } from "../src/shared/work-queue";
+import type { CredentialStatus } from "../src/shared/credentials";
 
 const scope: ScopeBinding = {
   id: "scope:one",
@@ -276,5 +277,87 @@ describe("work queue: coverage, outages and sampling for episode flows", () => {
     const command = item?.safe_links.find((link) => link.target === "auctra")?.command || "";
     expect(command).toContain("project:auctra-own");
     expect(command).not.toContain("'project:one'");
+  });
+});
+
+describe("work queue: credential renewal", () => {
+  const observedAt = "2026-11-01T12:00:00.000Z";
+  const now = Date.parse(observedAt);
+  const credential = (over: Partial<CredentialStatus>): CredentialStatus => ({ id: "open_tool:gateway", owner: "gateway", label: "MCP Gateway", state: "rejected", reason: "unauthenticated", shared_with: [], ...over });
+  const gatewayDown = { tool: "gateway", label: "MCP Gateway", state: "forbidden", reason: "open_tool_unauthenticated", observed_at: observedAt, freshness: "fresh", coverage: { state: "forbidden" }, checks: [], backends: [], operations: { attention: [] } } as never;
+  const refusedConnection = connection({ id: "eikona-main", owner: "eikona", label: "Eikona 主库", state: "needs_authorization", observed_at: observedAt, runtime: { state: "needs_authorization", checked_at: observedAt, last_success_at: null, transport: "verified", authorization: "denied", contract: "unknown", task_families: [], content: "not_requested", reason: "needs_authorization" } });
+  const queue = (credentials: CredentialStatus[], extra: Partial<Parameters<typeof buildWorkQueue>[0]> = {}) => buildWorkQueue({ scope, session, tasks: [], connections: [], notifications: [], credentials, ...extra }, now);
+  const kinds = (response: ReturnType<typeof queue>) => response.items.map((item) => `${item.kind}:${item.source_ref}`);
+
+  it("adds one item per credential that needs attention, linked to the credentials and the renewal steps of its tool", () => {
+    const response = queue([
+      credential({}),
+      credential({ id: "open_tool:drivebridge", owner: "drivebridge", label: "DriveBridge", state: "expiring", stage: "1d", reason: undefined, days_left: 1, expires_at: "2026-11-02T08:00:00.000Z" }),
+      credential({ id: "connection:eikona-main", owner: "eikona", label: "Eikona 主库", state: "limited", reason: "content_denied" }),
+      credential({ id: "provider:sonora", owner: "sonora", label: "Sonora 生成", state: "expired", reason: undefined }),
+      // Nothing to do about these.
+      credential({ id: "connection:b", state: "ok", reason: undefined }),
+      credential({ id: "connection:c", state: "unknown_expiry", reason: undefined }),
+    ]);
+    expect(kinds(response).sort()).toEqual(["credential_renewal:connection:eikona-main", "credential_renewal:open_tool:drivebridge", "credential_renewal:open_tool:gateway", "credential_renewal:provider:sonora"]);
+    const gateway = response.items.find((item) => item.source_ref === "open_tool:gateway")!;
+    expect(gateway).toMatchObject({ title: "MCP Gateway · 凭据被拒", state: "rejected", priority: "critical", owner: "gateway", attention_reason: "unauthenticated", preview_state: "not_applicable", allowed_actions: [], credential: { slot: "open_tool:gateway", state: "rejected", reason: "unauthenticated" } });
+    expect(gateway.safe_links).toEqual([
+      { kind: "control-center", label: "查看凭据状态", target: "services", ref: "open_tool:gateway" },
+      { kind: "control-center", label: "续签方法", target: "guide", ref: "guide-renew-gateway" },
+    ]);
+    // A tool without a guide section of its own points at the general one.
+    expect(response.items.find((item) => item.source_ref === "provider:sonora")!.safe_links[1]).toMatchObject({ target: "guide", ref: "guide-renew" });
+    const drive = response.items.find((item) => item.source_ref === "open_tool:drivebridge")!;
+    expect(drive).toMatchObject({ title: "DriveBridge · 即将到期，还剩 1 天", state: "expiring", priority: "high", credential: { stage: "1d", days_left: 1, expires_at: "2026-11-02T08:00:00.000Z" } });
+    expect(response.items.find((item) => item.source_ref === "connection:eikona-main")!.priority).toBe("normal");
+    // A key the same on every read, whatever state the credential is in, so an open Inspector stays open.
+    expect(queue([credential({ state: "expired", reason: undefined })]).items[0].work_ref).toBe(gateway.work_ref);
+  });
+
+  const connectionRow = (over: Partial<CredentialStatus>) => credential({ id: "connection:eikona-main", owner: "eikona", label: "Eikona 主库", ...over });
+
+  it("replaces the service_blocked item of a refused or unreadable connection or tool, and only those", () => {
+    // Without the credential rows the same facts make the old items.
+    const plain = queue([], { connections: [refusedConnection], openTools: [gatewayDown] });
+    expect(kinds(plain).sort()).toEqual(["service_blocked:eikona-main", "service_blocked:gateway"]);
+    const refused = queue([credential({}), connectionRow({ state: "rejected", reason: "owner_denied" })], { connections: [refusedConnection], openTools: [gatewayDown] });
+    expect(kinds(refused).sort()).toEqual(["credential_renewal:connection:eikona-main", "credential_renewal:open_tool:gateway"]);
+    // An expiring or limited credential does not explain why the tool is blocked, so both items stay.
+    const expiring = queue([credential({ state: "expiring", stage: "7d", reason: undefined, days_left: 6 })], { openTools: [gatewayDown] });
+    expect(kinds(expiring).sort()).toEqual(["credential_renewal:open_tool:gateway", "service_blocked:gateway"]);
+    // A different tool's item is not touched, nor are a backend of this one or a contract gap.
+    const backends = { ...(gatewayDown as object), backends: [{ id: "b1", enabled: true, state: "down", native_state: "down", checked_at: observedAt }] } as never;
+    expect(kinds(queue([credential({})], { openTools: [backends] })).sort()).toEqual(["credential_renewal:open_tool:gateway", "service_blocked:gateway:b1"]);
+    expect(kinds(queue([credential({ id: "open_tool:drivebridge", owner: "drivebridge" })], { openTools: [gatewayDown] })).sort()).toEqual(["credential_renewal:open_tool:drivebridge", "service_blocked:gateway"]);
+  });
+
+  it("keeps the blocked item whose own reason the credential row does not explain", () => {
+    const unreadableConnection = connection({ id: "eikona-main", owner: "eikona", label: "Eikona 主库", state: "credential_unreadable", observed_at: observedAt, runtime: { state: "credential_unreadable", checked_at: observedAt, last_success_at: null, transport: "unknown", authorization: "unknown", contract: "unknown", task_families: [], content: "not_requested", reason: "credential_unreadable" } });
+    const gatewayUnreadable = { ...(gatewayDown as object), reason: "open_tool_credential_unreadable" } as never;
+    const gatewayEndpoint = { ...(gatewayDown as object), state: "unavailable", reason: "open_tool_endpoint_denied", coverage: { state: "unavailable" } } as never;
+    const gatewayUnavailable = { ...(gatewayDown as object), state: "unavailable", reason: "open_tool_unavailable", coverage: { state: "unavailable" } } as never;
+    const fileOnly = { state: "unreadable", reason: "permissions" } as const;
+    // The owner refused the credential, and the file is also not private: two facts, and the file alone does not explain the refusal.
+    expect(kinds(queue([connectionRow(fileOnly)], { connections: [refusedConnection] })).sort()).toEqual(["credential_renewal:connection:eikona-main", "service_blocked:eikona-main"]);
+    // A tool whose address is refused is blocked for that, not for the credential.
+    expect(kinds(queue([credential(fileOnly)], { openTools: [gatewayEndpoint] })).sort()).toEqual(["credential_renewal:open_tool:gateway", "service_blocked:gateway"]);
+    // A refusal seen before the tool went away does not explain that it is down now.
+    expect(kinds(queue([credential({})], { openTools: [gatewayUnavailable] })).sort()).toEqual(["credential_renewal:open_tool:gateway", "service_blocked:gateway"]);
+    // The credential could not be read, and the blocked item says exactly that: one item.
+    expect(kinds(queue([connectionRow({ state: "unreadable", reason: "read_failed" })], { connections: [unreadableConnection] }))).toEqual(["credential_renewal:connection:eikona-main"]);
+    expect(kinds(queue([credential({ state: "unreadable", reason: "permissions" })], { openTools: [gatewayUnreadable] }))).toEqual(["credential_renewal:open_tool:gateway"]);
+    // A refusal by the tool itself (a 403) is the credential's too.
+    expect(kinds(queue([credential({ reason: "forbidden" })], { openTools: [{ ...(gatewayDown as object), reason: "open_tool_forbidden" } as never] }))).toEqual(["credential_renewal:open_tool:gateway"]);
+  });
+
+  it("counts a refused, unreadable or expired credential as blocking, and an expiring one as not", () => {
+    const counts = (state: CredentialStatus["state"]) => queue([credential({ state, reason: undefined })]).counts.blocked;
+    expect([counts("rejected"), counts("unreadable"), counts("expired"), counts("expiring"), counts("limited")]).toEqual([1, 1, 1, 0, 0]);
+  });
+
+  it("is built from the rows it is given and asks nobody: no credential rows, no credential items", () => {
+    expect(queue([]).items).toEqual([]);
+    expect(queue(undefined as never).items).toEqual([]);
   });
 });

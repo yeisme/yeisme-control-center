@@ -260,6 +260,37 @@ try {
       await stopServer(off.child);
     }
   });
+
+  // The credential wiring in server/index.ts, in the real process: the first cycle is a minute (and up to 15 s) after
+  // the start, so this is the one check here that waits for it.
+  await check("background observation reminds about a credential that is running out, in the real process, with no owner to call", async () => {
+    const base = JSON.parse(await fs.readFile(configRef, "utf8"));
+    const key = join(temp, "boot-owner.key");
+    await writeFile(key, "boot-owner-key\n", { mode: 0o600 });
+    const config = join(temp, "config-credentials.json");
+    // Nothing listens at the connection's endpoint: the cycle can only find out what the file, the record and the config say.
+    await writeFile(config, JSON.stringify({
+      ...base,
+      observation: { enabled: true, interval_minutes: 5 },
+      connections: [{ id: "boot-eikona", owner: "eikona", instance_id: "boot", label: "Boot Eikona", environment: "boot", endpoint: "http://127.0.0.1:9/mcp", credential_ref: key, credential_expires_at: new Date(Date.now() + 3 * 86_400_000).toISOString(), project: "boot-project", enabled: true, allow_private_http: true }],
+      principals: [{ ...base.principals[0], scopes: [{ ...base.principals[0].scopes[0], connection_ids: ["boot-eikona"] }] }],
+    }, null, 2) + "\n", { mode: 0o600 });
+    const running = await startServer({ config });
+    try {
+      const reminders = async () => (await request("/api/control-center/v1/notifications?scope=boot-scope", { headers: { Cookie: cookie } })).json as { rows: { category: string; title: string; failure_fingerprint: string; session_id: string; target_path: string }[] };
+      const until = Date.now() + 110_000;
+      let found: Awaited<ReturnType<typeof reminders>>["rows"] = [];
+      while (Date.now() < until && !(found = (await reminders()).rows.filter((row) => row.category === "credential")).length) await new Promise((resolve) => setTimeout(resolve, 1000));
+      assert.equal(found.length, 1, "no credential reminder after the first cycle");
+      assert.deepEqual([found[0].title, found[0].failure_fingerprint, found[0].session_id, found[0].target_path], ["Boot Eikona · 即将到期（7 天内）", "credential:connection:boot-eikona:expiring:7d", "background", "/services"]);
+      const { json } = await request("/api/control-center/v1/observation/status?scope=boot-scope", { headers: { Cookie: cookie } });
+      const cycle = json!.last_cycle as { reminders_opened: number; errors: Record<string, number> };
+      assert.equal(cycle.reminders_opened, 1);
+      assert.equal(running.output().includes(key), false, "the log must not name the credential file");
+    } finally {
+      await stopServer(running.child);
+    }
+  });
 } catch (error) {
   checks.push({ name: "boot harness", status: "failed", error: (error as Error).message });
   if (first) await stopServer(first.child).catch(() => {});

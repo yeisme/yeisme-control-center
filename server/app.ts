@@ -18,7 +18,7 @@ import { RunStore } from "./db/run-store";
 import { ActionService, type PreviewRecord } from "./actions";
 import type { ActionConfirmRequest, ActionPreviewRequest, ActionReceipt } from "../src/shared/action-contract";
 import { createMemoryDB, type ControlDB } from "./db/client";
-import { NotificationStore, attentionStates, countsAsUnread, failureFact } from "./notifications";
+import { NotificationStore, attentionStates, countsAsUnread, failureFact, snoozeDeadline } from "./notifications";
 import { controlStateOf, taskSigningKey, type ControlState } from "./db/control-state";
 import { rekeyNotifications } from "./db/notification-rekey";
 import { ToolCatalogService } from "./tool-catalog";
@@ -35,6 +35,7 @@ import { CollaborationService, identityOf } from "./collaboration";
 import { isCollaborationAction, type DirectoryQuery, type GenerationBatch } from "../src/shared/collaboration";
 import { buildWorkQueue, filterAndPageWorkQueue } from "./work-queue";
 import { OpenToolService } from "./open-tools/service";
+import { credentialStatuses, isPersonalAdmin } from "./credentials";
 import { workQueueKinds } from "../src/shared/work-queue";
 import { DramaService, dramaLimits, validDramaRef } from "./drama";
 import { collectionSyncLimits, syncCollection } from "./auctra-sync";
@@ -808,7 +809,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           auth.csrf(r, session);
           return json({ ...notifications.removeMuteRule(decodeURIComponent(ruleMatch[1]), reminderScopes(), subject), task_states_changed: 0 });
         }
-        const one = path.match(/^\/notifications\/([^/]+)\/(acknowledge|mute|archive|reopen)$/);
+        const one = path.match(/^\/notifications\/([^/]+)\/(acknowledge|mute|archive|reopen|snooze)$/);
         if (one && r.method === "POST") {
           auth.csrf(r, session);
           const id = decodeURIComponent(one[1]);
@@ -825,6 +826,16 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
               else if (body?.scope && body.scope !== "fingerprint") throw new AuthError("invalid_request", 400);
             }
             return json({ ...notifications.mute(id, owner, session.id, subject, undefined, muteScope), task_states_changed: 0 });
+          }
+          if (action === "snooze") {
+            // `until` is an absolute time, at most 30 days ahead; the reminder stays unread but quiet until then.
+            const raw = await r.text();
+            if (raw.length > 256) throw new AuthError("invalid_request", 400);
+            let body: { until?: unknown };
+            try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
+            if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => key !== "until")) throw new AuthError("invalid_request", 400);
+            const snoozed = notifications.snooze(id, owner, session.id, subject, snoozeDeadline(body.until));
+            return json({ notification: snoozed, task_state: snoozed.task_state, task_states_changed: 0, owner_writes: 0 });
           }
           const updated = action === "acknowledge"
             ? notifications.acknowledge(id, owner, session.id, subject)
@@ -1159,6 +1170,8 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           tasks: taskRows,
           connections,
           notifications: notifications.list(scope.id, session.id, subject),
+          // The same rows the services page gives administrators, from the connection and tool readings just taken above.
+          credentials: isPersonalAdmin(config, session) ? credentialStatuses(config, scope, { connections, scopeConnections: connectionCatalog.inScope(scope), openTools: openToolProjections }) : [],
           creativeFlows: creativeFlow.flows,
           flowSample: { checked: creativeFlow.checked, total: creativeFlow.total },
           openTools: openToolProjections,
