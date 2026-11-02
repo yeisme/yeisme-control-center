@@ -7,7 +7,7 @@
 - [x] 3.1 FRONTEND：剧集页原因说明、查看连接方法、搜索直接打开、最近打开、任务引用按最近选取、内联同步与回执、“未连接”状态。 | evidence: browser-journey new checks passed; fixture probe screenshots 1440/390
 - [x] 3.2 FRONTEND：“服务与连接” Auctra 面板连接状态、上次同步、禁用同步与管理员连接步骤、`?focus=auctra`。 | evidence: browser-journey "an administrator gets from the board to the Auctra connection steps in one step"
 - [x] 4.1 文档：`docs/creative-flow-integration.md` 剧集来源、同步、连接 Auctra。
-- [ ] 5.1 真实范围连接 Auctra 后复验全部剧集（需要管理员签发 Auctra 密钥、部署 Auctra 服务并运行登记命令）。
+- [x] 5.1 真实范围连接 Auctra 后复验全部剧集（需要管理员签发 Auctra 密钥、部署 Auctra 服务并运行登记命令）。2026-11-02：为一部真实作品起了 Auctra 服务，签发 service-collector 与 service-consumer 两把密钥，`personal-config auctra … --private-http` 写入真实配置并随发布生效；用真实配置跑 `verify-real-owner-reads`：收集同步 24 条（8 个剧本单元）、看板 8 集全部读到阶段（剧本已采纳，其余三个 Auctra 阶段缺失，Scaena 拆解待补齐接口）。
 - [ ] 5.2 Auctra 侧：导演计划与分镜按项目级计数器的末尾数字匹配集（归 Auctra 的 OpenSpec）。
 
 ## 验证命令
