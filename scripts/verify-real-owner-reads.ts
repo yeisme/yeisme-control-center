@@ -161,9 +161,17 @@ try {
       throw new Error(`owner_read_${owner}_task_detail_or_events_failed:${detail.response.status}/${events.response.status}:${detail.body?.error || ""}/${events.body?.error || ""}:key=${row.task_key.length}:${row.task_key.split(".").length}:connection=${row.connection_id || ""}`);
     let artifactAccess: string = "no_artifact";
     const artifact = Array.isArray(row.results) ? row.results.find((candidate: any) => candidate && typeof candidate.ref === "string") : undefined;
-    const canPreview = Array.isArray(row.allowed_actions) && row.allowed_actions.some((action: any) => action.action === "preview" && action.enabled === true);
-    if (artifact && canPreview && csrf) {
-      const grant = await request(`${taskBase}/artifacts/${encodeURIComponent(artifact.ref)}/access?scope=${encodeURIComponent(scope)}`, {
+    const previewable = (candidate: any) => Array.isArray(candidate?.results) && candidate.results.some((item: any) => item && typeof item.ref === "string")
+      && Array.isArray(candidate.allowed_actions) && candidate.allowed_actions.some((action: any) => action.action === "preview" && action.enabled === true);
+    // Owners may refuse content for old results (Sonora answers "content unavailable" for September runs), so try the
+    // newest few previewable rows and keep the first grant, instead of judging media access by whichever row is listed first.
+    const candidates = [...activeRows, ...historyRows]
+      .filter((candidate: any) => candidate?.locator?.owner === owner && typeof candidate.task_key === "string" && previewable(candidate))
+      .sort((a: any, b: any) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+      .slice(0, 3);
+    for (const candidate of csrf ? candidates : []) {
+      const result = candidate.results.find((item: any) => item && typeof item.ref === "string");
+      const grant = await request(`/api/control-center/v1/tasks/${encodeURIComponent(candidate.task_key)}/artifacts/${encodeURIComponent(result.ref)}/access?scope=${encodeURIComponent(scope)}`, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json", "X-CSRF-Token": csrf },
         body: JSON.stringify({ purpose: "preview" }),
@@ -171,8 +179,9 @@ try {
       artifactAccess = `${grant.response.status}:${grant.body?.error || "ok"}`;
       if (![200, 403, 404, 410, 422, 503].includes(grant.response.status))
         throw new Error(`owner_read_${owner}_artifact_access_failed:${artifactAccess}`);
+      if (grant.response.status === 200) break;
     }
-    taskChecks.push({ owner, detail: detail.response.status, events: events.response.status, artifact_access: artifactAccess, has_results: Boolean(artifact) });
+    taskChecks.push({ owner, detail: detail.response.status, events: events.response.status, artifact_access: artifactAccess, has_results: Boolean(artifact), previewable_tried: Math.min(candidates.length, 3) });
   }
   const providerStates = Object.fromEntries((capabilities.body?.capabilities || []).map((item: any) => [item.owner, {
     state: item.state,
