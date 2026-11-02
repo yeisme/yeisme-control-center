@@ -2,18 +2,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, BookOpen, CircleAlert, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Unplug } from "../icons";
 import { useWorkspace } from "./workspace";
 import { errorCode } from "../shared/api/control-center-client";
+import { loginErrorText } from "./login-errors";
 import { BootSplash, hasBootSplash } from "./boot-splash";
 import { publicGuideFromApp } from "../pages/guide/guide-location";
 import { Button, Input, cx } from "../components/ui";
-
-const loginErrors: Record<string, string> = {
-  invalid_credentials: "用户名或凭据不正确。",
-  login_rate_limited: "尝试次数过多，请 15 分钟后再试。",
-  personal_login_unavailable: "当前服务未开启个人登录，或访问地址与服务配置的来源不一致。",
-  origin_denied: "访问地址与服务配置的来源不一致。",
-  session_capacity: "会话数量已达上限，请稍后再试。",
-  invalid_login_request: "登录请求格式不正确。",
-};
 
 function AuthFrame({ children }: { children: React.ReactNode }) {
   return <div className="relative grid min-h-dvh place-items-center overflow-hidden bg-canvas px-4 py-10">
@@ -52,7 +44,7 @@ export function LoginScreen() {
       setSecret("");
     } catch (failure) {
       const code = errorCode(failure);
-      setError(loginErrors[code] || `登录失败（${code}），请检查服务连接。`);
+      setError(loginErrorText(code));
     } finally {
       setPending(false);
     }
@@ -103,12 +95,14 @@ export function AuthLoading() {
 export function AuthProblem({ kind }: { kind: "forbidden" | "offline" }) {
   const { phaseCode } = useWorkspace();
   const forbidden = kind === "forbidden";
+  // The session is fine but the server refuses what the page sends (see the stale-token handling in the workspace).
+  const refusedWrites = forbidden && phaseCode === "csrf_denied";
   return <AuthFrame>
     <Brand />
     <div className="rounded-[18px] border border-line bg-panel p-6 shadow-float">
       <span className={cx("grid size-10 place-items-center rounded-full", forbidden ? "bg-danger-soft text-danger" : "bg-warning-soft text-warning")}>{forbidden ? <LockKeyhole className="size-5" /> : <Unplug className="size-5" />}</span>
-      <h1 className="mt-4 text-lg font-semibold">{forbidden ? "当前身份无权访问" : "控制中心服务暂不可达"}</h1>
-      <p className="mt-1.5 text-[13px] text-muted">{forbidden ? "该身份没有绑定任何授权范围（identity_not_bound），请联系管理员或切换账号。" : "无法读取会话。请检查内网服务是否运行，稍后重试。"}</p>
+      <h1 className="mt-4 text-lg font-semibold">{refusedWrites ? "服务端拒绝了本页发出的请求" : forbidden ? "当前身份无权访问" : "控制中心服务暂不可达"}</h1>
+      <p className="mt-1.5 text-[13px] text-muted">{refusedWrites ? "登录状态本身没有问题，但服务端不接受页面的写请求。常见原因是反向代理去掉了 Origin 请求头，或访问地址与服务配置的来源不一致。请检查代理与访问地址后重新检查。" : forbidden ? "该身份没有绑定任何授权范围（identity_not_bound），请联系管理员或切换账号。" : "无法读取会话。请检查内网服务是否运行，稍后重试。"}</p>
       {phaseCode && <p className="mt-2 font-mono text-2xs text-faint">{phaseCode}</p>}
       <Button className="mt-5" icon={<RefreshCw className="size-4" />} onClick={() => window.location.reload()}>重新检查</Button>
     </div>

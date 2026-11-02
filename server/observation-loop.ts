@@ -110,6 +110,8 @@ const emptyScope = (): ScopeCycle => ({ calls: 0, pages_read: 0, pages_skipped: 
 /** The part of the control center the loop needs; `ControlServices` in server/app.ts provides it. */
 export interface ObservationServices {
   config: ServerConfig;
+  /** Takes the account list from the configuration file when it changed; recipients are read from that list. */
+  auth?: { refreshPersonalUsers(): void };
   tasks: TaskConnections;
   openTools: OpenToolService;
   notifications: NotificationStore;
@@ -309,7 +311,9 @@ export class ObservationLoop {
   }
 
   private targets(): Target[] {
-    const { config } = this.services;
+    const { config, auth } = this.services;
+    // Accounts added or revoked with personal-config count from this cycle on, with no request needed to notice them.
+    try { auth?.refreshPersonalUsers(); } catch { /* the accounts already in memory are used */ }
     return baseScopes(config).flatMap((scope) => {
       const recipients = reminderRecipients(config, scope.id);
       return recipients.length ? [{ scope, recipients }] : [];

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import { and, desc, eq, exists, inArray, not, sql } from "drizzle-orm";
 import type {
   ProviderRunProjection,
   UsageEventProjection,
@@ -192,11 +192,20 @@ export class RunStore {
       .run();
   }
 
-  usageRows(projectRef: string): UsageEventProjection[] {
+  /**
+   * The usage of the runs one scope made, newest first. A usage row names the owner's project, which is not the scope's own
+   * `project` label (personal-config scopes call theirs "personal"), and two scopes may bind one owner project or label
+   * theirs alike. So a row belongs to a scope through its run: the run with the same owner and source reference.
+   */
+  usageRows(scopeId: string): UsageEventProjection[] {
+    const madeHere = this.db
+      .select({ one: sql`1` })
+      .from(providerRuns)
+      .where(and(eq(providerRuns.owner, usageEvents.owner), eq(providerRuns.sourceRef, usageEvents.sourceRef), eq(providerRuns.scopeId, scopeId)));
     return this.db
       .select()
       .from(usageEvents)
-      .where(eq(usageEvents.projectRef, projectRef))
+      .where(exists(madeHere))
       .orderBy(desc(usageEvents.createdAt))
       .all()
       .map(toUsage);

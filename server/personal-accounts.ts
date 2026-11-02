@@ -1,5 +1,6 @@
 import type { ScopeBinding, ServerConfig } from "./contracts";
 import { observationSettings } from "./observation-config";
+import { enabledUsers } from "./personal-users";
 import type { ControlCenterRole } from "../src/service-directory";
 
 /** Issuer of every personal-mode session. The reminder ledger keys a recipient as `issuer|subject`. */
@@ -26,8 +27,8 @@ export function personalAccounts(config: ServerConfig): PersonalAccount[] {
   if (config.auth_mode !== "personal" || !personal) return [];
   const accounts: PersonalAccount[] = [];
   const names = new Set<string>();
-  for (const user of personal.users || []) {
-    if (user.enabled === false || names.has(user.username)) continue;
+  // The shared rule: an acceptable `enabled` flag and a username listed once. A repeated name disables every entry of it.
+  for (const user of enabledUsers(personal.users)) {
     names.add(user.username);
     accounts.push({ identity: `${personalIssuer}|${user.username}`, username: user.username, role: user.role === "admin" ? "admin" : "viewer", scope_ids: user.scope_ids || [], legacy: false });
   }

@@ -4,6 +4,7 @@ import { AuthError, type SessionAuth } from "./auth";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { ControlDB } from "./db/client";
 import { ConnectionCatalog } from "./connection-catalog";
+import { enabledUsers } from "./personal-users";
 import { collaborationOrganizations as organizations, collaborationMembers as members, collaborationTeams as teams, collaborationProjects as projects, collaborationFolders as folders, collaborationItems as items, collaborationBatches as batches, projectMetadata } from "./db/schema";
 import { maxProjectBindings, type BindingOption, type CollaborationAction, type CollaborationMember, type CollaborationOrganization, type CollaborationTeam, type DirectoryPage, type DirectoryQuery, type GenerationBatch, type GenerationBatchItem, type ProjectBinding, type ProjectFolder, type ProjectGrant, type ProjectItem, type ProjectRole, type SharedProject } from "../src/shared/collaboration";
 import type { TaskSnapshot } from "../src/task-observation";
@@ -55,7 +56,7 @@ export class CollaborationService {
   private knownPrincipals() {
     const local = this.config.personal;
     const all = this.config.principals.flatMap((p) => p.scopes);
-    return [...this.config.principals, ...(local ? [{ issuer: "yeisme:personal", subject: local.username || "owner", name: local.name, role: local.role, scopes: all.filter((s) => local.scope_ids.includes(s.id)) }, ...(local.users || []).filter((u) => u.enabled !== false).map((u) => ({ issuer: "yeisme:personal", subject: u.username, name: u.name, role: u.role, scopes: all.filter((s) => u.scope_ids.includes(s.id)) }))] : [])];
+    return [...this.config.principals, ...(local ? [{ issuer: "yeisme:personal", subject: local.username || "owner", name: local.name, role: local.role, scopes: all.filter((s) => local.scope_ids.includes(s.id)) }, ...enabledUsers(local.users).map((u) => ({ issuer: "yeisme:personal", subject: u.username, name: u.name, role: u.role, scopes: all.filter((s) => u.scope_ids.includes(s.id)) }))] : [])];
   }
   private role(session: Session, row: typeof projects.$inferSelect): ProjectRole {
     const membership = this.member(session, row.organizationId);

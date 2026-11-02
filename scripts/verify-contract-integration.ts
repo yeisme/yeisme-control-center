@@ -144,6 +144,9 @@ services.observation = loop;
 
 let cookie = "";
 let csrf = "";
+// The session's epoch as the first read reports it. It starts above every earlier session's (so it is a time-sized number,
+// not 1), stays put while nothing changes, and rises by one for each bump.
+let epoch = 0;
 const call = async (pathname: string, method = "GET", body?: unknown, withAuth = true) => {
   const headers: Record<string, string> = { "Content-Type": "application/json", Origin: origin };
   if (withAuth && cookie) headers.Cookie = cookie;
@@ -180,7 +183,8 @@ try {
 
   await check("session exposes epoch, csrf and server-derived scope", async () => {
     const { json } = await call("/api/control-center/v1/session");
-    assert.equal(json.epoch, 1);
+    assert.ok(Number.isSafeInteger(json.epoch) && json.epoch >= 1, `epoch ${json.epoch}`);
+    epoch = json.epoch;
     assert.equal(json.role, "admin");
     assert.equal(json.scopes[0].id, scopeIds[0]);
     assert.equal(json.scopes[0].owners.length, 5);
@@ -213,7 +217,7 @@ try {
 
   await check("task list returns owner rows with epoch echo", async () => {
     const { json } = await call(`/api/control-center/v1/tasks?mode=active&scope=${scopeIds[0]}`);
-    assert.equal(json.epoch, 1);
+    assert.equal(json.epoch, epoch);
     const refs = json.rows.map((row: { locator: { task_ref: string } }) => row.locator.task_ref);
     assert.ok(refs.includes("run-2410-active"));
     assert.ok(json.connections.some((c: { state: string }) => c.state === "ready"));
@@ -228,7 +232,7 @@ try {
     const { json } = await call(`/api/control-center/v1/tasks/${encodeURIComponent(taskKey!)}?scope=${scopeIds[0]}`);
     assert.equal(json.locator.task_ref, "run-2398-review");
     assert.ok(json.revision);
-    assert.equal(json.epoch, 1);
+    assert.equal(json.epoch, epoch);
   });
 
   await check("task events page with an explicit gap flag", async () => {
@@ -518,7 +522,7 @@ try {
     assert.ok(json.last_cycle.pages_read > 0 && json.last_cycle.pages_read <= json.last_cycle.calls, `pages ${json.last_cycle.pages_read}`);
     assert.ok(json.last_cycle.scan_incomplete >= 0 && json.last_cycle.connections_read === 4, `connections ${json.last_cycle.connections_read}`);
     assert.ok(json.last_cycle.started_at && json.last_cycle.finished_at);
-    assert.equal(json.epoch, 1);
+    assert.equal(json.epoch, epoch);
     const body = JSON.stringify(json);
     for (const leaked of [owners.origin, temp, observerRef, observerToken, serviceToken, openToolToken, "credential_ref", "站台"]) assert.equal(body.includes(leaked), false, leaked);
     // A viewer may read it too, and is not a recipient.
@@ -662,13 +666,14 @@ try {
   await check("epoch bump invalidates stale cursors and echoes a new epoch", async () => {
     auth.sessions.bumpAll();
     const { json } = await call("/api/control-center/v1/session");
-    assert.equal(json.epoch, 2);
+    assert.equal(json.epoch, epoch + 1);
+    epoch = json.epoch;
     if (requestCursor) {
       const { response } = await call(`/api/control-center/v1/requests?scope=${scopeIds[0]}&cursor=${encodeURIComponent(requestCursor)}`);
       assert.equal(response.status, 409);
     }
     const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=active&scope=${scopeIds[0]}`);
-    assert.equal(tasks.epoch, 2);
+    assert.equal(tasks.epoch, epoch);
   });
 
   // Tool projects (T2). After the epoch check: connecting and disconnecting bump the session epoch.

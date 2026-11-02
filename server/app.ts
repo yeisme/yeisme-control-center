@@ -60,6 +60,25 @@ const json = (
       ...headers,
     },
   });
+/** A path segment, decoded. A malformed escape such as `%ZZ` is the caller's mistake, so it is a 400 and not a failure of the service. */
+const pathParam = (segment: string) => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new AuthError("invalid_request", 400);
+  }
+};
+/** A request body that must be a JSON object. `null`, an array or a scalar is the caller's mistake: a 400 with `code`, never a TypeError. */
+const jsonObject = <T extends object>(raw: string, code: string): T => {
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw new AuthError(code, 400);
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new AuthError(code, 400);
+  return body as T;
+};
 const methodNotAllowed = (allowedMethods: string[]) =>
   json(
     {
@@ -379,7 +398,9 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           throw e;
         }
       }
-      if (r.method === "GET" && path === "/auth/methods")
+      if (r.method === "GET" && path === "/auth/methods") {
+        // Whether the sign-in asks for a username and a key depends on the account list, which personal-config may have changed.
+        auth.refreshPersonalUsers();
         return json({
           personal: config.auth_mode === "personal" && !!config.personal,
           username_required: !!config.personal && ((config.personal.users?.length || 0) > 0 || config.personal.username !== undefined),
@@ -391,6 +412,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             configured: owner === "auctra" ? !!config.collection?.auctra : !!config.owners[owner as Owner],
           })),
         });
+      }
       if (r.method === "GET" && path === "/auth/login") {
         const b = await auth.begin();
         return new Response(null, {
@@ -452,16 +474,18 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         if (wanted && !scopes.length) throw new AuthError("scope_not_found", 404);
         return json(withEpoch(session, observationStatus(services, identityOf(session), scopes.map((candidate) => candidate.id), wanted ?? undefined)));
       }
-      if (path === "/admin/personal-users" || path.startsWith("/admin/personal-users/")) {
+      // Every account route is matched whole: the collection, and one username's revoke. Anything else under the prefix is unknown.
+      const revoke = path.match(/^\/admin\/personal-users\/([^/]+)\/revoke$/);
+      if (path === "/admin/personal-users" || revoke || path.startsWith("/admin/personal-users/")) {
         if (!session.personal || auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
-        if (r.method === "GET") return json({ users: auth.listPersonalUsers() });
-        if (r.method === "POST") {
+        if (path === "/admin/personal-users") {
+          if (r.method === "GET") return json({ users: auth.listPersonalUsers() });
+          if (r.method !== "POST") return methodNotAllowed(["GET", "POST"]);
           auth.csrf(r, session);
           const raw = await r.text();
           if (raw.length > 4096) throw new AuthError("invalid_request", 400);
-          let body;
-          try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
-          if (!body || typeof body.username !== "string" || typeof body.name !== "string" || !["admin", "viewer"].includes(body.role) || !Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string") || Object.keys(body).some((key) => !["username", "name", "role", "scope_ids"].includes(key))) throw new AuthError("invalid_request", 400);
+          const body = jsonObject<Record<string, any>>(raw, "invalid_request");
+          if (typeof body.username !== "string" || typeof body.name !== "string" || !["admin", "viewer"].includes(body.role) || !Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string") || Object.keys(body).some((key) => !["username", "name", "role", "scope_ids"].includes(key))) throw new AuthError("invalid_request", 400);
           const created = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
@@ -470,19 +494,17 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           }, () => auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids }));
           return json(created, 201);
         }
-        const revoke = path.match(/^\/admin\/personal-users\/([^/]+)\/revoke$/);
-        if (revoke && r.method === "POST") {
-          auth.csrf(r, session);
-          const username = decodeURIComponent(revoke[1]);
-          await audited({
-            actor: session.issuer + "|" + session.subject,
-            sessionId: session.id,
-            action: "admin.user_revoked",
-            targetRef: username,
-          }, () => auth.revokePersonalUser(username));
-          return json({ ok: true });
-        }
-        return methodNotAllowed(["GET", "POST"]);
+        if (!revoke) throw new AuthError("not_found", 404);
+        if (r.method !== "POST") return methodNotAllowed(["POST"]);
+        auth.csrf(r, session);
+        const username = pathParam(revoke[1]);
+        await audited({
+          actor: session.issuer + "|" + session.subject,
+          sessionId: session.id,
+          action: "admin.user_revoked",
+          targetRef: username,
+        }, () => auth.revokePersonalUser(username));
+        return json({ ok: true });
       }
       if (r.method === "GET" && path === "/audit") {
         if (auth.role(session) !== "admin")
@@ -521,7 +543,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       if (r.method === "GET" && path === "/organizations") return json(withEpoch(session, { rows: collaboration.organizations(session), can_create: auth.role(session) === "admin" }));
       const orgRoute = path.match(/^\/organizations\/([^/]+)\/(members|teams|candidates|binding-options)$/);
       if (r.method === "GET" && orgRoute) {
-        const org = decodeURIComponent(orgRoute[1]);
+        const org = pathParam(orgRoute[1]);
         if (orgRoute[2] === "candidates") return json(withEpoch(session, { rows: collaboration.candidates(session, org) }));
         if (orgRoute[2] === "binding-options") return json(withEpoch(session, { rows: collaboration.bindingOptions(session, org) }));
         const directory = collaboration.directory(session, org);
@@ -535,15 +557,15 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       }
       const itemTask = path.match(/^\/projects\/([^/]+)\/items\/([^/]+)\/task$/);
       if (r.method === "GET" && itemTask) {
-        const projectID = decodeURIComponent(itemTask[1]);
-        const item = collaboration.item(session, projectID, decodeURIComponent(itemTask[2]));
+        const projectID = pathParam(itemTask[1]);
+        const item = collaboration.item(session, projectID, pathParam(itemTask[2]));
         if (!item.source?.connection || !item.source.project || !item.source.family || !item.source.ref) throw new AuthError("item_source_unavailable", 409);
         return json(withEpoch(session, await tasks.resolve(collaboration.scope(session, projectID), item.source)));
       }
       const batchRoute = path.match(/^\/projects\/([^/]+)\/generation-batches\/([^/]+)$/);
       if (r.method === "GET" && batchRoute) {
-        const projectID = decodeURIComponent(batchRoute[1]);
-        const batchID = decodeURIComponent(batchRoute[2]);
+        const projectID = pathParam(batchRoute[1]);
+        const batchID = pathParam(batchRoute[2]);
         // A project the session cannot see and a batch that is not in it answer alike.
         let stored;
         try { stored = collaboration.batch(session, projectID, batchID); }
@@ -555,7 +577,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       }
       const sharedRoute = path.match(/^\/projects\/([^/]+)(?:\/(members|bindings|folders|items|generation-batches))?$/);
       if (r.method === "GET" && sharedRoute) {
-        const projectID = decodeURIComponent(sharedRoute[1]);
+        const projectID = pathParam(sharedRoute[1]);
         const project = collaboration.project(session, projectID);
         const kind = sharedRoute[2];
         if (!kind) return json(withEpoch(session, project));
@@ -684,16 +706,14 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       }
       const collectionRecordMatch = path.match(/^\/auctra\/collection\/records\/([^/]+)$/);
       if (r.method === "GET" && collectionRecordMatch) {
-        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.record.v1", owner: "auctra", scope: scope.id, observed_at: new Date().toISOString(), record: collectionStore.get(scope.id, decodeURIComponent(collectionRecordMatch[1])) }));
+        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.record.v1", owner: "auctra", scope: scope.id, observed_at: new Date().toISOString(), record: collectionStore.get(scope.id, pathParam(collectionRecordMatch[1])) }));
       }
       if (r.method === "POST" && path === "/auctra/collection/sync") {
         auth.csrf(r, session);
         const raw = await r.text();
         if (raw.length > 8192) throw new AuthError("invalid_request", 413);
         let body: { cursor?: string; updated_after?: string; limit?: number } = {};
-        if (raw) {
-          try { body = JSON.parse(raw) as typeof body; } catch { throw new AuthError("invalid_request", 400); }
-        }
+        if (raw) body = jsonObject<typeof body>(raw, "invalid_request");
         // `limit` is the page size; one sync keeps reading pages until Auctra has none left or a sync limit stops it.
         const limit = Number(body.limit || url.searchParams.get("limit") || collectionSyncLimits.pageSize);
         if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new AuthError("invalid_query", 400);
@@ -736,7 +756,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         const readMatch = path.match(/^\/notifications\/([^/]+)\/read$/);
         if (r.method === "POST" && readMatch) {
           auth.csrf(r, session);
-          const id = decodeURIComponent(readMatch[1]);
+          const id = pathParam(readMatch[1]);
           return json(withEpoch(session, { notification: notifications.read(id, rowScope(id), session.id, subject) }));
         }
         if (r.method === "GET" && path === "/notifications") {
@@ -807,12 +827,12 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         const ruleMatch = path.match(/^\/notifications\/mute-rules\/([^/]+)\/remove$/);
         if (r.method === "POST" && ruleMatch) {
           auth.csrf(r, session);
-          return json({ ...notifications.removeMuteRule(decodeURIComponent(ruleMatch[1]), reminderScopes(), subject), task_states_changed: 0 });
+          return json({ ...notifications.removeMuteRule(pathParam(ruleMatch[1]), reminderScopes(), subject), task_states_changed: 0 });
         }
         const one = path.match(/^\/notifications\/([^/]+)\/(acknowledge|mute|archive|reopen|snooze)$/);
         if (one && r.method === "POST") {
           auth.csrf(r, session);
-          const id = decodeURIComponent(one[1]);
+          const id = pathParam(one[1]);
           const action = one[2];
           const owner = rowScope(id);
           if (action === "mute") {
@@ -968,14 +988,9 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
                   : projectMetadata.unhide(scope.id, owner, projectRef, expected, actor);
               return ActionService.succeeded(record, { owner_state: result.hidden ? "hidden" : "visible", operation_ref: record.request.target_ref, result_refs: [record.request.target_ref] });
             }
-            if (record.request.action === "admin.user.create") {
-              if (typeof input.username !== "string" || typeof input.name !== "string" || !["admin", "viewer"].includes(String(input.role)) || !Array.isArray(input.scope_ids)) throw new AuthError("invalid_action_input", 400);
-              const created = await auth.createPersonalUser({ username: input.username, name: input.name, role: input.role as "admin" | "viewer", scope_ids: input.scope_ids.filter((value): value is string => typeof value === "string") });
-              return ActionService.succeeded(record, { owner_state: "created", operation_ref: created.user.username });
-            }
             if (record.request.action === "admin.user.revoke") {
               if (typeof input.username !== "string") throw new AuthError("invalid_action_input", 400);
-              auth.revokePersonalUser(input.username);
+              await auth.revokePersonalUser(input.username);
               return ActionService.succeeded(record, { owner_state: "revoked", operation_ref: input.username });
             }
             return ActionService.unavailable(record, "owner_action_adapter_not_configured");
@@ -998,7 +1013,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       }
       const receiptMatch = path.match(/^\/actions\/receipts\/([^/]+)$/);
       if (receiptMatch && r.method === "GET") {
-        const receipt = actions.receipt(decodeURIComponent(receiptMatch[1]), scope.id, identityOf(session));
+        const receipt = actions.receipt(pathParam(receiptMatch[1]), scope.id, identityOf(session));
         audit.record({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.receipt_read", targetRef: receipt.receipt_ref, meta: { action: receipt.action } }, "succeeded");
         return json(withEpoch(session, receipt));
       }
@@ -1066,7 +1081,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       const providerRun = path.match(/^\/provider-runs\/([^/]+)(\/events|\/reconcile)?$/);
       if (providerRun) {
         if (r.method === "POST") authorizeAction(session, "provider_runs.reconcile");
-        const runRef = decodeURIComponent(providerRun[1]);
+        const runRef = pathParam(providerRun[1]);
         const run = providers.get(runRef);
         if (!run || run.scope_id !== scope.id) throw new AuthError("run_not_found", 404);
         if (r.method === "GET" && !providerRun[2]) return json(run);
@@ -1249,18 +1264,20 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             Object.keys(b).some((k) => k !== "purpose")
           )
             throw new AuthError("invalid_request", 400);
+          const taskRef = pathParam(artifact[1]);
+          const artifactRef = pathParam(artifact[2]);
           const granted = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             scopeId: scope.id,
             action: "tasks.artifact_access",
-            targetRef: decodeURIComponent(artifact[2]),
+            targetRef: artifactRef,
             purpose: b.purpose,
           }, () => media.issue(
             session,
             scope,
-            decodeURIComponent(artifact[1]),
-            decodeURIComponent(artifact[2]),
+            taskRef,
+            artifactRef,
             b.purpose as "preview" | "download" | "thumbnail",
           ));
           return json(granted);
@@ -1269,7 +1286,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           /^\/tasks\/([^/]+)(\/events|\/cancel|\/cancel-receipt)?$/,
         );
         if (t) {
-          const key = decodeURIComponent(t[1]);
+          const key = pathParam(t[1]);
           if (r.method === "GET" && !t[2])
             return json(withEpoch(session, permittedTask(await tasks.detail(key, scope))));
           if (r.method === "GET" && t[2] === "/events")
@@ -1459,8 +1476,8 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       );
       if (attachmentRead && r.method === "POST") {
         const owner = attachmentRead[1] as Owner,
-          id = decodeURIComponent(attachmentRead[2]),
-          attachmentRef = decodeURIComponent(attachmentRead[3]);
+          id = pathParam(attachmentRead[2]),
+          attachmentRef = pathParam(attachmentRead[3]);
         if (
           !id ||
           id.length > 500 ||
@@ -1474,12 +1491,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         const raw = await r.text();
         if (raw.length > 2048)
           throw new AuthError("invalid_content_request", 400);
-        let body;
-        try {
-          body = JSON.parse(raw);
-        } catch {
-          throw new AuthError("invalid_content_request", 400);
-        }
+        const body = jsonObject<Record<string, any>>(raw, "invalid_content_request");
         if (
           !["input", "output"].includes(body.direction) ||
           typeof body.purpose !== "string" ||
@@ -1541,7 +1553,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       );
       if (observationRead && r.method === "GET") {
         const owner = observationRead[1] as Owner;
-        const id = decodeURIComponent(observationRead[2]);
+        const id = pathParam(observationRead[2]);
         if (!id || id.length > 500 || /[\/\\\x00-\x1f]/.test(id))
           throw new AuthError("invalid_reference", 400);
         return json(withEpoch(session, await readers.observations(owner, id, url.searchParams.get("after") || undefined, session, scope)));
@@ -1551,7 +1563,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
       );
       if (match) {
         const owner = match[1] as Owner,
-          id = decodeURIComponent(match[2]);
+          id = pathParam(match[2]);
         if (
           !id ||
           id.length > 500 ||
@@ -1567,12 +1579,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           const raw = await r.text();
           if (raw.length > 2048)
             throw new AuthError("invalid_content_request", 400);
-          let body;
-          try {
-            body = JSON.parse(raw);
-          } catch {
-            throw new AuthError("invalid_content_request", 400);
-          }
+          const body = jsonObject<Record<string, any>>(raw, "invalid_content_request");
           if (
             !["input", "output"].includes(body.direction) ||
             typeof body.purpose !== "string" ||

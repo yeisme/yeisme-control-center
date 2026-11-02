@@ -92,6 +92,35 @@ describe("control center persistence", () => {
     expect([...store.values()].map((s) => s.id).sort()).toEqual(["s1", "s2"]);
   });
 
+  it("writes a session's last-seen time at most once per interval, and says whether it wrote", () => {
+    const store = new SessionStore(createMemoryDB());
+    store.set("s1", session({ last_seen: 1_000 }));
+    expect(store.touch("s1", 1_000 + 59_999)).toBe(false);
+    expect(store.get("s1")!.last_seen).toBe(1_000);
+    expect(store.touch("s1", 1_000 + 60_000)).toBe(true);
+    expect(store.get("s1")!.last_seen).toBe(61_000);
+    expect(store.touch("s1", 61_001)).toBe(false);
+    expect(store.touch("nobody", 9_000_000)).toBe(false);
+    // A session with no time yet gets one at once; a shorter interval is honoured.
+    store.set("s2", session({ id: "s2", last_seen: undefined }));
+    expect(store.touch("s2", 10)).toBe(true);
+    expect(store.touch("s2", 14, 5)).toBe(false);
+    expect(store.touch("s2", 15, 5)).toBe(true);
+    expect(store.get("s2")!.last_seen).toBe(15);
+  });
+
+  it("reports the highest stored epoch, and zero when there is no session", () => {
+    const store = new SessionStore(createMemoryDB());
+    expect(store.maxEpoch()).toBe(0);
+    store.set("s1", session({ epoch: 5 }));
+    store.set("s2", session({ id: "s2", epoch: 9 }));
+    expect(store.maxEpoch()).toBe(9);
+    store.bumpAll();
+    expect(store.maxEpoch()).toBe(10);
+    store.delete("s2");
+    expect(store.maxEpoch()).toBe(6);
+  });
+
   it("keeps sessions and runs across a restart on the same database file", () => {
     const dir = mkdtempSync(join(tmpdir(), "cc-db-"));
     try {
@@ -138,12 +167,14 @@ describe("control center persistence", () => {
   it("dedupes usage by owner source ref and keeps idempotency last-write-wins", () => {
     const db = createMemoryDB();
     const store = new RunStore(db);
+    // A usage row belongs to the scope whose run produced it.
+    store.insertRun(run(), 1);
     store.putUsage(usage());
     store.putUsage(usage({ upstream_cost: 0.5, status: "reconciled" }));
-    const rows = store.usageRows("project-1");
+    const rows = store.usageRows("scope-1");
     expect(rows).toHaveLength(1);
     expect(rows[0].upstream_cost).toBe(0.5);
-    expect(store.usageRows("other-project")).toHaveLength(0);
+    expect(store.usageRows("other-scope")).toHaveLength(0);
     store.putIdempotency("key-1", "run_1");
     store.putIdempotency("key-1", "run_2");
     expect(store.getIdempotency("key-1")).toBe("run_2");

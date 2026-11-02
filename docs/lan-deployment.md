@@ -102,11 +102,19 @@ YEISME_RELEASE_VERIFY_PORT=4350 bun scripts/verify-release-component.ts <candida
 ```bash
 bun scripts/personal-config.ts user <配置文件> add <用户名> viewer <显示名> --key-file <新密钥文件>
 bun scripts/personal-config.ts user <配置文件> rotate <用户名> --key-file <新密钥文件>   # 换新密钥；该账号已有会话立即失效，无需重启
-bun scripts/personal-config.ts user <配置文件> revoke <用户名>
+bun scripts/personal-config.ts user <配置文件> revoke <用户名>                          # 已有会话立即失效，旧密钥不再能登录，无需重启
 bun scripts/personal-config.ts user <配置文件> enable <用户名>                          # 恢复被吊销的账号；旧密钥随之重新有效，疑似泄漏就先 rotate
 ```
 
 不带 `--key-file` 时 `user add` 与 `user rotate` 沿用“只显示一次”的行为。动作也可写在配置文件之前（`user add <配置文件> ...`）。
+
+**账号变更不需要重启。** 服务端在处理登录、已登录的请求和 `/auth/methods` 之前，以及后台观察每个周期开始时，用一次 `stat`（inode、大小、修改与变更时间）比对配置文件；文件变了，就只重新读取其中的 `personal.users`，一次换入：新账号马上可以登录；被吊销的账号已有会话在它的下一个请求就结束（401），旧密钥登录被拒；`enable` 之后旧密钥重新可用；`rotate` 改的是密钥摘要文件，已有会话在下一个请求失效。文件里别的内容（观察开关、连接、开放工具）仍然只在启动时读取，改了要重启。读不到的文件、坏掉的 JSON、不是列表的 `users` 都不会清空内存里的账号，下个请求再读。命令的输出里 `restart_required: false` 就是这个意思。
+
+**配置文件锁。** 控制中心（网页创建、吊销账号）和 `personal-config`（所有写配置的命令）改写配置文件都先取同一把独占锁：与配置文件同目录的 `<配置文件>.lock`，用 `wx` 创建、权限 0600，内容是持有者的 pid 和时间。等不到锁最多等约 5 秒：控制中心返回 503 `config_busy`（已经做出的吊销仍在进程内生效，并随下一次写文件存盘），命令行用中文报错、什么也不写。持有者进程已不在，或锁超过 30 秒，视为崩溃遗留，由下一个写入者清除。慢的部分（口令哈希、密钥生成）在取锁之前做，锁内只做“重读、改、写、改名”。控制中心在锁内重新读文件、从这份新内容出发应用自己的修改（以及还没存盘的吊销）；命令行在开始读配置时记下文件的版本（inode、大小、修改与变更时间），取锁后发现文件已被别人改过，就报“配置文件在读取后被改动，请重新运行”并且不写，所以两边谁也不会用旧副本盖掉对方刚存的内容（例如命令行 `user add` 的哈希计算期间网页做了吊销）。命令因此中止时，它刚做出的密钥文件和摘要文件会一并删掉，重新运行即可。
+
+**用谁的身份运行命令。** `personal-config` 的写操作要求运行它的用户就是配置文件的所有者：用 `sudo` 改写一个属于服务用户的 0600 文件，会让文件变成 root 的，服务读不到它，命令却已经报告“账号变更无需重启”。所以身份不一致时命令用中文报错、什么也不写；写出的文件始终是 0600。服务端读不到配置文件（权限、坏 JSON、`users` 不是列表）时保持内存里的账号不变，并在日志里按文件版本记一行 `[control-center] account list reload failed: <代码>`（只有代码，没有路径，同一版本只记一次）；`users: null` 视为空列表。
+
+**账号是否启用只有一条规则。** 账号的 `enabled` 是 `true` 或根本没有这个字段（旧文件）才算启用；`false`、`"false"`、`0`、`null` 等任何别的值都算停用，不会因为手改成了字符串而意外启用。同一个用户名在 `users` 里出现多次时，所有同名条目都停用（日志记一行，不写用户名），直到手工删掉重复项。登录、已登录会话的权限判断、共享项目可选成员、凭据面板的管理员判断、后台提醒接收人都用这条规则；`personal-config user list` 显示的 `enabled` 也是它。
 
 密钥文件（`YEISME_RELEASE_PROBE_FILE` 指向它，权限必须是 0600 的普通文件）有两种内容：
 
@@ -117,7 +125,7 @@ bun scripts/personal-config.ts user <配置文件> enable <用户名>           
 YEISME_RELEASE_PROBE_FILE=<密钥文件> YEISME_RELEASE_PROBE_USERNAME=<用户名> bun scripts/verify-live-readback.ts [--name <证据前缀>]
 ```
 
-目标 origin 取 `YEISME_CONTROL_ORIGIN`，缺省读部署清单；HTTPS 目标用部署的 CA 校验（`YEISME_RELEASE_CA_FILE`，缺省为清单旁的公开 CA 副本）。每次运行**只登录一次**（登录限流是全局的，15 分钟 5 次）；检查项：`/session` 角色是 viewer；`/services`（不带 `observe=1`，不问任何 owner）不含 `credential_ref`、哈希引用和家目录路径；`/notifications` 为 200；`/observation/status` 为 200 或 404（404 记为 `absent`，不算失败）；`/admin/personal-users`、`/audit` 与对 `admin.user.revoke` 的预览都是 403；登出成功且会话随即失效。证据在 `temp/integration-test-runs/<前缀>-<时间>/`，只含状态码和简短原因，没有密钥、cookie、地址或响应正文。
+目标 origin 取 `YEISME_CONTROL_ORIGIN`，缺省读部署清单；HTTPS 目标用部署的 CA 校验（`YEISME_RELEASE_CA_FILE`，缺省为清单旁的公开 CA 副本）。每次运行**只登录一次**（登录限流是全局的：15 分钟内凭据被拒绝 5 次之后，任何登录都会得到 429 `login_rate_limited`；成功的登录和服务端自己的凭据文件问题不计数，另见下面“登录与会话的上限”）；检查项：`/session` 角色是 viewer；`/services`（不带 `observe=1`，不问任何 owner）不含 `credential_ref`、哈希引用和家目录路径；`/notifications` 为 200；`/observation/status` 为 200 或 404（404 记为 `absent`，不算失败）；`/admin/personal-users`、`/audit` 与对 `admin.user.revoke` 的预览都是 403；登出成功且会话随即失效。证据在 `temp/integration-test-runs/<前缀>-<时间>/`，只含状态码和简短原因，没有密钥、cookie、地址或响应正文。
 
 `control-release.ts` 在设置了 `YEISME_RELEASE_PROBE_FILE` 时，激活并通过静态核对后运行同一读回，结果写入部署清单的 `verification.authenticated_read`：任何响应是 5xx 都走原有回滚；登录被拒（401）、被限流（429）或其他检查失败只把读回标为失败，不回滚。密钥文件在改动任何东西之前就读取，文件不可用时命令直接失败。
 
@@ -134,9 +142,23 @@ bun scripts/personal-config.ts observe <配置文件> off
 
 服务启动时检查整块 `observation`：`enabled` 要是布尔值，`interval_minutes` 是 5 到 1440 的数，`open_tools_every` 是 1 到 1000 的整数，`recipients` 是至多 100 个、每个不超过 200 个字符的非空字符串；缺省的可选键不算问题。任何一项不合格，**整块按未启用处理**，并按问题代码写一行日志（只写代码，不写值，例如 `observation_recipients_invalid`），`GET /observation/status` 也会标出配置无效；越界的值不会被悄悄夹进范围。`observe` 命令用的是同一份界限，并且写之前检查整块：它拒绝的，就是服务端会当作无效的。只有手改配置文件才写得出无效的块，这时下一次 `observe` 会列出问题代码、什么也不写，直到改正：数值或接收人越界的，用参数改正（例如 `observe <配置文件> on --interval-minutes 10`）；整块根本不是对象（比如被改成了字符串 `"yes"`）的，参数改不了，`observe` 以 `observation_not_an_object` 拒绝，不会把它展开进新块，要在文件里改正或删掉 `observation` 再运行（`null` 和没有这一项一样）。
 
+## 登录与会话的上限
+
+任何一个有效账号，哪怕是只读账号，都不能靠反复登录占满会话表、拖住别人的登录：
+
+- **闲置会话先清掉。** 个人会话闲置满 30 分钟（以最后一次请求时间为准，该时间每分钟最多写一次）就在下一次请求或下一次登录之前被删除，不再占着名额等到 12 小时的绝对到期。
+- **每个账号最多 8 个会话。** 同一账号再登录时，最早的会话被结束，而不是去撞全局的 100 个上限；全局上限只在很多账号同时在用时才会触发（503 `session_capacity`）。
+- **每个账号 15 分钟内最多成功登录 20 次。** 第 21 次在做任何口令计算、占用“正在核验”标记之前就得到 429 `login_rate_limited`，只影响这个账号；失败的尝试不计入这份额度，所以不知道密钥的人没有办法替别人用光它，也不会因此结束别人的会话。
+- **不存在的用户名与密钥错误一样处理。** 用户名不对应任何账号（也不是配置里的旧版所有者）时，用一个启动时生成一次的摘要做同样代价的校验，计入失败次数并返回 401 `invalid_credentials`；即使旧版所有者的口令摘要文件读不到，也不会返回能把“存在的名字”和“不存在的名字”区分开的 503。
+- 一个登录正在核验时到达的另一个登录得到 429 `login_busy`，几秒后再试即可；它不计入任何额度。
+
 ## 账号管理不改别的配置
 
-网页里创建、吊销账号时，服务端重新读取配置文件，只替换 `personal.users`，经同目录临时文件原子改名写回（0600）。所以服务运行期间用 `personal-config` 做的其他修改（观察开关、开放工具、连接等）不会被覆盖，也不会把环境变量带来的值（Provider 端点、绑定地址）写进文件；运行期间用命令行新增的账号也会被保留。配置文件读不到时，创建账号返回 503 且不留半成品；吊销则先在内存里生效再尝试写文件。
+网页里创建、吊销账号时，服务端重新读取配置文件，只替换 `personal.users`，经同目录临时文件原子改名写回（0600）。写之前取上面的配置文件锁，并在锁内重新读取。所以服务运行期间用 `personal-config` 做的其他修改（观察开关、开放工具、连接等）不会被覆盖，也不会把环境变量带来的值（Provider 端点、绑定地址）写进文件；运行期间用命令行新增的账号也会被保留。配置文件读不到时，创建账号返回 503 且不留半成品；吊销则先在内存里生效再尝试写文件。
+
+**吊销只增不减。** 网页吊销没能存进文件（目录只读、磁盘满、配置文件锁 5 秒内没等到而返回 503 `config_busy`）时返回 503，但该账号在这个进程里已经被吊销，并且记为“待存”：之后每一次写文件（例如再创建一个账号）都会带上它，每一次重新读取文件也会把它按吊销处理，所以它不会因为别的写入或别人改了文件而复活。文件一旦记下了吊销（网页自己在锁内写成功，或重读时看到文件里同名的所有条目都已停用，或账号已从文件里删除），“待存”就解除，之后以文件为准——此时用 `personal-config user enable` 恢复才有效。因为所有写入者都遵守同一把锁，并且命令行不会用读取之后又被改过的旧副本写回，所以网页写成功之后，不会再有别的写入把这次吊销悄悄改回来。进程重启会丢掉还没存进文件的吊销，所以 503 之后要在服务器上用 `personal-config user revoke` 补上。
+
+网页不能通过 `/actions` 创建账号（`admin.user.create` 在目录里标为不可用，预览和确认都返回 422 `action_unavailable`）：新账号的访问密钥只显示一次，收据里没有地方放它。创建账号在服务器上用 `personal-config user ... add --key-file`；`POST /admin/personal-users` 仍可供脚本调用，密钥只在那一次响应里返回，网页界面不使用它。
 
 ## 凭据到期记录与续签
 

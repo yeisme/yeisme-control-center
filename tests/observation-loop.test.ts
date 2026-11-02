@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApp } from "../server/app";
 import { createMemoryDB } from "../server/db/client";
 import { createObservationLoop, enabledAtState, lastCycleState, observationLimits, observationSettings, observationStatus } from "../server/observation-loop";
@@ -59,6 +62,23 @@ describe("who receives background reminders", () => {
     const { config, scope } = setup();
     const principals = [...config.principals, { issuer: "x", subject: "y", name: "Y", scopes: [scope, { ...scope, id: "project_shared" }, { ...scope, id: "scope-b" }] }];
     expect(baseScopes({ ...config, principals } as ServerConfig).map((candidate) => candidate.id)).toEqual(["scope-a", "scope-b"]);
+  });
+
+  it("follows accounts that personal-config added or revoked since the server started, with no request to notice them first", async () => {
+    const { loop, services, config } = setup({ users: [user("alice", "admin")], world: failing });
+    const home = mkdtempSync(join(tmpdir(), "observation-accounts-"));
+    try {
+      const file = join(home, "control.json");
+      const onDisk = { ...config, personal: { ...config.personal!, users: [user("alice", "admin", { enabled: false }), user("bob", "admin")] } };
+      writeFileSync(file, JSON.stringify(onDisk, null, 2) + "\n", { mode: 0o600 });
+      config.config_file = file;
+      const summary = await loop.runCycle();
+      expect(summary.reminders_opened).toBe(2);
+      expect(rows(services, "yeisme:personal|bob")).toHaveLength(1);
+      expect(rows(services, "yeisme:personal|alice")).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("says so in the cycle summary when a named recipient reaches nobody", async () => {

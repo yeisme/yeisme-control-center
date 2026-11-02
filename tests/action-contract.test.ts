@@ -34,6 +34,21 @@ describe("control center action contract", () => {
     expect(receipt.state).toBe("needs_contract");
   });
 
+  it("refuses an action the catalog marks unavailable, at preview and again at confirm", () => {
+    const service = new ActionService();
+    const create: ActionPreviewRequest = { scope_id: "scope-1", owner: "control-center", target_kind: "personal_user", target_ref: "user:new", action: "admin.user.create", expected_revision: "0", idempotency_key: "create_user_0000000001", input: { username: "new", name: "New", role: "viewer", scope_ids: ["scope-1"] } };
+    expect(service.list("control-center").find((item) => item.action === "admin.user.create")).toMatchObject({ availability: "unavailable", reason: expect.stringContaining("--key-file") });
+    expect(service.list("control-center").find((item) => item.action === "admin.user.revoke")?.availability).toBe("available");
+    expect(() => service.preview(create)).toThrowError(expect.objectContaining({ code: "action_unavailable", status: 422 }));
+    // A preview that exists anyway, as one made before the catalog changed would, still cannot be confirmed.
+    (service as unknown as { previews: Map<string, unknown> }).previews.set("preview_old", { context: "legacy|scope-1", request: create, preview: { preview_ref: "preview_old", preview_digest: "sha256:x", availability: "available", blockers: [] }, createdAt: Date.now() });
+    const confirm = { scope_id: "scope-1", preview_ref: "preview_old", preview_digest: "sha256:x", idempotency_key: create.idempotency_key };
+    let executed = false;
+    expect(() => service.confirm(confirm, async (record) => { executed = true; return ActionService.succeeded(record); })).toThrowError(expect.objectContaining({ code: "action_unavailable", status: 422 }));
+    expect(() => service.confirmLocal(confirm, (record) => { executed = true; return ActionService.succeeded(record); })).toThrowError(expect.objectContaining({ code: "action_unavailable", status: 422 }));
+    expect(executed).toBe(false);
+  });
+
   it("builds one receipt shape for every outcome: succeeded, any other settled state, and a refusal", async () => {
     const service = new ActionService();
     const preview = service.preview(input);

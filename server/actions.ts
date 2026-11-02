@@ -28,7 +28,8 @@ const actionDescriptors: ActionDescriptor[] = [
   ]),
   { action: "delivery.prepare", owner: "control-center", target_kinds: ["delivery"], risk_tier: "write", availability: "needs_contract", reason: "owner_delivery_contract_not_configured" },
   { action: "delivery.send", owner: "control-center", target_kinds: ["delivery"], risk_tier: "write", availability: "needs_contract", reason: "owner_delivery_contract_not_configured" },
-  { action: "admin.user.create", owner: "control-center", target_kinds: ["personal_user"], risk_tier: "admin", availability: "available" },
+  // A new account's access key is shown once and the web has no safe place for it, so accounts are made on the server.
+  { action: "admin.user.create", owner: "control-center", target_kinds: ["personal_user"], risk_tier: "admin", availability: "unavailable", reason: "网页不能创建账号：新账号的访问密钥只显示一次，网页没有安全的地方展示它。请在服务器上运行 personal-config user <配置文件> add <用户名> <admin|viewer> <显示名> --key-file <新密钥文件>，密钥会写进新文件，不会出现在屏幕上。" },
   { action: "admin.user.revoke", owner: "control-center", target_kinds: ["personal_user"], risk_tier: "admin", availability: "available" },
   { action: "owner.config.update", owner: "aigora", target_kinds: ["owner_config"], risk_tier: "admin", availability: "needs_contract", reason: "owner_config_contract_not_configured" },
   { action: "owner.membership.update", owner: "aigora", target_kinds: ["membership"], risk_tier: "admin", availability: "needs_contract", reason: "owner_membership_contract_not_configured" },
@@ -62,6 +63,11 @@ function descriptor(action: ControlAction, owner: ActionOwner) {
   const value = actionDescriptors.find((item) => item.action === action && item.owner === owner);
   if (!value) throw new AuthError("action_not_allowlisted", 403);
   return value;
+}
+
+/** An action the catalog marks unavailable is refused outright, at preview and again at confirm, whatever a stored preview says. */
+function refuseUnavailable(action: ControlAction, owner: ActionOwner) {
+  if (descriptor(action, owner).availability === "unavailable") throw new AuthError("action_unavailable", 422);
 }
 
 function digest(value: unknown) {
@@ -130,6 +136,7 @@ export class ActionService {
   preview(input: ActionPreviewRequest, actor = "legacy"): ActionPreview {
     if (!actionNames.includes(input.action)) throw new AuthError("action_not_allowlisted", 403);
     const action = descriptor(input.action, input.owner);
+    refuseUnavailable(input.action, input.owner);
     const scopeId = safeString(input.scope_id, "scope_id", 128);
     const targetRef = safeString(input.target_ref, "target_ref");
     const expectedRevision = safeString(input.expected_revision, "expected_revision", 200);
@@ -180,6 +187,7 @@ export class ActionService {
 
   confirm(input: ActionConfirmRequest, execute: (record: PreviewRecord) => Promise<ActionReceipt>, actor = "legacy"): Promise<ActionReceipt> {
     const preview = this.record(input.preview_ref, actor, input.scope_id);
+    refuseUnavailable(preview.request.action, preview.request.owner);
     const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, input.preview_ref)).get();
     if (preview.request.scope_id !== input.scope_id || preview.preview.preview_digest !== input.preview_digest) throw new AuthError("action_preview_conflict", 409);
     if (preview.request.idempotency_key !== input.idempotency_key) throw new AuthError("action_idempotency_conflict", 409);
@@ -219,6 +227,7 @@ export class ActionService {
   /** Local state and its receipt commit together; a crash cannot duplicate a mutation. */
   confirmLocal(input: ActionConfirmRequest, execute: (record: PreviewRecord) => ActionReceipt, actor = "legacy"): ActionReceipt {
     const record = this.record(input.preview_ref, actor, input.scope_id);
+    refuseUnavailable(record.request.action, record.request.owner);
     if (record.request.scope_id !== input.scope_id || record.preview.preview_digest !== input.preview_digest || record.request.idempotency_key !== input.idempotency_key) throw new AuthError("action_preview_conflict", 409);
     return this.db.transaction(() => {
       const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, input.preview_ref)).get();

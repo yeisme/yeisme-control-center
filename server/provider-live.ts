@@ -780,24 +780,30 @@ export class ProviderRunManager {
     for (const listener of this.listeners.get(run.run_ref) || []) listener(run);
   }
   private async monitor(runRef: string) {
-    for (let i = 0; i < 80; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      const current = this.store.getRun(runRef);
-      if (!current || ["succeeded", "failed", "reconciled"].includes(current.state)) return;
-      const adapter = this.adapters.get(current.owner);
-      if (!adapter) return;
-      try {
-        const receipt = await adapter.status(current);
-        const next = this.applyReceipt(current, receipt);
-        this.publish(next);
-        if (["succeeded", "failed"].includes(next.state)) return;
-      } catch {
-        // A transient status failure does not create a new attempt; timeout becomes unknown.
+    // Started detached (`void this.monitor(...)`), so anything thrown here, a ledger that cannot be read for one, would be an
+    // unhandled rejection, which ends a Bun process. The run keeps its last stored state and can still be reconciled by hand.
+    try {
+      for (let i = 0; i < 80; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const current = this.store.getRun(runRef);
+        if (!current || ["succeeded", "failed", "reconciled"].includes(current.state)) return;
+        const adapter = this.adapters.get(current.owner);
+        if (!adapter) return;
+        try {
+          const receipt = await adapter.status(current);
+          const next = this.applyReceipt(current, receipt);
+          this.publish(next);
+          if (["succeeded", "failed"].includes(next.state)) return;
+        } catch {
+          // A transient status failure does not create a new attempt; timeout becomes unknown.
+        }
       }
+      const current = this.store.getRun(runRef);
+      if (current && !["succeeded", "failed", "reconciled"].includes(current.state))
+        this.publish({ ...current, state: "unknown", error_code: "status_timeout", observed_at: new Date().toISOString() });
+    } catch {
+      console.warn("[control-center] provider status monitor stopped: provider_monitor_failed");
     }
-    const current = this.store.getRun(runRef);
-    if (current && !["succeeded", "failed", "reconciled"].includes(current.state))
-      this.publish({ ...current, state: "unknown", error_code: "status_timeout", observed_at: new Date().toISOString() });
   }
   private applyReceipt(run: ProviderRunProjection, receipt: ProviderReceipt): ProviderRunProjection {
     const next = {
@@ -925,7 +931,7 @@ export class ProviderRunManager {
     return run;
   }
   get(runRef: string) { return this.store.getRun(runRef); }
-  usageRows(scope: ScopeBinding) { return this.store.usageRows(scope.project); }
+  usageRows(scope: ScopeBinding) { return this.store.usageRows(scope.id); }
   budgetStatus() {
     const reserved = this.store.reservedBudget();
     return { total: totalBudgetCap, reserved, remaining: Math.max(0, totalBudgetCap - reserved), per_owner: budgetCaps, currency: budgetCurrency };

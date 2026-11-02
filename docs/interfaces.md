@@ -16,6 +16,21 @@
 
 ## 最小消费合同
 
+### 会话、账号与错误约定（个人模式）
+
+运行与操作步骤见 [运行与部署边界](lan-deployment.md)，这里只写接口上看得见的行为。
+
+- **账号文件**：服务端在处理登录、已登录的请求和 `/auth/methods` 之前，以及后台观察每个周期开始时，比对配置文件（一次 `stat`），变了就只重读 `personal.users`，所以 `personal-config user add|revoke|enable|rotate` 对下一个请求生效，不需要重启；被吊销账号的已有会话下一个请求得到 401，旧密钥登录得到 401。网页吊销没存进文件时，吊销在进程内保持有效，并带进之后每一次写文件和每一次重读（只增不减），文件记下吊销后才以文件为准。命令的输出带 `restart_required: false`。
+- **账号路由**：`GET|POST /admin/personal-users` 与 `POST /admin/personal-users/{用户名}/revoke` 各自完整匹配；前缀下的其他路径是 404 `not_found`，方法不对是 405。撤销路由不读请求体，所以不会因为请求体的样子建出账号或撤销失败。创建与撤销都在配置文件锁内写文件；锁 5 秒内没等到时答 503 `config_busy`（已做出的吊销仍在进程内生效，并随下一次写文件存盘）。
+- **空闲到期**：个人会话在最后一次请求 30 分钟后结束，不是登录后 30 分钟。最后一次请求的时间每个会话每分钟最多写一次（`SessionStore.touch`），所以空闲上限实际在 29 到 30 分钟之间；登录 12 小时后的绝对到期不变。
+- **epoch**：新会话的 epoch 取“当前毫秒时间”与“已存会话最大 epoch + 1”中较大的一个，所以它是一个时间量级的数，而且总比之前任何会话的高；权限变化（账号列表变动、共享项目变动、工具项目接入）让所有活动会话 +1。另一个标签页换人登录后，旧标签页下一次读取看到更大的 epoch 就重读 `/session`；它发出的写请求带着旧 CSRF，得到 403 `csrf_denied`，前端读一次 `/session`：服务端给出的令牌与被拒的不同，就换上新会话并提示“登录状态已在别处更改”；给出的仍是刚被拒的那个令牌（例如反向代理去掉了 `Origin`，每个写请求都被拒），重读也没有用，页面停在“服务端拒绝了本页发出的请求”的状态，不再循环；被拒令牌已经不是页面当前令牌时忽略，两次这样的重读至少隔 10 秒。
+- **登录限流**：全局，15 分钟内凭据被拒绝 5 次之后，登录得到 429 `login_rate_limited`；成功的登录和服务端自己的凭据文件问题（503）不计数。一个登录正在核验时到达的另一个登录得到 429 `login_busy`，几秒后再试即可，它不计入任何额度。用户名不对应任何账号时，按同样代价对一个启动时生成的摘要校验、计入失败并返回 401 `invalid_credentials`（不会因旧版所有者的口令文件读不到而变成 503）。
+- **每个账号的上限**：同一账号 15 分钟内最多成功登录 20 次，第 21 次在口令计算和“正在核验”标记之前就得到 429 `login_rate_limited`，只影响这个账号（失败的尝试不计入，所以别人替它用不光）；每个账号最多 8 个会话，再登录时结束最早的一个；闲置满 30 分钟的个人会话在下一次请求或登录前就被删除，不再占着全局 100 个会话的名额。
+- **配置文件锁与账号规则**：控制中心写账号和 `personal-config` 写配置共用同一把独占锁（`<配置文件>.lock`，等待约 5 秒，等不到时网页侧 503 `config_busy`、命令行中文报错且不写），命令行在取锁后发现文件已被改过就不写；账号的 `enabled` 只有 `true` 或缺省才算启用，其他任何值都算停用，同名出现多次的条目全部停用；读不到配置文件时保持内存账号并在日志里按文件版本记一次错误代码。详见 [运行与部署边界](lan-deployment.md)。
+- **错误映射**：路径参数里的非法百分号转义（`%ZZ`）和不是对象的 JSON 请求体（`null`、数组、标量）是 400（`invalid_request`，内容读取是 `invalid_content_request`）；同一用户名被同时创建两次，后到的是 409 `user_exists`。这些都不是 503，因为发布读回遇到 5xx 会回滚。
+- **用量**：`GET /usage` 返回当前范围自己发起的运行的用量行（用量行经 owner 与来源引用找到对应运行，再按运行的 `scope_id` 过滤），不按范围自带的 `project` 标签筛，也不会列出别的范围的行。
+- **进程**：服务进程安装了 `unhandledRejection` 处理器，只记错误码（不含消息）并继续运行；Provider 状态轮询自己也不会因读不了账本而抛出。
+
 ### 工作队列与跨项目交接
 
 控制中心通过 `GET /api/control-center/v1/work-queue` 读取当前授权范围的派生工作项。接口支持 `scope`、签名 `cursor`、`limit`、`kind`、`owner` 和 `state`，返回 `yeisme.work_queue.v1`、session epoch、来源覆盖度、统计和安全引用。
@@ -145,7 +160,7 @@ GET  /api/control-center/v1/actions/receipts/<receipt_ref>?scope=<scope_id>
 
 Preview/Confirm 使用 `scope_id`、`owner`、`target_kind`、`target_ref`、`action`、`expected_revision` 和稳定 `idempotency_key`。Preview 只返回规范化输入、摘要、过期时间、阻断原因和所需审批；Confirm 只在 Preview 仍有效且摘要一致时执行。
 
-现有 allowlist 涵盖本地组织/团队/共享项目/目录写入、collection 元数据、项目别名、任务取消、Provider run 创建/对账和个人用户管理。是否可执行由当前 session、scope、角色、owner adapter、预算与提交开关共同决定；代码存在不表示真实生成/取消已获准。审阅、交付、Owner 配置与成员领域写动作在对应 adapter 合同发布前返回 `needs_contract`，不会用本地状态伪造成功。
+现有 allowlist 涵盖本地组织/团队/共享项目/目录写入、collection 元数据、项目别名、任务取消、Provider run 创建/对账和个人用户吊销。`admin.user.create` 在目录里标为 `unavailable`（`reason` 说明改用 `personal-config user … add --key-file`），预览与确认都返回 422 `action_unavailable`，因为新账号的访问密钥只显示一次，收据里没有地方放它。是否可执行由当前 session、scope、角色、owner adapter、预算与提交开关共同决定；代码存在不表示真实生成/取消已获准。审阅、交付、Owner 配置与成员领域写动作在对应 adapter 合同发布前返回 `needs_contract`，不会用本地状态伪造成功。
 
 所有 Confirm 都写入审计、遵守 CSRF、scope 和会话 epoch；超时或未知结果只能读取原 receipt，不能自动重试或生成新的 idempotency key。
 

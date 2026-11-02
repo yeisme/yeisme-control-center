@@ -11,6 +11,8 @@ import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
 import { secret } from "../server/auth";
+import { ConfigBusyError, ConfigChangedError, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
+import { enabledUsers, isEnabledFlag } from "../server/personal-users";
 import { connectionURL, endpointURL } from "../server/task-connections";
 import { isOpenToolKind } from "../src/shared/open-tools";
 import { clientOrigin } from "../src/task-links";
@@ -50,15 +52,37 @@ if (
 )
   throw Error(usage);
 const path = resolve(file);
-const save = (config: ServerConfig) => {
+/** The version of the file this run read, taken before its content: `save` refuses to write over a different one. A file that does not exist yet is `absent`. */
+let readVersion = "absent";
+const readConfig = () => {
+  readVersion = fileIdentity(path);
+  return JSON.parse(readFileSync(path, "utf8")) as ServerConfig;
+};
+/**
+ * A file rewritten by another user, root through sudo for one, belongs to that user afterwards, and the service, running
+ * as its own user, can no longer read it: the command would report an account change that never takes effect. So a
+ * command that writes refuses to when it does not run as the file's owner.
+ */
+const requireOwner = () => {
+  if (ownerProblem(path))
+    throw Error("配置文件属于另一个用户，当前用户不能改写它：否则控制中心读不到新文件，账号变更也不会生效。请用配置文件的所有者运行这条命令，不要用 sudo。没有写入任何内容。");
+};
+/**
+ * Writes the configuration under the exclusive lock the control center takes for its own account writes. The copy this run
+ * read must still be the file, or nothing is written: something else changed it meanwhile (a revocation made in the web
+ * console, say) and writing our copy would undo that.
+ */
+const save = async (config: ServerConfig) => {
+  requireOwner();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temp = path + "." + process.pid + ".tmp";
-  writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", {
-    mode: 0o600,
-    flag: "wx",
-  });
-  renameSync(temp, path);
-  };
+  try {
+    readVersion = await writeConfigIfUnchanged(path, readVersion, JSON.stringify(config, null, 2) + "\n");
+  } catch (error) {
+    if (error instanceof ConfigBusyError) throw Error("配置文件正被另一个进程写入，等待 5 秒后仍未释放。没有写入任何内容，请稍后重新运行。");
+    if (error instanceof ConfigChangedError) throw Error("配置文件在读取后被改动，请重新运行。没有写入任何内容。");
+    throw error;
+  }
+};
 /** Takes `--name <value>` out of an argument list; whatever else starts with `--` is not understood. */
 const takeOption = (list: string[], name: string) => {
   const at = list.indexOf(name);
@@ -68,6 +92,8 @@ const takeOption = (list: string[], name: string) => {
   return { rest: [...list.slice(0, at), ...list.slice(at + 2)], value };
 };
 const newAccessKey = () => "yk_live_" + randomBytes(32).toString("base64url");
+/** What the user commands report about a running control center: it reads the account list again on its next request. */
+const appliedByServer = { restart_required: false, applies: "A running control center takes this up on its next request; no restart is needed." };
 /** Writes a one-time access key to a new 0600 file. Refuses to touch a file that exists, whoever made it. */
 const writeKeyFile = (target: string, key: string) => {
   const resolved = resolve(target);
@@ -201,7 +227,7 @@ if (command === "init") {
   if (args.length > 2 || (username !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(username)))
     throw Error("init accepts [https-origin|loopback-origin] [admin-username].");
   const u = new URL(origin);
-  save({
+  await save({
     origin,
     bind: "127.0.0.1",
     port: u.protocol === "http:" && u.port ? Number(u.port) : 4312,
@@ -237,7 +263,7 @@ if (command === "init") {
     "Created unconfigured personal workspace. Set a password and explicit service connections.",
   );
 } else {
-  const config = JSON.parse(readFileSync(path, "utf8")) as ServerConfig;
+  const config = readConfig();
   if (command === "account") {
     const [username, role] = args;
     if (!config.personal || args.length !== 2 || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(username || "") || !["admin", "viewer"].includes(role))
@@ -246,7 +272,7 @@ if (command === "init") {
       throw Error("A different named account exists; refusing replacement.");
     config.personal.username = username;
     config.personal.role = role as "admin" | "viewer";
-    save(config);
+    await save(config);
     console.log("Local account binding saved. Restart to reload; owner authorization is unchanged.");
   } else if (command === "password") {
     if (!config.personal) throw Error("Personal mode required.");
@@ -299,6 +325,7 @@ if (command === "init") {
       input.close();
     }
     const hash = await hashPassword(password);
+    requireOwner();
     mkdirSync(dirname(config.personal.password_hash_ref), {
       recursive: true,
       mode: 0o700,
@@ -320,29 +347,34 @@ if (command === "init") {
     if (keyed.value !== undefined && !["add", "rotate"].includes(action)) throw Error("--key-file only applies to user add and user rotate.");
     const [, username, ...more] = keyed.rest;
     if (action === "list") {
-      console.log(JSON.stringify(users.map(({ key_hash_ref: _key, ...user }) => ({ ...user, enabled: user.enabled !== false })), null, 2));
+      // `enabled` here is the answer the server gives: a flag that is not `true` or absent, or a name listed twice, is off.
+      const on = new Set(enabledUsers(users));
+      console.log(JSON.stringify(users.map(({ key_hash_ref: _key, ...user }, index) => ({ ...user, enabled: on.has(users[index]) })), null, 2));
     } else if (action === "revoke") {
       if (!username || keyed.rest.length !== 2) throw Error("user revoke requires <username>.");
       if (!users.some((user) => user.username === username)) throw Error("User not found.");
       config.personal.users = users.map((user) => user.username === username ? { ...user, enabled: false } : user);
-      save(config);
-      console.log(JSON.stringify({ username, enabled: false }));
+      await save(config);
+      console.log(JSON.stringify({ username, enabled: false, sessions_ended: true, ...appliedByServer }));
     } else if (action === "enable") {
       if (!username || keyed.rest.length !== 2) throw Error("user enable requires <username>.");
-      const account = users.find((user) => user.username === username);
-      if (!account) throw Error("User not found.");
-      if (account.enabled !== false) {
+      const entries = users.filter((user) => user.username === username);
+      if (!entries.length) throw Error("User not found.");
+      // Two entries of one name are both off, and switching them on would leave them off: say so instead of printing a change that does nothing.
+      if (entries.length > 1) throw Error("这个用户名在配置文件里出现了多次，所有同名账号都被停用。请先手工删掉重复的条目，再运行 enable。没有写入任何内容。");
+      if (isEnabledFlag(entries[0].enabled)) {
         console.log(JSON.stringify({ username, enabled: true, changed: false }));
       } else {
         config.personal.users = users.map((user) => user.username === username ? { ...user, enabled: true } : user);
-        save(config);
-        console.log(JSON.stringify({ username, enabled: true, changed: true, key_unchanged: true, note: "The account's previous access key works again; run user rotate if the key may have leaked.", next: "restart the control center to reload" }, null, 2));
+        await save(config);
+        console.log(JSON.stringify({ username, enabled: true, changed: true, key_unchanged: true, note: "The account's previous access key works again; run user rotate if the key may have leaked.", ...appliedByServer }, null, 2));
       }
     } else if (action === "rotate") {
       if (!username || keyed.rest.length !== 2) throw Error("user rotate requires <username> [--key-file <new file>].");
       const user = users.find((entry) => entry.username === username);
       if (!user) throw Error("User not found.");
       if (!existsSync(user.key_hash_ref)) throw Error("The account's key digest is missing; refusing to rotate.");
+      requireOwner();
       const access_key = newAccessKey();
       const digest = await hashPassword(access_key);
       // Refuses an existing key file before anything changes. The running server compares every session with the digest file
@@ -354,7 +386,7 @@ if (command === "init") {
         if (key_file) rmSync(key_file, { force: true });
         throw error;
       }
-      console.log(JSON.stringify({ username, rotated: true, sessions_ended: true, ...(key_file ? { key_file } : { access_key, shown_once: true }) }, null, 2));
+      console.log(JSON.stringify({ username, rotated: true, sessions_ended: true, ...appliedByServer, ...(key_file ? { key_file } : { access_key, shown_once: true }) }, null, 2));
     } else {
       const [role, name, ...scopeArgs] = more;
       if (!username || !name || !["admin", "viewer"].includes(role || "") || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(username) || users.some((user) => user.username === username))
@@ -367,17 +399,22 @@ if (command === "init") {
       const digest = await hashPassword(access_key);
       // Everything that can be refused is checked before the first file is made: the key file must be new, and so must the digest file.
       if (existsSync(key_hash_ref)) throw Error("A key digest for this username already exists; refusing overwrite.");
+      requireOwner();
       const key_file = keyed.value === undefined ? undefined : writeKeyFile(keyed.value, access_key);
+      let digestMade = false;
       try {
         mkdirSync(dirname(key_hash_ref), { recursive: true, mode: 0o700 });
         writeFileSync(key_hash_ref, digest + "\n", { mode: 0o600, flag: "wx" });
+        digestMade = true;
         config.personal.users = [...users, { username, name, role: role as "admin" | "viewer", key_hash_ref, scope_ids, enabled: true, created_at: new Date().toISOString() }];
-        save(config);
+        await save(config);
       } catch (error) {
+        // The account was not stored (the file changed meanwhile, or the lock stayed busy): leave neither key behind.
         if (key_file) rmSync(key_file, { force: true });
+        if (digestMade) rmSync(key_hash_ref, { force: true });
         throw error;
       }
-      console.log(JSON.stringify({ username, name, role, scope_ids, ...(key_file ? { key_file, shown_once: false } : { access_key, shown_once: true }) }, null, 2));
+      console.log(JSON.stringify({ username, name, role, scope_ids, ...appliedByServer, ...(key_file ? { key_file, shown_once: false } : { access_key, shown_once: true }) }, null, 2));
     }
   } else if (command === "observe") {
     // Server-side observation (reminders with no browser open). The server reads this at start, so restart afterwards.
@@ -432,7 +469,7 @@ if (command === "init") {
     const problems = observationProblems(observation);
     if (problems.length) throw Error(`The observation block would be invalid (${problems.join(", ")}), and the server treats an invalid block as off; nothing was written.`);
     config.observation = observation;
-    save(config);
+    await save(config);
     console.log(JSON.stringify({ observation: config.observation, network_called: false, next: "restart the control center to reload" }, null, 2));
   } else if (command === "connect") {
     const { rest: connectArgs, dates } = takeDates(args);
@@ -484,7 +521,7 @@ if (command === "init") {
         actor: "personal",
         audience: owner,
       };
-    save(config);
+    await save(config);
     console.log(
       "Registered endpoint and credential reference; no network call or permission change.",
     );
@@ -515,7 +552,7 @@ if (command === "init") {
     const readerDates = datesToKeep(dates, previous, !!keyFiles[1] && !!previous?.flow_credential_ref && resolve(previous.flow_credential_ref) === keyFiles[1], "flow_credential");
     config.collection = { ...config.collection, auctra: { origin: auctraOrigin, audience: "auctra", credential_ref: keyFiles[0], ...datesFor(collectorDates), ...(keyFiles[1] ? { flow_credential_ref: keyFiles[1], ...datesFor(readerDates, "flow_credential") } : {}), ...(privateHttp ? { allow_private_http: true } : {}), enabled: true } };
     scope.collection = { ...scope.collection, auctra: { tenant: project, project, actor: "personal", audience: "auctra" } };
-    save(config);
+    await save(config);
     console.log(JSON.stringify({ origin: auctraOrigin, project, scope: scope.id, collector_key_configured: true, reader_key_configured: !!keyFiles[1], private_http: privateHttp, network_called: false, ...expiryReport(collectorDates, dates, "collection:auctra", hadExpiry(previous)), ...(keyFiles[1] && readerDates.expires !== collectorDates.expires ? { reader_expires_at: readerDates.expires ?? null } : {}), next: "restart the control center, then sync from Services" }, null, 2));
   } else if (command === "provider") {
     const { rest: providerArgs, dates } = takeDates(args);
@@ -541,7 +578,7 @@ if (command === "init") {
       },
     };
     config.providers = { ...(config.providers || {}), [owner]: connection };
-    save(config);
+    await save(config);
     console.log(JSON.stringify({ owner, endpoint, project, model_ref, submit, status: status === "-" ? null : status, credential_configured: true, network_called: false, ...expiryReport(written, dates, `provider:${owner}`, hadExpiry(replaced)) }, null, 2));
   } else if (command === "open-tool") {
     // A read-only open tool (DriveBridge, MCP Gateway) for the personal scope; `off` disables it and keeps the entry.
@@ -556,7 +593,7 @@ if (command === "init") {
       if (!existing) throw Error("Open tool not configured.");
       existing.enabled = false;
       scope.open_tools = (scope.open_tools || []).filter((kind) => kind !== tool);
-      save(config);
+      await save(config);
       console.log(JSON.stringify({ tool, enabled: false, network_called: false, next: "restart the control center to reload" }, null, 2));
     } else {
       const unknown = flags.filter((flag) => !["--private-http", "--replace"].includes(flag));
@@ -569,7 +606,7 @@ if (command === "init") {
       const written = datesToKeep(dates, replaced, !!replaced && resolve(replaced.credential_ref) === credential_ref);
       config.open_tools = { ...config.open_tools, [tool]: { endpoint, credential_ref, ...datesFor(written), ...(allowPrivateHttp ? { allow_private_http: true } : {}), enabled: true } };
       scope.open_tools = [...new Set([...(scope.open_tools || []), tool])];
-      save(config);
+      await save(config);
       console.log(JSON.stringify({ tool, scope: scope.id, credential_configured: true, private_http: allowPrivateHttp, network_called: false, ...expiryReport(written, dates, `open_tool:${tool}`, hadExpiry(replaced)), next: "restart the control center, then check Services" }, null, 2));
     }
   } else if (command === "credential") {
@@ -605,7 +642,7 @@ if (command === "init") {
       if (expires && typeof issued === "string" && !issuedBefore(issued, expires)) throw Error("The expiry must be later than the recorded issue time.");
       if (expires) holder.target[holder.expiresKey] = expires;
       else delete holder.target[holder.expiresKey];
-      save(config);
+      await save(config);
       // Every slot records its own expiry, so a file several slots share has to be told to each of them.
       const file = resolve(String(holder.target[holder.refKey]));
       const sharing = slots.filter((slot) => slot.id !== slotId && resolve(slot.ref) === file).map((slot) => slot.id);
@@ -626,7 +663,7 @@ if (command === "init") {
       delete holder.target[holder.issuedKey];
       if (dates.expires) holder.target[holder.expiresKey] = dates.expires;
       if (dates.issued) holder.target[holder.issuedKey] = dates.issued;
-      save(config);
+      await save(config);
       console.log(JSON.stringify({ slot: slotId, credential_configured: true, network_called: false, ...expiryReport(dates, dates, slotId, cleared), ...(sharing.length ? { still_using_previous_file: sharing } : {}), next: "restart the control center to reload" }, null, 2));
     } else throw Error("credential requires list | expiry <slot> <RFC3339|never|none> | replace <slot> <credential-file> [--expires-at|--expires-in] [--issued-at].");
   } else if (command === "studio") {
@@ -636,7 +673,7 @@ if (command === "init") {
         "studio requires <scaena-connection-id> <https-origin|loopback-origin>",
       );
     c.studio_origin = clientOrigin(args[1]);
-    save(config);
+    await save(config);
     console.log(
       "Registered fixed Studio origin; no credentials or permissions changed. Restart to reload.",
     );
@@ -652,7 +689,7 @@ if (command === "init") {
         "cancel requires <connection-id> on|off; owner-supported queued run, local-job or delegation only",
       );
     c.allow_cancel = args[1] === "on";
-    save(config);
+    await save(config);
     console.log(
       "Local cancellation preference saved; owner permission is still required. Restart to reload.",
     );
@@ -666,7 +703,7 @@ if (command === "init") {
     )
       throw Error("content requires <connection-id> on|off; owner authorization is separate.");
     c.allow_content = args[1] === "on";
-    save(config);
+    await save(config);
     console.log(
       "Local content preference saved; owner authorization is unchanged. Restart to reload.",
     );
@@ -674,7 +711,7 @@ if (command === "init") {
     const c = config.connections?.find((c) => c.id === args[0]);
     if (!c) throw Error("Unknown connection.");
     c.enabled = false;
-    save(config);
+    await save(config);
     console.log(
       "Connection disabled; restart the local control-center process to reload configuration.",
     );

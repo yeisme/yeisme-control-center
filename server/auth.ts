@@ -5,9 +5,28 @@ import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./co
 import type { ControlCenterRole } from "../src/service-directory";
 import { credentialFileProblem, type CredentialFileReason } from "./credential-file";
 import { checkPassword, credentialVersion, hashPassword } from "./password";
+import { ConfigBusyError, fileIdentity, withConfigLock, type LockOptions } from "./config-lock";
+import { duplicateNames, enabledUsers, findEnabledUser, isEnabledFlag } from "./personal-users";
 import { SessionStore } from "./db/session-store";
 import { createMemoryDB } from "./db/client";
 const nonce = () => randomBytes(32).toString("base64url");
+/** An account entry the server can use. One edited by hand into something else is skipped, not trusted; a role other than admin is a viewer, as it always was. */
+function isPersonalUser(value: unknown): value is PersonalUser {
+  const user = value as Partial<PersonalUser> | null;
+  return !!user && typeof user === "object" && typeof user.username === "string" && typeof user.name === "string" && typeof user.key_hash_ref === "string" && typeof user.role === "string" && Array.isArray(user.scope_ids) && user.scope_ids.every((id) => typeof id === "string");
+}
+/** A personal session ends this long after its last request. */
+export const personalIdleMs = 30 * 60_000;
+/** One account may hold this many sessions at once; signing in again ends its oldest, so one account cannot fill the table. */
+export const maxSessionsPerAccount = 8;
+/** Successful sign-ins one account may make in a window. Checked before any credential work, so it costs nothing to refuse. */
+export const loginBudget = { max: 20, windowMs: 15 * 60_000 };
+let decoy: Promise<string> | undefined;
+/**
+ * A scrypt digest of a random value that nobody knows, made once per process. A sign-in that names no account is checked
+ * against it, so it costs the same as a real check and fails the same way (401), whether or not the legacy owner's digest file can be read.
+ */
+export const decoyDigest = () => (decoy ??= hashPassword(randomBytes(24).toString("base64url")));
 export class AuthError extends Error {
   constructor(
     public code: string,
@@ -160,13 +179,98 @@ export class SessionAuth {
   ) {
     this.sessions = sessions ?? new SessionStore(createMemoryDB());
   }
-  private loginAttempts: number[] = [];
+  /** When the sign-ins that failed in the last 15 minutes were tried; only these count against the limit. */
+  private loginFailures: number[] = [];
   private loginBusy = false;
+  /** When each account signed in successfully within the budget window; only real accounts ever get an entry. */
+  private loginSuccesses = new Map<string, number[]>();
+  /** Accounts revoked through this server whose revocation the configuration file does not hold (yet). */
+  private revoked = new Set<string>();
+  /** Which version of the configuration file the account list was last taken from; empty until it has been. */
+  private usersStamp = "";
+  /** The version of the file whose reload failed and was logged, so one bad file is logged once and not on every request. */
+  private reloadFailedStamp = "";
+  /** How long a write waits for the configuration lock (5 s by default) and when it breaks a stale one; tests shorten it. */
+  lockOptions: LockOptions = {};
   private personalUsers() {
     return this.config.personal?.users || [];
   }
   private personalUser(username: string) {
-    return this.personalUsers().find((user) => user.enabled !== false && user.username === username);
+    return findEnabledUser(this.personalUsers(), username);
+  }
+  /** Takes the account list from the configuration file now, if the file changed since it was last taken. */
+  refreshPersonalUsers() {
+    this.followConfigFile();
+  }
+  /**
+   * Takes `personal.users` from the configuration file when the file has changed since it was last taken, so an account
+   * added, revoked, enabled or rotated with `personal-config` applies to the next request and needs no restart. The check
+   * is one `stat` (inode, size and times: personal-config replaces the file through a rename). Only the account list is
+   * taken; nothing else of the file reaches memory. `users: null` is an empty list. A file that cannot be read, is not
+   * JSON, or whose `users` is not a list changes nothing and is read again next time, and is logged once per version of
+   * the file (by code, never the path). Revocations made through this server and not yet stored stay in force.
+   */
+  private followConfigFile() {
+    const path = this.config.config_file;
+    if (!path || !this.config.personal) return;
+    let stamp = "unreadable";
+    let read: PersonalUser[];
+    try {
+      stamp = fileIdentity(path);
+      if (stamp === this.usersStamp) return;
+      if (stamp === "absent") throw Object.assign(new Error("absent"), { code: "ENOENT" });
+      const stored = (JSON.parse(readFileSync(path, "utf8")) as Partial<ServerConfig> | null)?.personal;
+      if (!stored || typeof stored !== "object") throw Object.assign(new Error("no personal block"), { code: "no_personal_block" });
+      if (stored.users !== undefined && stored.users !== null && !Array.isArray(stored.users)) throw Object.assign(new Error("users is not a list"), { code: "users_not_a_list" });
+      read = (stored.users ?? []).filter(isPersonalUser);
+    } catch (error) {
+      this.noteReloadFailed(stamp, error);
+      return;
+    }
+    this.usersStamp = stamp;
+    this.reloadFailedStamp = "";
+    const repeated = duplicateNames(read);
+    if (repeated.size) console.warn(`[control-center] account list has ${repeated.size} username(s) listed more than once; every entry of them is disabled`);
+    this.settleRevocations(read);
+    this.adopt(this.withRevocations(read));
+  }
+  /** Logs a failed reload once per version of the file. The code says why (EACCES, invalid_json, ...); the path and the content are never logged. */
+  private noteReloadFailed(stamp: string, error: unknown) {
+    if (this.reloadFailedStamp === stamp) return;
+    this.reloadFailedStamp = stamp;
+    const code = (error as NodeJS.ErrnoException)?.code;
+    console.warn(`[control-center] account list reload failed: ${typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : error instanceof SyntaxError ? "invalid_json" : "unreadable"}`);
+  }
+  /** Replaces the account list in one assignment. Sessions of accounts that stopped being enabled end, and live sessions move to a new epoch. */
+  private adopt(next: PersonalUser[]) {
+    const personal = this.config.personal!;
+    const before = personal.users ?? [];
+    if (JSON.stringify(before) === JSON.stringify(next)) return;
+    const names = (list: PersonalUser[]) => new Set(enabledUsers(list).map((user) => user.username));
+    const stays = names(next);
+    personal.users = next;
+    for (const name of names(before)) if (!stays.has(name)) this.endSessionsOf(name);
+    this.sessions.bumpAll();
+  }
+  private endSessionsOf(username: string) {
+    for (const session of this.sessions.values()) if (session.personal && session.subject === username) this.sessions.delete(session.id);
+  }
+  /** A revocation never goes back on its own: whatever list is taken from the file or written to it has the pending ones applied. */
+  private withRevocations(users: PersonalUser[]) {
+    return users.map((user) => (this.revoked.has(user.username) ? { ...user, enabled: false } : user));
+  }
+  /**
+   * A revocation stops being pending once the file holds it for every entry of the name, or the name is gone from the file.
+   * From then on the file decides. (Looking at one entry only would settle it while a second entry of the name was still on.)
+   */
+  private settleRevocations(stored: PersonalUser[]) {
+    for (const name of [...this.revoked]) {
+      if (stored.filter((user) => user.username === name).every((user) => !isEnabledFlag(user.enabled))) this.revoked.delete(name);
+    }
+  }
+  /** A new session starts above every stored one and no lower than the clock, so a tab that holds an older session sees the change. */
+  private nextEpoch() {
+    return Math.max(Date.now(), this.sessions.maxEpoch() + 1);
   }
   personalBinding(): PrincipalBinding | undefined {
     const p = this.config.personal;
@@ -210,9 +314,9 @@ export class SessionAuth {
     return this.principal(s)?.role === "admin" ? "admin" : "viewer";
   }
   async personalLogin(request: Request, secretValue: string, username?: string) {
+    this.followConfigFile();
     const users = this.personalUsers();
     const user = username ? this.personalUser(username) : undefined;
-    const binding = user ? this.personalUserBinding(user) : this.personalBinding();
     if (
       this.config.auth_mode !== "personal" ||
       !this.config.personal ||
@@ -221,25 +325,38 @@ export class SessionAuth {
     )
       throw new AuthError("personal_login_unavailable", 403);
     validateControlOrigin(this.config.origin);
+    const personal = this.config.personal;
     const now = Date.now();
-    this.loginAttempts = this.loginAttempts.filter(
+    this.loginFailures = this.loginFailures.filter(
       (v) => now - v < 15 * 60_000,
     );
-    if (this.loginBusy || this.loginAttempts.length >= 5)
+    // Who could this be? An enabled account of that name, or the legacy owner of the configuration. Anything else names no account.
+    const legacy = !user && (personal.username === undefined ? users.length === 0 : username === personal.username);
+    const subject = user ? user.username : legacy ? personal.username || "owner" : undefined;
+    // An account that signed in too often is refused before any credential work, for that account only. Only successful
+    // sign-ins fill the budget, so nobody can use up another account's by guessing at its name.
+    if (subject !== undefined && this.successesOf(subject, now).length >= loginBudget.max)
       throw new AuthError("login_rate_limited", 429);
-    this.loginAttempts.push(now);
+    // Credentials are checked one at a time, so a second sign-in that arrives meanwhile is told to wait a moment. Only a
+    // sign-in whose credentials were checked and refused counts against the limit: a success, or a server-side problem, does not.
+    if (this.loginBusy) throw new AuthError("login_busy", 429);
+    if (this.loginFailures.length >= 5)
+      throw new AuthError("login_rate_limited", 429);
     this.loginBusy = true;
     try {
-      const encoded = user
-        ? secret(user.key_hash_ref)
-        : secret(this.config.personal!.password_hash_ref);
+      // A name that matches no account is checked against a decoy digest of the same cost, so it fails as a wrong key does
+      // (401) and counts as one, and never as a 503 that would tell a name that exists from one that does not.
+      const encoded = user ? secret(user.key_hash_ref) : legacy ? secret(personal.password_hash_ref) : await decoyDigest();
       const valueMatches = await checkPassword(secretValue, encoded);
-      const expectedUsername = this.config.personal!.username;
-      const legacyAdminMatch = users.length > 0 && !user && expectedUsername !== undefined && username === expectedUsername && valueMatches;
-      if (!valueMatches || (users.length === 0 && expectedUsername !== undefined && username !== expectedUsername) || (users.length > 0 && !user && !legacyAdminMatch))
-        throw new AuthError("invalid_credentials", 401);
-      if (!binding) throw new AuthError("invalid_credentials", 401);
+      const refused = () => {
+        this.loginFailures.push(now);
+        return new AuthError("invalid_credentials", 401);
+      };
+      const binding = user ? this.personalUserBinding(user) : legacy ? this.personalBinding() : undefined;
+      if (!valueMatches || !binding) throw refused();
       this.prune();
+      // This account's oldest sessions make room for the new one. The table's own limit then only matters when many accounts are busy at once.
+      this.sessions.evictOldest(binding.issuer, binding.subject, maxSessionsPerAccount - 1);
       if (this.sessions.size >= 100)
         throw new AuthError("session_capacity", 503);
       const id = nonce();
@@ -255,32 +372,51 @@ export class SessionAuth {
         personal: true,
         last_seen: now,
         credential_version: credentialVersion(encoded),
-        epoch: 1,
+        epoch: this.nextEpoch(),
       });
+      this.loginSuccesses.set(binding.subject, [...this.successesOf(binding.subject, now), now]);
       return { cookie: this.cookie(id, 12 * 3600) };
     } finally {
       this.loginBusy = false;
     }
   }
+  /** The successful sign-ins of one account inside the budget window. */
+  private successesOf(subject: string, now: number) {
+    return (this.loginSuccesses.get(subject) ?? []).filter((at) => now - at < loginBudget.windowMs);
+  }
   listPersonalUsers() {
-    return this.personalUsers().map(({ key_hash_ref: _keyHashRef, ...user }) => ({ ...user, enabled: user.enabled !== false }));
+    this.followConfigFile();
+    const enabled = new Set<PersonalUser>(enabledUsers(this.personalUsers()));
+    return this.personalUsers().map(({ key_hash_ref: _keyHashRef, ...user }, index) => ({ ...user, enabled: enabled.has(this.personalUsers()[index]) }));
   }
   async createPersonalUser(input: { username: string; name: string; role: ControlCenterRole; scope_ids: string[] }) {
     if (!this.config.personal || !this.config.config_file) throw new AuthError("user_management_unavailable", 503);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(input.username) || !input.name.trim() || !["admin", "viewer"].includes(input.role))
       throw new AuthError("invalid_user", 400);
     // An account added with personal-config since the server started is in the file but not yet in memory.
-    if ([...this.personalUsers(), ...(this.readConfigFile().personal?.users || [])].some((user) => user.username === input.username)) throw new AuthError("user_exists", 409);
+    this.followConfigFile();
+    const onDisk = this.readConfigFile().personal?.users;
+    if ([...this.personalUsers(), ...(Array.isArray(onDisk) ? onDisk : [])].some((user) => user?.username === input.username)) throw new AuthError("user_exists", 409);
     const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
     if (!input.scope_ids.length || input.scope_ids.some((id) => !allowedScopes.has(id))) throw new AuthError("scope_not_found", 404);
     const accessKey = "yk_live_" + nonce();
     const keyHashRef = resolve(this.config.config_file + ".users", input.username + ".key");
-    mkdirSync(dirname(keyHashRef), { recursive: true, mode: 0o700 });
-    writeFileSync(keyHashRef, (await hashPassword(accessKey)) + "\n", { mode: 0o600, flag: "wx" });
+    const digest = (await hashPassword(accessKey)) + "\n";
+    try {
+      mkdirSync(dirname(keyHashRef), { recursive: true, mode: 0o700 });
+    } catch {
+      throw new AuthError("user_management_unavailable", 503);
+    }
+    try {
+      // "wx": two creations of one username, or a digest an earlier one left behind, meet here, and the later one is refused.
+      writeFileSync(keyHashRef, digest, { mode: 0o600, flag: "wx" });
+    } catch (error) {
+      throw (error as NodeJS.ErrnoException).code === "EEXIST" ? new AuthError("user_exists", 409) : new AuthError("user_management_unavailable", 503);
+    }
     const user: PersonalUser = { username: input.username, name: input.name.trim(), role: input.role, key_hash_ref: keyHashRef, scope_ids: input.scope_ids, enabled: true, created_at: new Date().toISOString() };
     try {
       // Memory follows the file only once the file holds the account, so a failed write leaves no account that vanishes at restart.
-      this.config.personal.users = this.persistConfig((stored) => {
+      await this.persistConfig((stored) => {
         if (stored.some((existing) => existing.username === user.username)) throw new AuthError("user_exists", 409);
         return [...stored, user];
       });
@@ -290,13 +426,16 @@ export class SessionAuth {
     }
     return { user: { ...user, key_hash_ref: undefined }, access_key: accessKey };
   }
-  revokePersonalUser(username: string) {
+  async revokePersonalUser(username: string) {
+    this.followConfigFile();
     if (!this.config.personal || !this.personalUsers().some((user) => user.username === username)) throw new AuthError("user_not_found", 404);
-    const revoke = (users: PersonalUser[]) => users.map((user) => user.username === username ? { ...user, enabled: false } : user);
-    // Effective at once, even when the file cannot be written: a revocation must not wait for the disk.
-    this.config.personal.users = revoke(this.personalUsers());
-    for (const session of this.sessions.values()) if (session.personal && session.subject === username) this.sessions.delete(session.id);
-    this.config.personal.users = this.persistConfig(revoke);
+    // Effective at once, even when the file cannot be written or is busy: a revocation must not wait for the disk or for
+    // another writer. Everything up to the first await runs before this function returns its promise. It is also remembered
+    // until the file holds it, so a later write or a reload of the file cannot bring the account back.
+    this.revoked.add(username);
+    this.adopt(this.withRevocations(this.personalUsers()));
+    this.endSessionsOf(username);
+    await this.persistConfig((stored) => stored);
   }
   private readConfigFile(): ServerConfig {
     const path = this.config.config_file;
@@ -308,18 +447,32 @@ export class SessionAuth {
     }
   }
   /**
-   * Stores the account list in the configuration file as it is on disk now, and returns the list that was stored.
-   * The in-memory config is not the file: it also holds values that never lived there (providers and the bind address from the
-   * environment, `config_file` itself) and it lacks edits made with personal-config since the server started. Writing it back
-   * whole persisted the first and discarded the second. Here the file is read again, `change` is applied to its accounts, and only
-   * `personal.users` is replaced, through a temporary file renamed over the original, mode 0600.
+   * Stores the account list in the configuration file, and then makes memory follow it. The in-memory config is not the
+   * file: it also holds values that never lived there (providers and the bind address from the environment, `config_file`
+   * itself) and it may lack edits made with personal-config. So under the exclusive lock the file is read again, `change`
+   * is applied to the accounts it holds now, the revocations still pending are applied to that list too, and only
+   * `personal.users` is replaced, through a temporary file renamed over the original, mode 0600. `personal-config` takes the
+   * same lock and refuses to write a copy that is older than the file, so neither writer can undo the other. Slow work
+   * (hashing, key generation) belongs before this call.
    */
-  private persistConfig(change: (stored: PersonalUser[]) => PersonalUser[]): PersonalUser[] {
+  private async persistConfig(change: (stored: PersonalUser[]) => PersonalUser[]): Promise<void> {
     const path = this.config.config_file;
     if (!path) throw new AuthError("user_management_unavailable", 503);
+    try {
+      await withConfigLock(path, () => this.writeAccounts(path, change), this.lockOptions);
+    } catch (error) {
+      if (error instanceof ConfigBusyError) throw new AuthError("config_busy", 503);
+      if (error instanceof AuthError) throw error;
+      throw new AuthError("user_management_unavailable", 503);
+    }
+  }
+  /** The part of `persistConfig` that runs while the lock is held. */
+  private writeAccounts(path: string, change: (stored: PersonalUser[]) => PersonalUser[]) {
     const stored = this.readConfigFile();
     if (!stored.personal) throw new AuthError("user_management_unavailable", 503);
-    const users = change(stored.personal.users || []);
+    const fresh = Array.isArray(stored.personal.users) ? stored.personal.users : [];
+    // Pending revocations go into every write, so a write can never bring a revoked account back.
+    const users = this.withRevocations(change(fresh));
     const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.users.tmp`;
     try {
       writeFileSync(temp, JSON.stringify({ ...stored, personal: { ...stored.personal, users } }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
@@ -328,10 +481,13 @@ export class SessionAuth {
       rmSync(temp, { force: true });
       throw new AuthError("user_management_unavailable", 503);
     }
+    // The file holds the revocations now, and nobody else writes without the lock: they are no longer pending.
+    this.settleRevocations(users);
+    this.usersStamp = fileIdentity(path);
+    this.reloadFailedStamp = "";
     // Permission bindings changed: every live session moves to a new epoch so
     // connected clients refetch /session and drop stale scoped responses.
-    this.sessions.bumpAll();
-    return users;
+    this.adopt(users.filter(isPersonalUser));
   }
 
   cookie(value: string, maxAge: number) {
@@ -475,7 +631,7 @@ export class SessionAuth {
       accessAudience,
       expires,
       csrf: nonce(),
-      epoch: 1,
+      epoch: this.nextEpoch(),
     });
     return {
       cookie: this.cookie(id, Math.floor((expires - Date.now()) / 1000)),
@@ -483,7 +639,10 @@ export class SessionAuth {
     };
   }
   current(r: Request) {
+    const now = Date.now();
     this.prune();
+    // The accounts are the file's: a revocation made with personal-config already applies to this request.
+    this.followConfigFile();
     const id = r.headers
       .get("cookie")
       ?.match(/(?:^|;\s*)yeisme_session=([^;]+)/)?.[1];
@@ -497,14 +656,15 @@ export class SessionAuth {
       const user = this.personalUser(s.subject);
       const ref = user?.key_hash_ref || this.config.personal?.password_hash_ref;
       if (
-        (s.last_seen || 0) + 30 * 60_000 <= Date.now() ||
+        (s.last_seen || 0) + personalIdleMs <= now ||
         !ref ||
         s.credential_version !== credentialVersion(secret(ref))
       ) {
         this.sessions.delete(s.id);
         throw new AuthError("login_required");
       }
-      s.last_seen = Date.now();
+      // The idle time runs from the last request. `get` returns a copy, so the time is written back (at most once a minute).
+      if (this.sessions.touch(s.id, now)) s.last_seen = now;
     }
     return s;
   }
@@ -517,6 +677,7 @@ export class SessionAuth {
   }
   private prune() {
     this.sessions.prune();
+    this.sessions.pruneIdle(Date.now(), personalIdleMs);
     for (const [k, v] of this.challenges)
       if (v.expires <= Date.now()) this.challenges.delete(k);
   }

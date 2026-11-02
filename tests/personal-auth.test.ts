@@ -98,7 +98,7 @@ describe("personal login", () => {
     expect(login.status).toBe(200);
     const cookie = login.headers.get("set-cookie")!;
     expect(await (await app(request("/session", "GET", undefined, cookie))).json()).toMatchObject({ username: "editor-01", role: "viewer" });
-    auth.revokePersonalUser("editor-01");
+    await auth.revokePersonalUser("editor-01");
     expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(401);
   });
   it("requires the configured username and exposes only a server-derived role", async () => {
@@ -255,7 +255,7 @@ describe("account management and the configuration file", () => {
     expect(JSON.stringify(after)).not.toContain(created.access_key);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(readdirSync(dir).filter((name) => name.includes(".users.tmp"))).toEqual([]);
-    auth.revokePersonalUser("editor-02");
+    await auth.revokePersonalUser("editor-02");
     const revoked = stored(config);
     expect(revoked.personal?.users).toMatchObject([{ username: "editor-02", enabled: false }]);
     expect(revoked.observation).toEqual(after.observation);
@@ -291,7 +291,7 @@ describe("account management and the configuration file", () => {
     const cookie = login.headers.get("set-cookie")!;
     expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(200);
     writeFileSync(file, "{ not json");
-    expect(() => auth.revokePersonalUser("editor-06")).toThrow(/user_management_unavailable/);
+    await expect(auth.revokePersonalUser("editor-06")).rejects.toThrow(/user_management_unavailable/);
     expect((await app(request("/session", "GET", undefined, cookie))).status).toBe(401);
     expect(config.personal?.users?.find((user) => user.username === "editor-06")?.enabled).toBe(false);
   });

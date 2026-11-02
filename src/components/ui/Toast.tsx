@@ -4,18 +4,22 @@ import { copyReference } from "../../shared/clipboard";
 import { cx } from "./cx";
 
 type ToastTone = "success" | "info" | "warning";
-interface ToastItem { id: number; tone: ToastTone; message: string }
+/** A button on a toast, for a message that asks the reader to do something, such as try again. */
+export interface ToastAction { label: string; run: () => void }
+interface ToastItem { id: number; tone: ToastTone; message: string; action?: ToastAction }
 
-const ToastContext = createContext<(message: string, tone?: ToastTone) => void>(() => {});
+const ToastContext = createContext<(message: string, tone?: ToastTone, action?: ToastAction) => void>(() => {});
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const next = useRef(0);
-  const notify = useCallback((message: string, tone: ToastTone = "info") => {
+  const dismiss = useCallback((id: number) => setItems((current) => current.filter((item) => item.id !== id)), []);
+  const notify = useCallback((message: string, tone: ToastTone = "info", action?: ToastAction) => {
     const id = ++next.current;
-    setItems((current) => [...current.slice(-2), { id, tone, message }]);
-    window.setTimeout(() => setItems((current) => current.filter((item) => item.id !== id)), 3200);
-  }, []);
+    setItems((current) => [...current.slice(-2), { id, tone, message, action }]);
+    // A toast with a button stays longer: it asks to be acted on, and should not vanish while it is being read.
+    window.setTimeout(() => dismiss(id), action ? 12000 : 3200);
+  }, [dismiss]);
   return <ToastContext.Provider value={notify}>
     {children}
     <div aria-live="polite" className="pointer-events-none fixed left-1/2 top-[calc(var(--topbar-height)+12px)] z-[85] flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-2">
@@ -24,6 +28,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           {item.tone === "success" ? <CheckCircle2 /> : item.tone === "warning" ? <CircleAlert /> : <Info />}
         </span>
         <span className="min-w-0 flex-1 text-pretty">{item.message}</span>
+        {item.action && <button type="button" onClick={() => { dismiss(item.id); item.action?.run(); }} className="-my-1 -mr-1.5 inline-flex h-7 shrink-0 items-center whitespace-nowrap rounded-control px-2 text-[13px] font-medium text-accent hover:bg-panel-soft">{item.action.label}</button>}
       </div>)}
     </div>
   </ToastContext.Provider>;

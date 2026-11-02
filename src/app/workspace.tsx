@@ -1,7 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, errorClassOf, errorCode, isAbort, type AuthMethods, type SessionScope, type WorkspaceSession } from "../shared/api/control-center-client";
+import { onStaleSession } from "../shared/api/session-signals";
+import { useToast } from "../components/ui";
 import { clearMediaSessionCaches } from "./media-cache";
 import { clearRecentItems } from "./recent-store";
+import { signOut, staleSessionVerdict, staleSignalPlan } from "./session-recovery";
 import { statusForFailure, type ReadState } from "../shared/read-model/read-state";
 
 export type AuthPhase = "loading" | "login_required" | "forbidden" | "offline" | "ready";
@@ -19,7 +22,8 @@ interface WorkspaceValue {
   setScope: (id: string) => void;
   refresh: () => void;
   login: (input: { username?: string; secret: string }) => Promise<void>;
-  logout: () => Promise<void>;
+  /** Ends the session on the server; resolves false, leaving the page signed in, when the server could not be told. */
+  logout: () => Promise<boolean>;
   expire: () => void;
   noteEpoch: (epoch: number | undefined) => void;
 }
@@ -35,10 +39,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [scopeId, setScopeId] = useState("");
   const [generation, setGeneration] = useState(0);
   const epochRef = useRef<number | undefined>(undefined);
+  /** The CSRF token the page holds, to tell a refusal of the current token from the late answer to an old one. */
+  const csrfRef = useRef<string | undefined>(undefined);
+  /** When the page last read the session because a token was refused; at most one such read per ten seconds. */
+  const staleReloadAt = useRef<number | undefined>(undefined);
   const reloading = useRef(false);
+  const notify = useToast();
 
   const adopt = useCallback((next: WorkspaceSession) => {
     epochRef.current = next.epoch;
+    csrfRef.current = next.csrf;
     setSession(next);
     setScopeId((current) => {
       const remembered = current || sessionStorage.getItem(scopeStorageKey) || "";
@@ -47,19 +57,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setPhase("ready");
   }, []);
 
+  /** The session could not be read: the page shows why instead of its old data. */
+  const failSession = useCallback((error: unknown) => {
+    const code = errorCode(error);
+    setPhaseCode(code);
+    clearMediaSessionCaches();
+    csrfRef.current = undefined;
+    setSession(null);
+    const errorClass = errorClassOf(error);
+    setPhase(errorClass === "login_required" ? "login_required" : errorClass === "forbidden" ? "forbidden" : "offline");
+  }, []);
+
   const loadSession = useCallback(async (signal?: AbortSignal) => {
     try {
       adopt(await api.session(signal));
     } catch (error) {
       if (isAbort(error)) return;
-      const code = errorCode(error);
-      setPhaseCode(code);
-      clearMediaSessionCaches();
-    setSession(null);
-      const errorClass = errorClassOf(error);
-      setPhase(errorClass === "login_required" ? "login_required" : errorClass === "forbidden" ? "forbidden" : "offline");
+      failSession(error);
     }
-  }, [adopt]);
+  }, [adopt, failSession]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -85,9 +101,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setGeneration((value) => value + 1);
   }, []);
 
-  const noteEpoch = useCallback((epoch: number | undefined) => {
-    // Only a newer epoch invalidates; an older one is a late response that the generation guard already discards.
-    if (epoch === undefined || epochRef.current === undefined || epoch <= epochRef.current || reloading.current) return;
+  /** Reads the session again and makes every scoped read start over; one reload at a time. */
+  const reloadSession = useCallback(() => {
+    if (reloading.current) return;
     clearMediaSessionCaches();
     reloading.current = true;
     void loadSession().finally(() => {
@@ -96,22 +112,71 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     });
   }, [loadSession]);
 
+  const noteEpoch = useCallback((epoch: number | undefined) => {
+    // Only a newer epoch invalidates; an older one is a late response that the generation guard already discards.
+    if (epoch === undefined || epochRef.current === undefined || epoch <= epochRef.current) return;
+    reloadSession();
+  }, [reloadSession]);
+
+  // The server refused a CSRF token. Usually the cookie belongs to another session now (another tab signed in as someone
+  // else): the session is read once, and if the server hands out a different token the page takes it and starts over. If it
+  // hands out the very token it refused, the cause is not a stale session (a proxy that strips `Origin` refuses every write),
+  // reloading would only send the same writes into the same refusal, and the page stops with the forbidden state instead.
+  useEffect(() => onStaleSession((sent) => {
+    const now = Date.now();
+    if (reloading.current || staleSignalPlan({ sent, held: csrfRef.current, now, lastReloadAt: staleReloadAt.current }) === "ignore") return;
+    staleReloadAt.current = now;
+    reloading.current = true;
+    void (async () => {
+      try {
+        const next = await api.session();
+        clearMediaSessionCaches();
+        if (staleSessionVerdict(sent, next.csrf) === "refused") {
+          csrfRef.current = undefined;
+          setSession(null);
+          setPhaseCode("csrf_denied");
+          setPhase("forbidden");
+          return;
+        }
+        notify("登录状态已在别处更改，已重新读取当前身份。", "warning");
+        adopt(next);
+        setGeneration((value) => value + 1);
+      } catch (error) {
+        if (!isAbort(error)) failSession(error);
+      } finally {
+        reloading.current = false;
+      }
+    })();
+  }), [notify, adopt, failSession]);
+
   const login = useCallback(async (input: { username?: string; secret: string }) => {
     await api.login({ ...input, keyRequired: methods?.key_required === true });
     await loadSession();
     setGeneration((value) => value + 1);
   }, [loadSession, methods?.key_required]);
 
+  const logoutRef = useRef<() => Promise<boolean>>(async () => false);
   const logout = useCallback(async () => {
     const csrf = session?.csrf;
+    if (csrf) {
+      // The session cookie is HttpOnly: only the server ends the session, so the page signs out only once it has.
+      const ended = await signOut(() => api.logout(csrf));
+      if (!ended.ok) {
+        // A refused token is handled by the stale-session path, which reads the session again.
+        if (!ended.stale) notify("退出登录没有成功，会话仍然有效。", "warning", { label: "重试", run: () => void logoutRef.current() });
+        return false;
+      }
+    }
     clearMediaSessionCaches();
     clearRecentItems();
+    csrfRef.current = undefined;
     setSession(null);
     setPhase("login_required");
     setPhaseCode("");
     setGeneration((value) => value + 1);
-    if (csrf) await api.logout(csrf).catch(() => {});
-  }, [session?.csrf]);
+    return true;
+  }, [session?.csrf, notify]);
+  logoutRef.current = logout;
 
   const value = useMemo<WorkspaceValue>(() => ({
     phase,

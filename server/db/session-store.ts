@@ -5,6 +5,9 @@ import { sessions as table } from "./schema";
 
 type Row = typeof table.$inferSelect;
 
+/** How often a session's last-seen time is written while it is in use. */
+export const touchEveryMs = 60_000;
+
 const audiences = (value: string): string[] => {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -94,6 +97,53 @@ export class SessionStore {
 
   prune(now = Date.now()): void {
     this.db.delete(table).where(lt(table.expires, now)).run();
+  }
+
+  /**
+   * Removes personal sessions that have been idle for `idleMs` or longer. A session that idled out still occupies a row
+   * until it is removed, so without this one account's forgotten sessions could use up the table for everyone. The rule is the
+   * one a request applies (`last_seen + idle <= now`, a missing time counting as 0), so a session removed here is one the next request would have refused.
+   */
+  pruneIdle(now: number, idleMs: number): void {
+    this.db
+      .delete(table)
+      .where(sql`${table.personal} = 1 and coalesce(${table.lastSeen}, 0) + ${idleMs} <= ${now}`)
+      .run();
+  }
+
+  /**
+   * Keeps at most `keep` sessions of one account by removing the oldest ones (by creation, then insertion order).
+   * Returns how many it removed.
+   */
+  evictOldest(issuer: string, subject: string, keep: number): number {
+    const ids = this.db
+      .select({ id: table.id })
+      .from(table)
+      .where(sql`${table.issuer} = ${issuer} and ${table.subject} = ${subject}`)
+      .orderBy(asc(table.createdAt), sql`rowid`)
+      .all()
+      .map((row) => row.id);
+    const surplus = ids.slice(0, Math.max(0, ids.length - Math.max(0, keep)));
+    for (const id of surplus) this.delete(id);
+    return surplus.length;
+  }
+
+  /**
+   * Records that a session was used at `now`. `get` returns a copy, so a change made to it is lost; this is the write
+   * that keeps an active session from idling out. At most one write per `every` ms per session, so a busy page costs one
+   * small update a minute; returns whether it wrote.
+   */
+  touch(id: string, now: number, every = touchEveryMs): boolean {
+    const row = this.db.select({ lastSeen: table.lastSeen }).from(table).where(eq(table.id, id)).get();
+    if (!row || (row.lastSeen !== null && now - row.lastSeen < every)) return false;
+    this.db.update(table).set({ lastSeen: now }).where(eq(table.id, id)).run();
+    return true;
+  }
+
+  /** The highest epoch any stored session has, or 0 with none. */
+  maxEpoch(): number {
+    const row = this.db.select({ n: sql<number | null>`max(${table.epoch})` }).from(table).get();
+    return Number(row?.n || 0);
   }
 
   /** Permission bindings changed: every live session moves to a new epoch. */

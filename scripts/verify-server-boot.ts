@@ -101,6 +101,8 @@ const request = async (path: string, init: RequestInit = {}) => {
 
 let first: Awaited<ReturnType<typeof startServer>>;
 let cookie = "";
+// A new session's epoch starts above every earlier session's, so it is a time-sized number and not 1; it must then stay put.
+let epoch = 0;
 try {
   first = await startServer();
   await check("boots on bun:sqlite with file persistence and health", async () => {
@@ -121,10 +123,13 @@ try {
     cookie = setCookie!.split(";")[0];
   });
 
-  await check("session reads expose epoch 1", async () => {
+  await check("session reads expose a stable epoch", async () => {
     const { response, json } = await request("/api/control-center/v1/session", { headers: { Cookie: cookie } });
     assert.equal(response.status, 200);
-    assert.equal(json!.epoch, 1);
+    assert.ok(Number.isSafeInteger(json!.epoch) && (json!.epoch as number) >= 1, `epoch ${json!.epoch}`);
+    epoch = json!.epoch as number;
+    const again = await request("/api/control-center/v1/session", { headers: { Cookie: cookie } });
+    assert.equal(again.json!.epoch, epoch);
   });
 
   await check("migrations, sessions and durable audit land in the sqlite file with 0600", async () => {
@@ -195,7 +200,7 @@ try {
     try {
       const { response, json } = await request("/api/control-center/v1/session", { headers: { Cookie: cookie } });
       assert.equal(response.status, 200);
-      assert.equal(json!.epoch, 1);
+      assert.equal(json!.epoch, epoch);
       assert.equal(json!.username, username);
     } finally {
       await stopServer(third.child);

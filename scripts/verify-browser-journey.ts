@@ -192,6 +192,9 @@ try {
   const errors: string[] = [];
   const requests: { method: string; path: string; expected?: boolean }[] = [];
   let ignoreExpectedMediaErrors = false;
+  // The sign-out checks make the server refuse a logout on purpose (503, then 403 for a stale token), and the page that holds a
+  // made-up token in the stale-token check has its own writes (the reminder sync) refused too; the browser logs each as a console error.
+  let expectRefusedLogout = false;
   // Connecting a tool project or managing a collected record is a control-center action (owners are only read). While a
   // check does it on purpose, its preview, confirm and sync are expected, and so are a refused project's 403 and a
   // deliberately stale revision's 409.
@@ -199,7 +202,7 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   // net::ERR_NETWORK_CHANGED is Chrome reporting that the host's network interfaces changed (container interfaces coming
   // and going on this machine), not an application error; checks that depend on the request still fail on their own.
-  page.on("console", (message) => { if (message.type() === "error" && !/401/.test(message.text()) && !/net::ERR_NETWORK_CHANGED/.test(message.text()) && !(ignoreExpectedMediaErrors && /503/.test(message.text())) && !(expectControlActions && /40[39]/.test(message.text()) && /\/actions\/(preview|confirm)/.test(message.location().url))) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && !/401/.test(message.text()) && !/net::ERR_NETWORK_CHANGED/.test(message.text()) && !(ignoreExpectedMediaErrors && /503/.test(message.text())) && !(expectRefusedLogout && /50[3]|403/.test(message.text()) && /\/api\/control-center\/v1\//.test(message.location().url)) && !(expectControlActions && /40[39]/.test(message.text()) && /\/actions\/(preview|confirm)/.test(message.location().url))) errors.push(message.text()); });
   page.on("request", (request) => { const path = new URL(request.url()).pathname; requests.push({ method: request.method(), path, expected: expectControlActions && /\/actions\/(preview|confirm)$|\/auctra\/collection\/sync$/.test(path) }); });
 
   await check("login and scoped session", async () => {
@@ -1535,6 +1538,96 @@ try {
         await probe.close();
       }
     }
+  });
+  await check("a logout the server refused keeps the page signed in, says so, and offers a retry", async () => {
+    const logoutRoute = "**/api/control-center/v1/auth/logout";
+    expectRefusedLogout = true;
+    await context.route(logoutRoute, (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "source_unavailable", class: "unavailable" }) }));
+    try {
+      await page.getByRole("button", { name: /当前身份/ }).click();
+      await page.getByRole("menuitem", { name: "退出登录" }).click();
+      const notice = page.getByRole("status").filter({ hasText: "退出登录没有成功，会话仍然有效" });
+      await notice.waitFor({ timeout: 10_000 });
+      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_without_the_server");
+      await page.getByRole("button", { name: /当前身份/ }).waitFor();
+      // Retrying while the server still refuses ends the same way: still signed in, with a new message to try again.
+      await notice.getByRole("button", { name: "重试" }).click();
+      await page.getByRole("status").filter({ hasText: "退出登录没有成功，会话仍然有效" }).waitFor({ timeout: 10_000 });
+      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_by_a_failed_retry");
+    } finally {
+      await context.unroute(logoutRoute);
+      // The browser reports a refused request to the console a moment after the response; keep expecting it until it has.
+      await page.waitForTimeout(500);
+      expectRefusedLogout = false;
+    }
+  });
+  await check("a request refused for a stale CSRF token reads the session again and says the sign-in changed, instead of reporting a missing permission", async () => {
+    const logoutRoute = "**/api/control-center/v1/auth/logout";
+    const sessionReads = () => requests.filter((request) => request.path.endsWith("/api/control-center/v1/session")).length;
+    // The message of the previous check stays up for a while; this one must see only what its own request says.
+    await page.getByText("退出登录没有成功").first().waitFor({ state: "hidden", timeout: 20_000 });
+    const before = sessionReads();
+    expectRefusedLogout = true;
+    await context.route(logoutRoute, (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_denied", class: "forbidden" }) }));
+    // Another tab signed in as someone else: the session read after the refusal carries a different token.
+    const sessionRoute = "**/api/control-center/v1/session";
+    let swapped = false;
+    await context.route(sessionRoute, async (route) => {
+      if (swapped) return route.continue();
+      swapped = true;
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), csrf: "token-handed-out-by-the-other-session" } });
+    });
+    try {
+      await page.getByRole("button", { name: /当前身份/ }).click();
+      await page.getByRole("menuitem", { name: "退出登录" }).click();
+      await page.getByRole("status").filter({ hasText: "登录状态已在别处更改" }).waitFor({ timeout: 10_000 });
+      for (let wait = 0; wait < 50 && sessionReads() === before; wait += 1) await page.waitForTimeout(100);
+      if (sessionReads() === before) throw new Error("session_not_read_again");
+      // Still the same signed-in workspace, and the refusal was not reported as a failed sign-out or as a lack of permission.
+      await page.getByRole("button", { name: /当前身份/ }).waitFor();
+      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_by_a_stale_token");
+      if (await page.getByText("退出登录没有成功").count()) throw new Error("stale_token_reported_as_failed_sign_out");
+      if (await page.getByText("当前身份无权访问").count()) throw new Error("stale_token_reported_as_forbidden");
+    } finally {
+      await context.unroute(logoutRoute);
+      await context.unroute(sessionRoute);
+      // The browser reports a refused request to the console a moment after the response; keep expecting it until it has.
+      await page.waitForTimeout(500);
+      expectRefusedLogout = false;
+    }
+    // The page now holds the made-up token; read the real session again before the next check.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: /当前身份/ }).waitFor({ timeout: 30_000 });
+    // Let the page's own code finish loading before the next check moves on: a reload that cuts a module fetch short is logged as an error.
+    await page.locator("[data-page]").first().waitFor({ timeout: 30_000 });
+  });
+  await check("a refusal that comes back with the same token (a proxy stripping Origin) stops the page after one session read, instead of reloading in a loop", async () => {
+    const logoutRoute = "**/api/control-center/v1/auth/logout";
+    const sessionReads = () => requests.filter((request) => request.path.endsWith("/api/control-center/v1/session")).length;
+    const before = sessionReads();
+    expectRefusedLogout = true;
+    await context.route(logoutRoute, (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_denied", class: "forbidden" }) }));
+    try {
+      await page.getByRole("button", { name: /当前身份/ }).click();
+      await page.getByRole("menuitem", { name: "退出登录" }).click();
+      await page.getByText("服务端拒绝了本页发出的请求").waitFor({ timeout: 10_000 });
+      if (await page.getByText("登录状态已在别处更改").count()) throw new Error("same_token_reported_as_replaced_session");
+      // One read of the session, and then nothing more: no round of reads and writes follows.
+      const settled = sessionReads();
+      if (settled !== before + 1) throw new Error(`session_reads:${settled - before}`);
+      await page.waitForTimeout(3_000);
+      if (sessionReads() !== settled) throw new Error("page_kept_reloading_after_the_refusal");
+    } finally {
+      await context.unroute(logoutRoute);
+      // The browser reports a refused request to the console a moment after the response; keep expecting it until it has.
+      await page.waitForTimeout(500);
+      expectRefusedLogout = false;
+    }
+    // The button on that screen checks again, and the working server lets the page back in.
+    await page.getByRole("button", { name: "重新检查" }).click();
+    await page.getByRole("button", { name: /当前身份/ }).waitFor({ timeout: 30_000 });
+    await page.locator("[data-page]").first().waitFor({ timeout: 30_000 });
   });
   await check("logout clears the workspace", async () => {
     await page.getByRole("button", { name: /当前身份/ }).click();

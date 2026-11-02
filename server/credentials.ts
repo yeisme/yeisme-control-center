@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "./contracts";
 import { credentialFileProblem, statCredentialFile, type CredentialStat } from "./credential-file";
 import { openToolChecks } from "./open-tools/projection";
+import { findEnabledUser } from "./personal-users";
 import { serviceDefinitions } from "../src/service-directory";
 import type { TaskConnectionState } from "../src/task-observation";
 import { openToolKinds, openToolNames, type OpenToolProjection } from "../src/shared/open-tools";
@@ -98,7 +99,7 @@ export function credentialSlots(config: ServerConfig, scope?: ScopeBinding, conn
  */
 export function isPersonalAdmin(config: ServerConfig, session: Pick<Session, "personal" | "issuer" | "subject">): boolean {
   if (!session.personal || session.issuer !== "yeisme:personal") return false;
-  const user = config.personal?.users?.find((candidate) => candidate.enabled !== false && candidate.username === session.subject);
+  const user = findEnabledUser(config.personal?.users, session.subject);
   if (user) return user.role === "admin";
   return config.auth_mode === "personal" && !!config.personal && session.subject === (config.personal.username || "owner") && config.personal.role === "admin";
 }

@@ -6,8 +6,9 @@ import { resolve } from "node:path";
 import { createControlCenter } from "./app";
 import { createObservationLoop, observationSettings } from "./observation-loop";
 import { credentialReminders } from "./observation-credentials";
+import { guardRejections } from "./process-guard";
 import { planStatic } from "./static";
-import { validateControlBind, validateControlOrigin } from "./auth";
+import { decoyDigest, validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
 import {
   defaultDatabasePath,
@@ -15,6 +16,8 @@ import {
   openDatabase,
 } from "./db/client";
 import { RunStore } from "./db/run-store";
+// A detached task that rejects (a status poll, a loop cycle) is logged by code and the process keeps serving.
+guardRejections(process);
 const file = process.env.YEISME_CONTROL_CONFIG;
 const loadBaseConfig = (path: string): ServerConfig => {
   try {
@@ -67,6 +70,8 @@ if (!observationConfig.valid) console.log(`[control-center] background observati
 const observation = observationConfig.enabled && !backgroundOff ? createObservationLoop(services, { credentials: credentialReminders(services) }) : undefined;
 if (observation) services.observation = observation;
 if (observationConfig.enabled && backgroundOff) console.log("[control-center] background observation is configured but switched off by YEISME_CONTROL_BACKGROUND=off");
+// Made once now, off the request path, so a sign-in that names no account costs the same as a real one from the first request on.
+void decoyDigest().catch(() => undefined);
 const server = createServer(async (req, res) => {
   try {
     if (req.headers.host !== new URL(config.origin).host) {

@@ -1,15 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ProviderRunManager } from "../server/provider-live";
+import { RunStore } from "../server/db/run-store";
+import { createMemoryDB } from "../server/db/client";
 import type { ScopeBinding, ServerConfig } from "../server/contracts";
 import { createApp } from "../server/app";
 import { SessionAuth } from "../server/auth";
 import { eikonaRuntimeCapabilities } from "../scripts/fixtures/provider-catalog";
 
+// As personal-config writes a scope: its own `project` is a label of the scope, not the owner project its runs name.
 const scope: ScopeBinding = {
   id: "scope-1",
   tenant: "personal",
   team: "studio",
-  project: "project-1",
+  project: "personal",
   label: "Project",
   owners: {
     eikona: { tenant: "personal", project: "project-1", actor: "owner", audience: "eikona" },
@@ -45,7 +48,8 @@ function runtimeCapabilities(capDeclared: boolean) {
   if (!capDeclared) for (const action of document.data.actions) delete (action.input_schema as { properties: Record<string, unknown> }).properties.max_cost_usd;
   return document;
 }
-function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD" }, options: { capDeclared?: boolean; capUnreadable?: boolean; refuse?: string } = {}) {
+function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD" }, options: { capDeclared?: boolean; capUnreadable?: boolean; refuse?: string; runId?: string } = {}) {
+  const runId = options.runId ?? "eikona-run-1";
   let submit = 0;
   const calls: { action: string; args: Record<string, any>; idempotency_key?: string }[] = [];
   const fetch = async (_url: unknown, init?: RequestInit) => {
@@ -63,9 +67,9 @@ function fetcher(status: Record<string, unknown> = { cost: 0.04, currency: "USD"
         return Response.json({ id: body.id, result: { isError: true, structuredContent: { request_id: "req-1", error: { code: options.refuse, message: "refused before provider submit" } } } });
       if (["generate", "createVideoProviderTask", "voice"].includes(body.params.arguments.action)) {
         submit++;
-        return Response.json({ id: body.id, result: { structuredContent: { result: { run_id: "eikona-run-1", state: "queued" } } } });
+        return Response.json({ id: body.id, result: { structuredContent: { result: { run_id: runId, state: "queued" } } } });
       }
-      return Response.json({ id: body.id, result: { structuredContent: { result: { run_id: "eikona-run-1", state: "succeeded", outputs: ["artifact-1"], ...status } } } });
+      return Response.json({ id: body.id, result: { structuredContent: { result: { run_id: runId, state: "succeeded", outputs: ["artifact-1"], ...status } } } });
     }
     return Response.json({ id: body.id, result: {} });
   };
@@ -143,6 +147,37 @@ describe("ProviderRunManager", () => {
       const reconciled = await manager.reconcile(run.run_ref);
       expect([reconciled.upstream_cost, reconciled.currency, reconciled.cost_state]).toEqual([cost, currency, state]);
       expect(manager.usageRows(scope)[0]).toMatchObject({ upstream_cost: cost, cost_state: state });
+    }
+  });
+  it("lists the usage of the runs a scope made, whatever name its own project carries", async () => {
+    // Two scopes that label themselves alike and bind different owner projects; each run names the owner project of its scope.
+    const store = new RunStore(createMemoryDB());
+    const other: ScopeBinding = { ...scope, id: "scope-2", owners: { ...scope.owners, eikona: { tenant: "personal", project: "project-2", actor: "owner", audience: "eikona" } } };
+    expect(other.project).toBe(scope.project);
+    const first = new ProviderRunManager(config, fetcher(undefined, { runId: "eikona-run-a" }).fetch, store);
+    const second = new ProviderRunManager(config, fetcher(undefined, { runId: "eikona-run-b" }).fetch, store);
+    await first.create(request("canary-scope-one-01"), scope, session);
+    await second.create({ ...request("canary-scope-two-01"), scope_id: "scope-2", project_ref: "project-2" }, other, session);
+    expect(first.usageRows(scope).map((row) => [row.source_ref, row.project_ref])).toEqual([["eikona-run-a", "project-1"]]);
+    expect(first.usageRows(other).map((row) => [row.source_ref, row.project_ref])).toEqual([["eikona-run-b", "project-2"]]);
+    // A scope that never ran anything sees nothing, whatever its project is called.
+    expect(first.usageRows({ ...scope, id: "scope-3" })).toEqual([]);
+  });
+  it("lets the status monitor end quietly when the ledger cannot be read, so the process keeps running", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new RunStore(createMemoryDB());
+      const manager = new ProviderRunManager(config, fetcher().fetch, store);
+      const run = await manager.create(request("canary-monitor-0001"), scope, session);
+      expect(run.state).toBe("queued");
+      // The monitor started by create() is waiting for its first poll; from now on every read of the ledger fails.
+      vi.spyOn(store, "getRun").mockImplementation(() => { throw new Error("database is locked"); });
+      const monitor = (manager as unknown as { monitor(ref: string): Promise<void> }).monitor(run.run_ref);
+      const outcome = expect(monitor).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1500 * 3);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
     }
   });
   it("keeps unknown outcomes unknown instead of retrying", async () => {

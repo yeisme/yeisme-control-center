@@ -176,7 +176,7 @@ export interface Session {
   personal?: boolean;
   last_seen?: number;
   credential_version?: string;
-  /** Monotonic per-session epoch; bumped when permission bindings change. */
+  /** Bumped when permission bindings change. A new session starts above every earlier one (see `SessionAuth.nextEpoch`). */
   epoch: number;
 }
 export interface OwnerPage {

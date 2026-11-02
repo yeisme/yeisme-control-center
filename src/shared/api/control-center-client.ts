@@ -4,6 +4,7 @@ import type { ServiceDirectoryEntry } from "../../service-directory";
 import type { CredentialStatus } from "../credentials";
 import type { AttachmentRead, ContentRead, Coverage, CoverageState, Owner, RequestProjection, RequestQuery, RequestSummary } from "../../request-visibility";
 import type { ControlCenterErrorClass } from "../types";
+import { signalStaleSession, staleSessionCode } from "./session-signals";
 import type { ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt } from "../action-contract";
 import type { WorkQueueFilters, WorkQueueResponse } from "../work-queue";
 import type { CreativeFlowProjection } from "../creative-flow";
@@ -63,7 +64,7 @@ export function isAbort(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+async function readJson<T>(response: Response, sentCsrf: string | null = null): Promise<T> {
   let body: unknown;
   try {
     body = await response.json();
@@ -74,6 +75,8 @@ async function readJson<T>(response: Response): Promise<T> {
     const envelope = body as { error?: unknown; class?: unknown };
     const code = typeof envelope?.error === "string" ? envelope.error : "control_center_unavailable";
     const declared = typeof envelope?.class === "string" && errorClasses.has(envelope.class as ControlCenterErrorClass) ? envelope.class as ControlCenterErrorClass : null;
+    // The page's token is not the cookie's session's any more (another tab signed in as someone else): the workspace reads the session again.
+    if (code === staleSessionCode) signalStaleSession(sentCsrf);
     const allowedMethods = Array.isArray((envelope as { allowed_methods?: unknown })?.allowed_methods)
       ? (envelope as { allowed_methods: unknown[] }).allowed_methods.filter((method): method is string => typeof method === "string")
       : undefined;
@@ -106,7 +109,7 @@ async function post<T>(path: string, query: Query, body: unknown, csrf: string |
     signal,
     headers: { "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) },
     body: JSON.stringify(body),
-  }));
+  }), csrf);
 }
 
 /** Server echo of the session epoch; absent on servers that predate the epoch contract. */

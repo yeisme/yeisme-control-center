@@ -5,8 +5,8 @@
  *
  * The account is a verifier: its role must be viewer, so a release that lets a viewer read secrets or run admin actions is
  * caught by the one account that is safe to hand to a script. Exactly one login is made per run (the server's login limiter is
- * global: 5 attempts per 15 minutes), the access key and the session cookie live in memory only, and nothing in the result
- * contains either.
+ * global: 5 refused attempts per 15 minutes, so a retry loop with a wrong key would lock the administrator out too), the
+ * access key and the session cookie live in memory only, and nothing in the result contains either.
  *
  * Probe file (`YEISME_RELEASE_PROBE_FILE`, mode 0600, a regular file) holds the account's access key in one of two forms:
  *   - the key alone, on the first line; the username then comes from `YEISME_RELEASE_PROBE_USERNAME`;
