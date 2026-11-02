@@ -87,7 +87,7 @@ jobs:
           bun run test:provider-live -- --confirm-live --modality "$CANARY_MODALITY" --run-label "$CANARY_RUN_LABEL" --total-usd "$CANARY_TOTAL_USD" --image-usd "$CANARY_IMAGE_USD" --video-usd "$CANARY_VIDEO_USD" --audio-usd "$CANARY_AUDIO_USD"
       - name: Upload redacted canary evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provider-live-evidence
           if-no-files-found: warn
