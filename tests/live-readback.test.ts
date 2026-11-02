@@ -138,7 +138,7 @@ describe("authenticated read-back", () => {
 
   it("fails when services show a credential reference or a home directory", async () => {
     const { base } = await running();
-    for (const [leak, reason] of [['{"credential_ref":"x"}', "leaks:credential_ref"], ['{"path":"/home/someone/.config/key"}', "leaks:home_path"], ['{"key_hash_ref":"x"}', "leaks:hash_ref"]] as const) {
+    for (const [leak, reason] of [['{"credential_ref":"x"}', "leaks:credential_ref"], ['{"path":"/home/a/.config/key"}', "leaks:home_path"], ['{"key_hash_ref":"x"}', "leaks:hash_ref"]] as const) {
       const result = await runLiveReadback({ origin, credentials: { username: "probe", key: viewerKey }, fetchImpl: override(base, (path) => (path.startsWith("/services") ? new Response(leak, { status: 200 }) : undefined)) });
       expect(result.status).toBe("failed");
       expect(result.checks.find((check) => check.name === "services_without_secrets")).toMatchObject({ state: "failed", reason });
