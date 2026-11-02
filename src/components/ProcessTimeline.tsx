@@ -52,7 +52,7 @@ export function ProcessTimeline({ observation, events, loading = false, error, r
   const checkpoints = events?.length ? events : observation?.checkpoints || [];
   const prompt = observation?.prompt_capture || checkpoints.find((event) => event.prompt_capture)?.prompt_capture;
   const hasObservation = !!observation;
-  if (loading) return <div className="space-y-2" aria-label="加载过程观察"><div className="skeleton h-16" /><div className="skeleton h-12" /><div className="skeleton h-12" /></div>;
+  if (loading) return <div className="space-y-2" role="status" aria-label="加载过程观察"><div className="skeleton h-16" /><div className="skeleton h-12" /><div className="skeleton h-12" /></div>;
   const coverage = observation?.coverage;
   const sourceReason = !error ? readableReason(reason) : null;
   const notices = [

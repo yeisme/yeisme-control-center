@@ -36,15 +36,16 @@ export async function running(extra: Partial<ServerConfig["personal"]> = {}) {
   return { home, file, config, auth, app: createApp(config, { auth }) };
 }
 
-export const call = (app: App, path: string, options: { method?: string; body?: unknown; cookie?: string; csrf?: string } = {}) =>
+/** `peer` is the address of the connection the request arrived on, as the server entry passes it; `forwardedFor` is the header a proxy sets. */
+export const call = (app: App, path: string, options: { method?: string; body?: unknown; cookie?: string; csrf?: string; peer?: string; forwardedFor?: string } = {}) =>
   app(new Request(origin + "/api/control-center/v1" + path, {
     method: options.method ?? "GET",
-    headers: { Origin: origin, ...(options.cookie ? { Cookie: options.cookie } : {}), ...(options.csrf ? { "X-CSRF-Token": options.csrf } : {}) },
+    headers: { Origin: origin, ...(options.cookie ? { Cookie: options.cookie } : {}), ...(options.csrf ? { "X-CSRF-Token": options.csrf } : {}), ...(options.forwardedFor ? { "X-Forwarded-For": options.forwardedFor } : {}) },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  }));
+  }), { peer: options.peer });
 
-export const signIn = async (app: App, username: string, key: string) => {
-  const response = await call(app, "/auth/personal", { method: "POST", body: { username, key } });
+export const signIn = async (app: App, username: string, key: string, from: { peer?: string; forwardedFor?: string } = {}) => {
+  const response = await call(app, "/auth/personal", { method: "POST", body: { username, key }, ...from });
   return { response, cookie: response.headers.get("set-cookie") ?? "" };
 };
 

@@ -63,19 +63,58 @@ A personal session MUST end when 30 minutes have passed since its last request, 
 - **WHEN** a session is used twice within a minute
 - **THEN** its stored last-seen time is written once
 
-### Requirement: Only refused credentials count against the sign-in limit
+### Requirement: Refused sign-ins are counted by client address and by account, and only refused ones
 
-The sign-in limit MUST count the sign-ins whose credentials were checked and refused (5 in 15 minutes, for the whole server). A successful sign-in, and a failure on the server's side such as an unreadable credential file, MUST NOT count. A sign-in that arrives while another is being checked MUST be answered 429 `login_busy`, which is not a failure and is not counted; the sign-in page MUST describe `login_busy` and `login_rate_limited` differently.
+The sign-in limit MUST count the sign-ins whose credentials were checked and refused, in four buckets over 15 minutes: 5 per known account and client address, 20 per client address whatever the name, 50 per known account across addresses, and 500 for the whole server. A sign-in that names no account MUST count only against its client address and the server bucket. Every bucket MUST be asked before any credential work and before the busy flag is taken, and a full bucket MUST be answered 429 `login_rate_limited`. A successful sign-in, and a failure on the server's side such as an unreadable credential file, MUST NOT count. A sign-in that arrives while another is being checked MUST be answered 429 `login_busy`, which is not a failure and is not counted; the sign-in page MUST describe `login_busy` and `login_rate_limited` differently. Each of the limiter's tables MUST hold at most 10,000 keys however many addresses a flood comes from.
 
 #### Scenario: many successful sign-ins
 
 - **WHEN** the same account signs in successfully seven times in a row
-- **THEN** every sign-in is 200, and five refusals are then needed before the next attempt is 429 `login_rate_limited`
+- **THEN** every sign-in is 200, and five refusals from one address are then needed before the next attempt from it is 429 `login_rate_limited`
 
 #### Scenario: two sign-ins at once
 
 - **WHEN** two sign-ins arrive together
 - **THEN** one is 200 and the other is 429 `login_busy`, and the next sign-in is not limited
+
+#### Scenario: unknown names from one address do not lock the administrator out
+
+- **WHEN** twenty sign-ins from one address name accounts that do not exist
+- **THEN** the twenty-first from that address is 429 `login_rate_limited`, the administrator's correct key from another address is 200, and five unknown names from one address are only five refusals
+
+#### Scenario: guesses at one account from one address
+
+- **WHEN** five wrong keys for one account arrive from one address
+- **THEN** that account from that address is 429, while the same account from another address, and other accounts from that address, sign in
+
+#### Scenario: many addresses
+
+- **WHEN** fifty wrong keys for one account arrive from fifty addresses, or five hundred refused sign-ins arrive from five hundred addresses
+- **THEN** the next attempt for that account, or for anyone, is 429 `login_rate_limited`, and an account that was not guessed at is not limited by the first case
+
+#### Scenario: limits come before the password work
+
+- **WHEN** a bucket is full while the busy flag is set, and a sign-in arrives
+- **THEN** it is answered `login_rate_limited` and not `login_busy`, and no password check ran for it
+
+### Requirement: The client address of a sign-in comes from the connection, and a forwarding header only when the connection is from this machine
+
+`server/index.ts` MUST hand the connection's peer address to the request handler. The server MUST take the client address from the last entry of `X-Forwarded-For` only when the peer is a loopback address (127.0.0.0/8, `::1`, or an IPv4-mapped form) and that entry is a valid IP address; in every other case, including an absent or malformed header, it MUST use the peer address. A handler called without a peer MUST count every sign-in as coming from `unknown`.
+
+#### Scenario: behind the proxy on this machine
+
+- **WHEN** the peer is `127.0.0.1` and `X-Forwarded-For` is `203.0.113.5, 198.51.100.7`
+- **THEN** the sign-in is counted against `198.51.100.7`
+
+#### Scenario: a header from another machine
+
+- **WHEN** the peer is `203.0.113.9` and each request carries a different `X-Forwarded-For`
+- **THEN** every request is counted against `203.0.113.9`, and the twenty-first refused one is 429
+
+#### Scenario: a header that is not an address
+
+- **WHEN** the peer is loopback and the header is `not-an-address`, `198.51.100.7:4433` or empty
+- **THEN** the peer address is used
 
 ### Requirement: Input the caller got wrong is a 400 and not a 503
 
@@ -196,12 +235,12 @@ The server MUST remove personal sessions that have been idle for 30 minutes befo
 
 ### Requirement: A sign-in that names no account is checked like a wrong key
 
-When the name given is neither an enabled account nor the configuration's legacy owner, the server MUST check the secret against a decoy scrypt digest made once at startup, count the attempt as refused and answer 401 `invalid_credentials`. It MUST NOT answer 503 because the legacy owner's digest file cannot be read.
+When the name given is neither an enabled account nor the configuration's legacy owner, the server MUST check the secret against a decoy scrypt digest made once at startup, count the attempt as refused only against its client address and the server bucket (never against an account), and answer 401 `invalid_credentials`. It MUST NOT answer 503 because the legacy owner's digest file cannot be read.
 
-#### Scenario: forty unknown names with the legacy digest missing
+#### Scenario: unknown names with the legacy digest missing
 
-- **WHEN** forty sign-ins name accounts that do not exist while the legacy owner's digest file is missing
-- **THEN** the first five are 401, the rest are 429, none is 503, and a real name with a wrong key gets the same 401 body
+- **WHEN** twenty-one sign-ins from one address name accounts that do not exist while the legacy owner's digest file is missing
+- **THEN** the first twenty are 401, the twenty-first is 429, none is 503, and a real name with a wrong key gets the same 401 body
 
 ### Requirement: A failed reload of the account list is logged once, and the command line writes only as the file's owner
 
@@ -239,3 +278,60 @@ When a request is refused with 403 `csrf_denied`, the page MUST ignore the refus
 
 - **WHEN** every write is refused with `csrf_denied` whatever the token
 - **THEN** the page reads the session once, sees the same token, stops on a message that names the likely cause, and sends no further round of reads and writes
+
+### Requirement: The audit of a refused sign-in names only configured accounts and is not written per refusal
+
+For a refused sign-in the server MUST record the username only when it is exactly the name of a configured account (the legacy owner included) and MUST record `(unknown)` otherwise, so that a key pasted into the name box never reaches the audit. It MUST NOT write a row for a sign-in answered 429 `login_rate_limited` or `login_busy`; it MUST write one row when a bucket fills, naming the bucket in `meta.bucket`, once per bucket per window. A successful sign-in MUST be recorded as before, and a failure that needs no wrong credential (the legacy digest file unreadable) MUST be written at most once a minute per error code.
+
+#### Scenario: names and keys in the name box
+
+- **WHEN** refused sign-ins name a pasted access key, a configured account, the legacy owner, and a configured account in another letter case
+- **THEN** the rows name `(unknown)`, the account, the owner and `(unknown)`, and the pasted key appears nowhere in them
+
+#### Scenario: one row when a bucket fills
+
+- **WHEN** an address makes thirty-five refused sign-ins with different unknown names
+- **THEN** the audit holds twenty refusals and one row for the address bucket, none for the fifteen turned away, and the same holds for the account-and-address bucket after five guesses at one account
+
+#### Scenario: told to wait, and successes
+
+- **WHEN** five sign-ins arrive while another is being checked, and administrators sign in
+- **THEN** the five leave no row, and the successful sign-ins are written as before
+
+### Requirement: The deployment guide says what the holder of an account's key can do to that account's sign-in
+
+`docs/lan-deployment.md` MUST state that anyone who holds an account's key can end that account's sessions (the cap of 8 per account) and use up its budget of 20 sign-ins in 15 minutes, which keeps the account's real user from signing in for 15 minutes; that while an account is at its budget a wrong key is answered 429 and the name of no account 401, so account names are not secrets; and that an account should be given to one person, and a key that several people share rotated.
+
+#### Scenario: an operator plans accounts
+
+- **WHEN** an operator reads the sign-in limits section of the guide
+- **THEN** it says one account per person and rotate a shared key, and says why
+
+### Requirement: A limited credential is shown on the Services credentials panel and is reminded of nowhere
+
+Only the credential states `unreadable`, `rejected`, `expired` and `expiring` MUST raise a background reminder (category `credential`) and a `credential_renewal` work queue item. The state `limited` (the credential works, some reads are refused) MUST appear on the Services credentials panel only. The observation loop MUST end, at its next cycle, every open reminder whose key is a `limited` key, whatever the person had done with it, and MUST NOT hold a `limited` key as unknown when it has no reading of a slot. The work queue MUST NOT remove or add any other item because of a limited credential.
+
+#### Scenario: a credential that is accepted but cannot read everything
+
+- **WHEN** a tool accepts the token but refuses one of the reads it needs it for, and the observation loop runs
+- **THEN** the Services panel row is `limited`, no reminder is opened, and the work queue holds no `credential_renewal` item for it
+
+#### Scenario: a reminder that an earlier version opened
+
+- **WHEN** an open `limited` reminder exists, acknowledged or not, and a cycle runs
+- **THEN** it is marked recovered, no longer counts as unread, is not opened again by later cycles, and the credential is still `limited` on the panel
+
+#### Scenario: a slot with no reading
+
+- **WHEN** the keys a cycle holds as unknown are worked out for a slot that was never read
+- **THEN** they are the keys of `rejected` and `unreadable` only
+
+### Requirement: Hovering a button in a notice never takes its label below 4.5:1
+
+A button inside a notice (`NoticeAction`) MUST show hover by lifting its background toward the panel colour, not by tinting it with its own text colour, so that its label keeps a contrast ratio of at least 4.5:1 against the notice's background in every tone, in both themes, hovered or not. The accessibility scan of the degraded notice MUST scan a button of the open notice with the pointer on it.
+
+#### Scenario: the pointer is where the toggle was
+
+- **WHEN** the notice stack is unfolded with a click on its toggle and the pointer is now over a button of the first notice, on a 390 px wide window
+- **THEN** the button's label has at least 4.5:1 against its hovered background, and the scan reports nothing
+

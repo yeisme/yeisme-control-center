@@ -1,12 +1,13 @@
 import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
 import type { ControlCenterRole } from "../src/service-directory";
 import { credentialFileProblem, type CredentialFileReason } from "./credential-file";
 import { checkPassword, credentialVersion, hashPassword } from "./password";
-import { ConfigBusyError, fileIdentity, withConfigLock, type LockOptions } from "./config-lock";
+import { ConfigBusyError, ConfigChangedError, canonicalConfigPath, fileIdentity, replaceConfigFile, withConfigLock, type LockOptions } from "./config-lock";
 import { duplicateNames, enabledUsers, findEnabledUser, isEnabledFlag } from "./personal-users";
+import { LoginLimiter, loginLimits } from "./login-limits";
 import { SessionStore } from "./db/session-store";
 import { createMemoryDB } from "./db/client";
 const nonce = () => randomBytes(32).toString("base64url");
@@ -179,8 +180,8 @@ export class SessionAuth {
   ) {
     this.sessions = sessions ?? new SessionStore(createMemoryDB());
   }
-  /** When the sign-ins that failed in the last 15 minutes were tried; only these count against the limit. */
-  private loginFailures: number[] = [];
+  /** The limits on refused sign-ins: per account and client address, per address, per account, and for the whole server. */
+  limiter = new LoginLimiter(loginLimits, () => Date.now());
   private loginBusy = false;
   /** When each account signed in successfully within the budget window; only real accounts ever get an entry. */
   private loginSuccesses = new Map<string, number[]>();
@@ -313,7 +314,11 @@ export class SessionAuth {
   role(s: Session) {
     return this.principal(s)?.role === "admin" ? "admin" : "viewer";
   }
-  async personalLogin(request: Request, secretValue: string, username?: string) {
+  /**
+   * `address` is where the request came from (`clientAddress`), which the limits on refused sign-ins are kept by. An error this throws
+   * for a refused sign-in carries `trips`, the limit buckets that the refusal filled, so the caller can record that once.
+   */
+  async personalLogin(request: Request, secretValue: string, username?: string, address = "unknown") {
     this.followConfigFile();
     const users = this.personalUsers();
     const user = username ? this.personalUser(username) : undefined;
@@ -327,31 +332,27 @@ export class SessionAuth {
     validateControlOrigin(this.config.origin);
     const personal = this.config.personal;
     const now = Date.now();
-    this.loginFailures = this.loginFailures.filter(
-      (v) => now - v < 15 * 60_000,
-    );
     // Who could this be? An enabled account of that name, or the legacy owner of the configuration. Anything else names no account.
     const legacy = !user && (personal.username === undefined ? users.length === 0 : username === personal.username);
     const subject = user ? user.username : legacy ? personal.username || "owner" : undefined;
-    // An account that signed in too often is refused before any credential work, for that account only. Only successful
-    // sign-ins fill the budget, so nobody can use up another account's by guessing at its name.
+    // Every limit is asked before any password work and before the busy flag, so a refused request costs almost nothing. The
+    // limits on refused attempts are kept by account and address, by address, by account and for the whole server; a name that
+    // is no account is only counted against its address and the server (see `login-limits.ts`).
+    if (this.limiter.full(address, subject).length) throw new AuthError("login_rate_limited", 429);
+    // An account that signed in too often is refused too, for that account only. Only successful sign-ins fill this budget,
+    // so nobody can use up another account's by guessing at its name.
     if (subject !== undefined && this.successesOf(subject, now).length >= loginBudget.max)
       throw new AuthError("login_rate_limited", 429);
     // Credentials are checked one at a time, so a second sign-in that arrives meanwhile is told to wait a moment. Only a
-    // sign-in whose credentials were checked and refused counts against the limit: a success, or a server-side problem, does not.
+    // sign-in whose credentials were checked and refused counts against the limits: a success, or a server-side problem, does not.
     if (this.loginBusy) throw new AuthError("login_busy", 429);
-    if (this.loginFailures.length >= 5)
-      throw new AuthError("login_rate_limited", 429);
     this.loginBusy = true;
     try {
       // A name that matches no account is checked against a decoy digest of the same cost, so it fails as a wrong key does
       // (401) and counts as one, and never as a 503 that would tell a name that exists from one that does not.
       const encoded = user ? secret(user.key_hash_ref) : legacy ? secret(personal.password_hash_ref) : await decoyDigest();
       const valueMatches = await checkPassword(secretValue, encoded);
-      const refused = () => {
-        this.loginFailures.push(now);
-        return new AuthError("invalid_credentials", 401);
-      };
+      const refused = () => Object.assign(new AuthError("invalid_credentials", 401), { trips: this.limiter.failed(address, subject) });
       const binding = user ? this.personalUserBinding(user) : legacy ? this.personalBinding() : undefined;
       if (!valueMatches || !binding) throw refused();
       this.prune();
@@ -384,6 +385,16 @@ export class SessionAuth {
   private successesOf(subject: string, now: number) {
     return (this.loginSuccesses.get(subject) ?? []).filter((at) => now - at < loginBudget.windowMs);
   }
+  /**
+   * The name to record for a sign-in that was refused: the username only when it is exactly a configured account (the legacy
+   * owner's name included), otherwise `(unknown)`. What is typed into the username box is the visitor's text, and may be a key.
+   */
+  auditName(username?: string): string {
+    const personal = this.config.personal;
+    if (!personal) return "(unknown)";
+    if (username === undefined) return personal.username === undefined && !personal.users?.length ? "owner" : "(unknown)";
+    return username === personal.username || (personal.users ?? []).some((user) => user.username === username) ? username : "(unknown)";
+  }
   listPersonalUsers() {
     this.followConfigFile();
     const enabled = new Set<PersonalUser>(enabledUsers(this.personalUsers()));
@@ -400,7 +411,8 @@ export class SessionAuth {
     const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
     if (!input.scope_ids.length || input.scope_ids.some((id) => !allowedScopes.has(id))) throw new AuthError("scope_not_found", 404);
     const accessKey = "yk_live_" + nonce();
-    const keyHashRef = resolve(this.config.config_file + ".users", input.username + ".key");
+    // Beside the real file, as the command line puts it, so both name the same directory whatever path they were given.
+    const keyHashRef = resolve(canonicalConfigPath(this.config.config_file) + ".users", input.username + ".key");
     const digest = (await hashPassword(accessKey)) + "\n";
     try {
       mkdirSync(dirname(keyHashRef), { recursive: true, mode: 0o700 });
@@ -437,8 +449,7 @@ export class SessionAuth {
     this.endSessionsOf(username);
     await this.persistConfig((stored) => stored);
   }
-  private readConfigFile(): ServerConfig {
-    const path = this.config.config_file;
+  private readConfigFile(path = this.config.config_file): ServerConfig {
     if (!path) throw new AuthError("user_management_unavailable", 503);
     try {
       return JSON.parse(readFileSync(path, "utf8")) as ServerConfig;
@@ -456,10 +467,18 @@ export class SessionAuth {
    * (hashing, key generation) belongs before this call.
    */
   private async persistConfig(change: (stored: PersonalUser[]) => PersonalUser[]): Promise<void> {
-    const path = this.config.config_file;
-    if (!path) throw new AuthError("user_management_unavailable", 503);
+    if (!this.config.config_file) throw new AuthError("user_management_unavailable", 503);
+    // The real file: a configuration reached through a link is rewritten in place, and the lock is made beside it.
+    const path = canonicalConfigPath(this.config.config_file);
     try {
-      await withConfigLock(path, () => this.writeAccounts(path, change), this.lockOptions);
+      await withConfigLock(path, () => {
+        // A writer that ignores the lock can still change the file between our read and our rename; the rename is refused
+        // then (`ConfigChangedError`) and the whole read, change and write is done again on what that writer left.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try { return this.writeAccounts(path, change); } catch (error) { if (!(error instanceof ConfigChangedError)) throw error; }
+        }
+        throw new ConfigBusyError();
+      }, this.lockOptions);
     } catch (error) {
       if (error instanceof ConfigBusyError) throw new AuthError("config_busy", 503);
       if (error instanceof AuthError) throw error;
@@ -468,22 +487,15 @@ export class SessionAuth {
   }
   /** The part of `persistConfig` that runs while the lock is held. */
   private writeAccounts(path: string, change: (stored: PersonalUser[]) => PersonalUser[]) {
-    const stored = this.readConfigFile();
+    const version = fileIdentity(path);
+    const stored = this.readConfigFile(path);
     if (!stored.personal) throw new AuthError("user_management_unavailable", 503);
     const fresh = Array.isArray(stored.personal.users) ? stored.personal.users : [];
     // Pending revocations go into every write, so a write can never bring a revoked account back.
     const users = this.withRevocations(change(fresh));
-    const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.users.tmp`;
-    try {
-      writeFileSync(temp, JSON.stringify({ ...stored, personal: { ...stored.personal, users } }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-      renameSync(temp, path);
-    } catch {
-      rmSync(temp, { force: true });
-      throw new AuthError("user_management_unavailable", 503);
-    }
+    this.usersStamp = replaceConfigFile(path, JSON.stringify({ ...stored, personal: { ...stored.personal, users } }, null, 2) + "\n", version);
     // The file holds the revocations now, and nobody else writes without the lock: they are no longer pending.
     this.settleRevocations(users);
-    this.usersStamp = fileIdentity(path);
     this.reloadFailedStamp = "";
     // Permission bindings changed: every live session moves to a new epoch so
     // connected clients refetch /session and drop stale scoped responses.

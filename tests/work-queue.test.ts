@@ -289,13 +289,15 @@ describe("work queue: credential renewal", () => {
   const queue = (credentials: CredentialStatus[], extra: Partial<Parameters<typeof buildWorkQueue>[0]> = {}) => buildWorkQueue({ scope, session, tasks: [], connections: [], notifications: [], credentials, ...extra }, now);
   const kinds = (response: ReturnType<typeof queue>) => response.items.map((item) => `${item.kind}:${item.source_ref}`);
 
-  it("adds one item per credential that needs attention, linked to the credentials and the renewal steps of its tool", () => {
+  it("adds one item per credential that cannot be used or will not be for long, linked to the credentials and the renewal steps of its tool", () => {
     const response = queue([
       credential({}),
       credential({ id: "open_tool:drivebridge", owner: "drivebridge", label: "DriveBridge", state: "expiring", stage: "1d", reason: undefined, days_left: 1, expires_at: "2026-11-02T08:00:00.000Z" }),
-      credential({ id: "connection:eikona-main", owner: "eikona", label: "Eikona 主库", state: "limited", reason: "content_denied" }),
+      credential({ id: "connection:eikona-main", owner: "eikona", label: "Eikona 主库", state: "unreadable", reason: "permissions" }),
       credential({ id: "provider:sonora", owner: "sonora", label: "Sonora 生成", state: "expired", reason: undefined }),
-      // Nothing to do about these.
+      // Nothing to do about these: the credentials panel shows a limited one, and nothing is pushed at anyone.
+      credential({ id: "connection:lim", owner: "scaena", label: "Scaena", state: "limited", reason: "content_denied" }),
+      credential({ id: "open_tool:lim", owner: "gateway", label: "MCP Gateway", state: "limited", reason: "read_forbidden" }),
       credential({ id: "connection:b", state: "ok", reason: undefined }),
       credential({ id: "connection:c", state: "unknown_expiry", reason: undefined }),
     ]);
@@ -310,7 +312,7 @@ describe("work queue: credential renewal", () => {
     expect(response.items.find((item) => item.source_ref === "provider:sonora")!.safe_links[1]).toMatchObject({ target: "guide", ref: "guide-renew" });
     const drive = response.items.find((item) => item.source_ref === "open_tool:drivebridge")!;
     expect(drive).toMatchObject({ title: "DriveBridge · 即将到期，还剩 1 天", state: "expiring", priority: "high", credential: { stage: "1d", days_left: 1, expires_at: "2026-11-02T08:00:00.000Z" } });
-    expect(response.items.find((item) => item.source_ref === "connection:eikona-main")!.priority).toBe("normal");
+    expect(response.items.find((item) => item.source_ref === "connection:eikona-main")!.priority).toBe("critical");
     // A key the same on every read, whatever state the credential is in, so an open Inspector stays open.
     expect(queue([credential({ state: "expired", reason: undefined })]).items[0].work_ref).toBe(gateway.work_ref);
   });
@@ -323,7 +325,7 @@ describe("work queue: credential renewal", () => {
     expect(kinds(plain).sort()).toEqual(["service_blocked:eikona-main", "service_blocked:gateway"]);
     const refused = queue([credential({}), connectionRow({ state: "rejected", reason: "owner_denied" })], { connections: [refusedConnection], openTools: [gatewayDown] });
     expect(kinds(refused).sort()).toEqual(["credential_renewal:connection:eikona-main", "credential_renewal:open_tool:gateway"]);
-    // An expiring or limited credential does not explain why the tool is blocked, so both items stay.
+    // An expiring credential does not explain why the tool is blocked, so both items stay.
     const expiring = queue([credential({ state: "expiring", stage: "7d", reason: undefined, days_left: 6 })], { openTools: [gatewayDown] });
     expect(kinds(expiring).sort()).toEqual(["credential_renewal:open_tool:gateway", "service_blocked:gateway"]);
     // A different tool's item is not touched, nor are a backend of this one or a contract gap.
@@ -354,6 +356,14 @@ describe("work queue: credential renewal", () => {
   it("counts a refused, unreadable or expired credential as blocking, and an expiring one as not", () => {
     const counts = (state: CredentialStatus["state"]) => queue([credential({ state, reason: undefined })]).counts.blocked;
     expect([counts("rejected"), counts("unreadable"), counts("expired"), counts("expiring"), counts("limited")]).toEqual([1, 1, 1, 0, 0]);
+  });
+
+  it("makes no item for a limited credential, and leaves the blocked item of its tool as it is", () => {
+    const limited = credential({ state: "limited", reason: "read_forbidden" });
+    expect(queue([limited]).items).toEqual([]);
+    expect(queue([limited]).counts.total).toBe(0);
+    // The tool is down for a reason of its own: that item stays, and the limited credential adds nothing next to it.
+    expect(kinds(queue([limited], { openTools: [gatewayDown] }))).toEqual(["service_blocked:gateway"]);
   });
 
   it("is built from the rows it is given and asks nobody: no credential rows, no credential items", () => {

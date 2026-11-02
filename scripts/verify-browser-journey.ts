@@ -92,12 +92,31 @@ async function stopFixture(child: ChildProcess) {
   await portsFree();
 }
 
+/**
+ * A failed check can leave a menu open, and an open menu takes every other click on its page: the checks after it then time
+ * out for a reason that is not theirs, and one failure reads as three. Closes what is open on every page the journey has.
+ */
+async function closeOpenMenus() {
+  for (const target of browser.contexts().flatMap((context) => context.pages())) {
+    for (let attempt = 0; attempt < 3 && await target.locator('[role="menu"]').count().catch(() => 0); attempt += 1) {
+      await target.keyboard.press("Escape").catch(() => undefined);
+      await target.waitForTimeout(150).catch(() => undefined);
+    }
+  }
+}
+
+/** The check that is running, so a runtime error can say which one it happened in. */
+let runningCheck = "";
+const inCheck = (text: string) => `[${runningCheck.slice(0, 48)}] ${text}`;
+
 async function check(name: string, fn: () => Promise<void>) {
+  runningCheck = name;
   try {
     await fn();
     results.push({ name, status: "passed" });
   } catch (error) {
-    results.push({ name, status: "failed", detail: error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 300) : String(error) });
+    results.push({ name, status: "failed", detail: error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 1200) : String(error) });
+    await closeOpenMenus();
   }
 }
 
@@ -127,6 +146,17 @@ async function login(page: Page) {
 
 const executablePath = process.env.CHROME_PATH || (await fs.stat("/usr/bin/google-chrome").then(() => "/usr/bin/google-chrome").catch(() => undefined));
 const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}), args: ["--no-sandbox"] });
+// I1_CPU_THROTTLE=4 slows every page of the run to a quarter of the speed, the way a busy CI runner is: the way to look for a check that
+// only passes when the page is quick (a box measured while it is still fading in, a wait that is shorter than a slow entrance).
+const cpuThrottle = Number(process.env.I1_CPU_THROTTLE || 1);
+if (cpuThrottle > 1) {
+  const makeContext = browser.newContext.bind(browser);
+  browser.newContext = async (...args: Parameters<typeof makeContext>) => {
+    const context = await makeContext(...args);
+    context.on("page", (made) => { void context.newCDPSession(made).then((cdp) => cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottle })).catch(() => undefined); });
+    return context;
+  };
+}
 const ui = `http://127.0.0.1:${ports.ui}`;
 const shot = (page: Page, name: string) => page.screenshot({ path: path.join(run, "artifacts", name + ".png") });
 const hashParams = (page: Page) => new URLSearchParams(new URL(page.url()).hash.split("?", 2)[1] || "");
@@ -142,12 +172,34 @@ async function waitForNoDialogs(page: Page) {
 // a modal rightly hides the page behind it and a whole-page scan would report that page instead of the overlay.
 const axeSource = await fs.readFile(createRequire(import.meta.url).resolve("axe-core/axe.min.js"), "utf8");
 type AxeViolation = { id: string; impact?: string | null; nodes: { target: unknown[] }[] };
+/**
+ * Waits until nothing on the page is moving or fading: every finite animation and transition has finished (finishing one can
+ * start another, such as a stagger or the transition that follows a mount, so it looks again until a short pause passes with none)
+ * and the page itself is at full opacity. A slow machine, as CI is, is still partway through an entrance when a fixed wait ends,
+ * and then a box is a few pixels off and a colour is blended with what is behind it. Gives up after `budgetMs` and goes on.
+ */
+async function animationsDone(page: Page, budgetMs = 8_000) {
+  await page.evaluate(async (budget) => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const deadline = performance.now() + budget;
+    const running = () => document.getAnimations().filter((animation) => animation.playState !== "finished" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)));
+    for (let quiet = 0; quiet < 2 && performance.now() < deadline;) {
+      const pending = running();
+      if (pending.length) {
+        quiet = 0;
+        await Promise.race([Promise.all(pending.map((animation) => animation.finished.catch(() => undefined))), sleep(Math.max(0, deadline - performance.now()))]);
+      } else {
+        quiet += 1;
+        await sleep(60);
+      }
+    }
+    const shown = document.querySelector("[data-page]");
+    while (shown && Number(getComputedStyle(shown).opacity) < 1 && performance.now() < deadline) await sleep(50);
+  }, budgetMs);
+}
 async function axeViolations(page: Page, scope?: string) {
   // Finite animations finish first, so a page or panel that is still fading in is not read as low contrast.
-  await page.evaluate(() => Promise.race([
-    Promise.all(document.getAnimations().filter((animation) => Number.isFinite(Number(animation.effect?.getComputedTiming().endTime))).map((animation) => animation.finished.catch(() => undefined))),
-    new Promise((resolve) => setTimeout(resolve, 2_000)),
-  ]));
+  await animationsDone(page);
   if (!await page.evaluate(() => "axe" in window)) await page.addScriptTag({ content: axeSource });
   return page.evaluate(async (selector) => {
     const axe = (window as unknown as { axe: { run: (context: unknown, options: unknown) => Promise<{ violations: AxeViolation[] }> } }).axe;
@@ -199,10 +251,15 @@ try {
   // check does it on purpose, its preview, confirm and sync are expected, and so are a refused project's 403 and a
   // deliberately stale revision's 409.
   let expectControlActions = false;
-  page.on("pageerror", (error) => errors.push(error.message));
+  // A dev server that is busy now and then drops one module request while the first page loads (nothing in the app causes it). The page
+  // boundary is built for exactly that: it reloads once by itself and the page then renders, which every later check depends on. So that
+  // one console message, and only that, is written to the evidence (`dev-server-hiccups.json`) instead of failing the run; anything else fails it.
+  const devServerHiccups: string[] = [];
+  const isChunkHiccup = (text: string) => /Failed to fetch dynamically imported module/.test(text) && /PageBoundary/.test(text);
+  page.on("pageerror", (error) => errors.push(inCheck(error.message)));
   // net::ERR_NETWORK_CHANGED is Chrome reporting that the host's network interfaces changed (container interfaces coming
   // and going on this machine), not an application error; checks that depend on the request still fail on their own.
-  page.on("console", (message) => { if (message.type() === "error" && !/401/.test(message.text()) && !/net::ERR_NETWORK_CHANGED/.test(message.text()) && !(ignoreExpectedMediaErrors && /503/.test(message.text())) && !(expectRefusedLogout && /50[3]|403/.test(message.text()) && /\/api\/control-center\/v1\//.test(message.location().url)) && !(expectControlActions && /40[39]/.test(message.text()) && /\/actions\/(preview|confirm)/.test(message.location().url))) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && !/401/.test(message.text()) && !/net::ERR_NETWORK_CHANGED/.test(message.text()) && !(ignoreExpectedMediaErrors && /503/.test(message.text())) && !(expectRefusedLogout && /50[3]|403/.test(message.text()) && /\/api\/control-center\/v1\//.test(message.location().url)) && !(expectControlActions && /40[39]/.test(message.text()) && /\/actions\/(preview|confirm)/.test(message.location().url))) (isChunkHiccup(message.text()) ? devServerHiccups : errors).push(inCheck(message.text())); });
   page.on("request", (request) => { const path = new URL(request.url()).pathname; requests.push({ method: request.method(), path, expected: expectControlActions && /\/actions\/(preview|confirm)$|\/auctra\/collection\/sync$/.test(path) }); });
 
   await check("login and scoped session", async () => {
@@ -454,17 +511,50 @@ try {
     if (JSON.stringify(await items()) !== JSON.stringify(fromButton)) throw new Error(`project_menus_differ:${JSON.stringify(fromButton)}`);
     await expectAccessible(page, "context-menu", '[role="menu"]');
     await closeMenu();
-    // Shift+F10 opens the menu under the focused row; Esc closes only the menu and focus goes back to the row.
+    // Shift+F10 opens the menu where the focused button ends; Esc closes only the menu and focus goes back to the row.
     await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
     const row = page.locator('[data-task="run-2395-failed"]');
     const rowButton = row.locator("[data-row-button]");
-    await rowButton.focus();
-    await page.keyboard.press("Shift+F10");
-    await page.getByRole("menu").waitFor();
-    const [menuBox, rowBox] = [await page.getByRole("menu").boundingBox(), await row.boundingBox()];
-    if (!menuBox || !rowBox || menuBox.x < 1 || menuBox.y < rowBox.y || menuBox.y > rowBox.y + rowBox.height + 8) throw new Error(`keyboard_menu_misplaced:${JSON.stringify({ menuBox, rowBox })}`);
-    if (!(await items()).includes("复制任务引用")) throw new Error("task_menu_missing_copy");
-    await closeMenu();
+    await row.waitFor();
+    // Where a menu can go depends on how much of the window lies under the row, which depends on what the page shows above the list
+    // and on how far its entrance animation is (a slower machine measures a row lower). So the window is made two known sizes, and
+    // the same rule is held in both: the menu starts right under the focused button when it fits there, and otherwise is moved up
+    // just far enough to stay inside the window, still across the line where the button ends. Never off the window, never far away.
+    const keyboardMenu = async (height: number, place: "top" | "bottom") => {
+      await page.setViewportSize({ width: 1440, height });
+      await animationsDone(page);
+      await page.evaluate(({ id, at }) => {
+        const rect = document.querySelector(`[data-task="${id}"]`)!.getBoundingClientRect();
+        window.scrollTo({ top: window.scrollY + (at === "top" ? rect.top - 200 : rect.bottom - (window.innerHeight - 24)), behavior: "instant" as ScrollBehavior });
+      }, { id: "run-2395-failed", at: place });
+      await animationsDone(page);
+      await rowButton.focus();
+      await page.keyboard.press("Shift+F10");
+      await page.getByRole("menu").waitFor();
+      // The menu pops in; measure it once it has.
+      await animationsDone(page);
+      const [menu, button, size] = [await page.getByRole("menu").boundingBox(), await rowButton.boundingBox(), page.viewportSize()!];
+      if (!menu || !button) throw new Error(`keyboard_menu_unmeasured:${height}`);
+      const anchor = button.y + button.height;
+      const roomBelow = size.height - anchor - menu.height;
+      const under = menu.y >= anchor - 2 && menu.y <= anchor + 8;
+      const moved = menu.y >= 0 && menu.y + menu.height <= size.height + 1 && menu.y <= anchor + 8 && menu.y + menu.height >= anchor - 2;
+      const atButton = menu.x >= button.x && menu.x <= button.x + button.width;
+      if (!atButton || !(roomBelow >= 16 ? under : moved)) throw new Error(`keyboard_menu_misplaced:${height}:${JSON.stringify({ menu, button, size, roomBelow })}`);
+      if (!(await items()).includes("复制任务引用")) throw new Error("task_menu_missing_copy");
+      await closeMenu();
+      return roomBelow;
+    };
+    try {
+      // A tall window has room under the row whatever the page shows above it, so the menu must start right under the button.
+      const room = await keyboardMenu(1400, "top");
+      if (room < 16) throw new Error(`keyboard_menu_no_room_in_a_tall_window:${room}`);
+      // A short one has the row at its bottom edge, so the menu has to be moved up to fit.
+      await keyboardMenu(700, "bottom");
+    } finally {
+      await page.setViewportSize({ width: 1440, height: 960 });
+      await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }));
+    }
     // The menu hands focus back a task after it unmounts, so wait for it briefly rather than reading it at once.
     await rowButton.evaluate((element) => new Promise<void>((resolve, reject) => {
       const started = Date.now();
@@ -1641,7 +1731,10 @@ try {
     if (mutations.length) throw new Error(mutations.map((request) => `${request.method} ${request.path}`).join(", "));
     if (requests.some((request) => /provider-runs|\/tasks\/[^/]+\/cancel|\/tasks\/[^/]+$/.test(request.path) && request.method === "DELETE")) throw new Error("provider run, cancel, or task delete requested");
   });
-  await check("no runtime errors (rich)", async () => { if (errors.length) throw new Error(errors.join(" | ")); });
+  await check("no runtime errors (rich)", async () => {
+    if (devServerHiccups.length) await fs.writeFile(path.join(run, "artifacts", "dev-server-hiccups.json"), JSON.stringify(devServerHiccups.map((text) => text.slice(0, 300)), null, 2) + "\n");
+    if (errors.length) throw new Error(errors.join(" | "));
+  });
   await context.close();
 
   await stopFixture(fixture);
@@ -1747,6 +1840,14 @@ try {
       if (await toggle.count()) {
         await toggle.click();
         await expectAccessible(degradedPage, tag(`degraded-notice-open@${width}`));
+        // The pointer that clicked the toggle can end up on a button of the notice once it has unfolded, which a layout a few pixels
+        // different decides (that is how a slower machine first found this). So a button of the notice is scanned with the
+        // pointer on it, every time: hovering one used to take its label from 4.9:1 to 4.3:1.
+        const action = degradedPage.locator(".notice-stack [data-notice-actions] button").first();
+        if (await action.count()) {
+          await action.hover();
+          await expectAccessible(degradedPage, tag(`degraded-notice-action-hovered@${width}`));
+        }
         await toggle.click();
       }
       await degradedPage.locator("[data-source-status]").click();

@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createControlCenter } from "../server/app";
 import { OpenToolService } from "../server/open-tools/service";
-import { credentialFacts, credentialReminders, credentialTitle } from "../server/observation-credentials";
+import { credentialStatuses } from "../server/credentials";
+import { countsAsUnread } from "../server/notifications";
+import { credentialFacts, credentialReminders, credentialTitle, credentialUnknown } from "../server/observation-credentials";
 import { createObservationLoop } from "../server/observation-loop";
 import { TaskConnections } from "../server/task-connections";
 import { dayMs, type CredentialStatus } from "../src/shared/credentials";
@@ -28,24 +30,29 @@ function withCredentials(options: Parameters<typeof setup>[0] = {}) {
 const status = (over: Partial<CredentialStatus>): CredentialStatus => ({ id: "open_tool:gateway", owner: "gateway", label: "MCP Gateway", state: "rejected", shared_with: [], ...over });
 
 describe("credential facts", () => {
-  it("are made for credentials that need attention only, one per slot, state and stage", () => {
+  it("are made for credentials that cannot be used or will not be for long only, one per slot, state and stage", () => {
     const facts = credentialFacts([
       status({ id: "open_tool:gateway", state: "rejected", reason: "unauthenticated" }),
       status({ id: "open_tool:drivebridge", owner: "drivebridge", label: "DriveBridge", state: "expiring", stage: "1d", days_left: 1 }),
       status({ id: "connection:a", owner: "eikona", label: "Eikona 主库", state: "unreadable", reason: "permissions" }),
       status({ id: "connection:b", owner: "sonora", label: "Sonora", state: "expired" }),
+      // Nothing to remind about: works but some reads are refused (the Services panel shows it), fine, or no expiry recorded.
       status({ id: "connection:c", owner: "scaena", label: "Scaena", state: "limited", reason: "content_denied" }),
-      // Nothing to remind about: fine, or no expiry recorded.
+      status({ id: "open_tool:x", owner: "gateway", label: "MCP Gateway", state: "limited", reason: "read_forbidden" }),
       status({ id: "connection:d", state: "ok" }),
       status({ id: "connection:e", state: "unknown_expiry" }),
       status({ id: "connection:f", state: "unknown_expiry", reason: "invalid_expiry" }),
     ]);
     expect(facts.map((fact) => `${fact.slot}|${fact.state}|${fact.stage}`)).toEqual([
-      "open_tool:gateway|rejected|-", "open_tool:drivebridge|expiring|1d", "connection:a|unreadable|-", "connection:b|expired|-", "connection:c|limited|-",
+      "open_tool:gateway|rejected|-", "open_tool:drivebridge|expiring|1d", "connection:a|unreadable|-", "connection:b|expired|-",
     ]);
     expect(facts[0]).toEqual({ slot: "open_tool:gateway", state: "rejected", stage: "-", title: "MCP Gateway · 凭据被拒", owner: "gateway", error_code: "unauthenticated" });
     // A state with no reason has no error code.
     expect(facts[3]).not.toHaveProperty("error_code");
+  });
+
+  it("are never made for a limited credential, in whatever way it is limited", () => {
+    for (const reason of ["content_denied", "read_forbidden"] as const) expect(credentialFacts([status({ state: "limited", reason })]), reason).toEqual([]);
   });
 
   it("say what is wrong in Chinese, from the shared labels, with the stage of an expiring credential", () => {
@@ -388,5 +395,69 @@ describe("credential reminders: not knowing is not recovery", () => {
       first.step(3 * hour);
       expect(await second.loop.runCycle()).toMatchObject({ reminders_opened: 0, reminders_recovered: 1 });
     });
+  });
+});
+
+describe("credential reminders: a limited credential is shown on the Services panel and reminded of nowhere", () => {
+  /** DriveBridge that accepts the token and answers the capabilities, but refuses its operations list with a 403: the credential works, one read was not granted. */
+  function partlyRefusing() {
+    const base = fakeDriveBridge(0);
+    const fetcher = (async (input: unknown, init?: RequestInit) => {
+      if (new URL(String(input)).pathname.endsWith("/operations")) return new Response("no", { status: 403 });
+      return base.fetcher(input as never, init);
+    }) as unknown as typeof fetch;
+    return { ...base, fetcher };
+  }
+  const drive = (rowsOf: ReturnType<typeof rows>) => rowsOf.filter((reminder) => reminder.category === "credential" && reminder.owner === "drivebridge");
+  /** How many credential reminders the reminders page and the bell count as unread. */
+  const unread = (s: ReturnType<typeof withCredentials>) => rows(s.services, owner).filter((reminder) => reminder.category === "credential" && countsAsUnread(reminder, s.clock.now)).length;
+  /** The credential rows the Services page is given, from what the control center already knows. */
+  const panel = (s: ReturnType<typeof withCredentials>) => credentialStatuses(s.config, s.scope, { connections: s.services.tasks.cached(s.scope), scopeConnections: s.services.tasks.connections(s.scope), openTools: s.services.openTools.credentialProjections(s.scope), now: s.clock.now });
+
+  it("opens no reminder for it, though the panel still lists the credential as limited", async () => {
+    const s = withCredentials({ world: { "eikona-a": {} }, driveBridge: partlyRefusing(), observation: { open_tools_every: 1 } });
+    const summary = await s.loop.runCycle();
+    expect(summary.open_tools_read).toBe(true);
+    expect(panel(s).find((row) => row.id === "open_tool:drivebridge")).toMatchObject({ state: "limited", reason: "read_forbidden" });
+    expect(summary.reminders_opened).toBe(0);
+    expect(drive(rows(s.services, owner))).toEqual([]);
+    expect(unread(s)).toBe(0);
+  });
+
+  it("ends the reminder an earlier version opened for it at the next cycle, whatever the person had done with it, and does not open it again", async () => {
+    const s = withCredentials({ world: { "eikona-a": {} }, driveBridge: partlyRefusing(), observation: { open_tools_every: 1 } });
+    const opened = s.services.notifications.openEvent({
+      scope: "scope-a", recipient: owner, event: "credential:open_tool:drivebridge:limited:-", category: "credential", title: "DriveBridge · 部分读取被拒",
+      path: "/services", owner: "drivebridge", errorCode: "read_forbidden", taskState: "limited", sessionId: "background", recurs: true, now: iso(T0 - hour),
+    });
+    expect(opened.created).toBe(true);
+    expect(unread(s)).toBe(1);
+    const snoozed = s.services.notifications.openEvent({
+      scope: "scope-a", recipient: owner, event: "credential:connection:eikona-a:limited:-", category: "credential", title: "eikona-a · 部分读取被拒",
+      path: "/services", owner: "eikona", errorCode: "content_denied", taskState: "limited", sessionId: "background", recurs: true, now: iso(T0 - hour),
+    });
+    s.services.notifications.acknowledge(snoozed.id, "scope-a", "", owner);
+    // The connection `eikona-a` is not read in this cycle's open tool step, and nothing has said anything about its credential: it was held before.
+    expect(await s.loop.runCycle()).toMatchObject({ reminders_opened: 0, reminders_recovered: 2 });
+    const credential = rows(s.services, owner).filter((reminder) => reminder.category === "credential");
+    expect(credential.map((reminder) => [reminder.failure_fingerprint, reminder.recovered_at])).toEqual(expect.arrayContaining([
+      ["credential:open_tool:drivebridge:limited:-", iso(T0)], ["credential:connection:eikona-a:limited:-", iso(T0)],
+    ]));
+    expect(credential.every((reminder) => reminder.recovered_at === iso(T0))).toBe(true);
+    expect(unread(s)).toBe(0);
+    // The credential is still limited, and later cycles leave the ended reminders as they are.
+    expect(panel(s).find((row) => row.id === "open_tool:drivebridge")?.state).toBe("limited");
+    s.clock.now += 11 * minute;
+    expect(await s.loop.runCycle()).toMatchObject({ reminders_opened: 0, reminders_recovered: 0 });
+    expect(rows(s.services, owner).filter((reminder) => reminder.category === "credential" && reminder.recovered_at === null)).toEqual([]);
+  });
+
+  it("does not hold a limited key for a slot it has no reading of, though it holds the keys a refusal or an unreadable file would have", () => {
+    const keys = credentialUnknown([status({ id: "connection:a", state: "limited" }), status({ id: "open_tool:gateway", state: "limited" }), status({ id: "connection:b", state: "ok" })], [], []);
+    expect(keys.filter((key) => key.includes(":limited:"))).toEqual([]);
+    expect(keys.sort()).toEqual([
+      "credential:connection:a:rejected:-", "credential:connection:a:unreadable:-", "credential:connection:b:rejected:-", "credential:connection:b:unreadable:-",
+      "credential:open_tool:gateway:rejected:-", "credential:open_tool:gateway:unreadable:-",
+    ]);
   });
 });

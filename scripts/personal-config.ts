@@ -11,7 +11,7 @@ import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
 import { secret } from "../server/auth";
-import { ConfigBusyError, ConfigChangedError, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
+import { ConfigBusyError, ConfigChangedError, canonicalConfigPath, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
 import { enabledUsers, isEnabledFlag } from "../server/personal-users";
 import { connectionURL, endpointURL } from "../server/task-connections";
 import { isOpenToolKind } from "../src/shared/open-tools";
@@ -51,7 +51,8 @@ if (
   ].includes(command)
 )
   throw Error(usage);
-const path = resolve(file);
+// The real file, links resolved: the lock, the temporary file and the key digests are made beside it, and the rename replaces it and not a link to it.
+const path = canonicalConfigPath(file);
 /** The version of the file this run read, taken before its content: `save` refuses to write over a different one. A file that does not exist yet is `absent`. */
 let readVersion = "absent";
 const readConfig = () => {

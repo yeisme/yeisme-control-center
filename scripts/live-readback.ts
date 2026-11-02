@@ -4,8 +4,9 @@
  * `verify-release-component.ts` call it directly.
  *
  * The account is a verifier: its role must be viewer, so a release that lets a viewer read secrets or run admin actions is
- * caught by the one account that is safe to hand to a script. Exactly one login is made per run (the server's login limiter is
- * global: 5 refused attempts per 15 minutes, so a retry loop with a wrong key would lock the administrator out too), the
+ * caught by the one account that is safe to hand to a script. Exactly one login is made per run (the server counts refused
+ * logins per client address and per account: 5 per account and address, 20 per address and 50 per account in 15 minutes, so a
+ * retry loop with a wrong key would lock this account out from here, and use up the address's allowance for the others), the
  * access key and the session cookie live in memory only, and nothing in the result contains either.
  *
  * Probe file (`YEISME_RELEASE_PROBE_FILE`, mode 0600, a regular file) holds the account's access key in one of two forms:

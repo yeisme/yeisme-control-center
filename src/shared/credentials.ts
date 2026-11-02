@@ -86,6 +86,13 @@ export const credentialReasonLabels: Record<CredentialReason, string> = {
 
 /** A state needs the administrator's attention; `unknown_expiry` is a gap in what is recorded, not a fault. */
 export const isCredentialProblem = (state: CredentialState) => state !== "ok" && state !== "unknown_expiry";
+/**
+ * The states that are pushed at the administrator: a reminder and a `credential_renewal` work item. The credential cannot be used
+ * (`unreadable`, `rejected`, `expired`) or will not be for long (`expiring`). `limited` is not among them: the credential works and
+ * only some reads are refused, which is a fact about what it was granted, and it shows on the Services credentials panel and nowhere else.
+ */
+export const reminderStates: readonly CredentialState[] = ["unreadable", "rejected", "expired", "expiring"];
+export const isCredentialReminder = (state: CredentialState) => reminderStates.includes(state);
 /** A problem state, or an expiry that was recorded but cannot be read, which is a mistake to correct. */
 export const credentialNeedsAttention = (row: Pick<CredentialStatus, "state" | "reason">) => isCredentialProblem(row.state) || row.reason === "invalid_expiry";
 

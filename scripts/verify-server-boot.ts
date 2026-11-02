@@ -123,6 +123,21 @@ try {
     cookie = setCookie!.split(";")[0];
   });
 
+  await check("refused sign-ins are counted per client address in the real process, and the forwarding header is believed from the local proxy", async () => {
+    // The connection is from 127.0.0.1, the proxy's place, so the last entry of X-Forwarded-For is the client, as behind the TLS front.
+    // A key of 1100 characters is refused without the password work, so twenty refusals cost nothing here.
+    const attempt = (name: string, client: string, secret = "x".repeat(1100)) => request("/api/control-center/v1/auth/personal", {
+      method: "POST", headers: { "X-Forwarded-For": client }, body: JSON.stringify({ username: name, password: secret }),
+    });
+    for (let i = 0; i < 20; i++) assert.equal((await attempt(`nobody-${i}`, "198.51.100.1")).response.status, 401, `refusal ${i + 1}`);
+    const limited = await attempt("nobody-more", "198.51.100.1");
+    assert.equal(limited.response.status, 429);
+    assert.equal(limited.json!.error, "login_rate_limited");
+    // Twenty unknown names from one address leave the administrator free to sign in from another, and that address is the one shut out.
+    assert.equal((await attempt(username, "198.51.100.2", password)).response.status, 200);
+    assert.equal((await attempt(username, "198.51.100.1", password)).response.status, 429);
+  });
+
   await check("session reads expose a stable epoch", async () => {
     const { response, json } = await request("/api/control-center/v1/session", { headers: { Cookie: cookie } });
     assert.equal(response.status, 200);

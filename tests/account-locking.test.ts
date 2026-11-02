@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { ConfigChangedError, fileIdentity, withConfigLock, writeConfigIfUnchanged } from "../server/config-lock";
 import { cli, cliAsync, rewrite, running, signIn, stored, viewer, waitFor } from "./personal-server.support";
 
@@ -75,7 +76,7 @@ describe("a web revoke and a personal-config save cannot undo each other", () =>
       chmodSync(file, 0o644);
       expect(cli("user", file, "revoke", "reader").status).toBe(0);
       expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(existsSync(file + ".lock")).toBe(false);
+      expect(statSync(file + ".lock.sqlite").mode & 0o777).toBe(0o600);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -132,15 +133,23 @@ describe("a write waits for the lock, gives up politely, and breaks only a stale
     expect(stored(file).personal?.users?.map((user) => user.username)).toEqual(["patient"]);
   });
 
-  it("breaks a lock whose holder is gone, and one that is older than 30 seconds", async () => {
+  it("is not held up by a process that was killed while it held the lock: the kernel let go of it at once", async () => {
     const { auth, file } = await running();
-    const gone = spawnSync("true").pid;
-    writeFileSync(file + ".lock", `${gone}:${Date.now()}:crashed\n`, { mode: 0o600 });
+    const holder = spawn("bun", ["tests/fixtures/lock-holder.ts", file], { stdio: ["ignore", "pipe", "ignore"] });
+    let said = "";
+    holder.stdout.on("data", (chunk) => { said += chunk; });
+    await waitFor(() => said.includes("locked"));
+    auth.lockOptions = { waitMs: 150, pollMs: 10 };
+    await expect(auth.createPersonalUser(viewer("blocked"))).rejects.toMatchObject({ code: "config_busy", status: 503 });
+    const gone = new Promise((resolve) => holder.on("close", resolve));
+    holder.kill("SIGKILL");
+    await gone;
+    auth.lockOptions = {};
+    const started = Date.now();
     await auth.createPersonalUser(viewer("one"));
-    writeFileSync(file + ".lock", `${process.pid}:${Date.now() - 31_000}:slow\n`, { mode: 0o600 });
     await auth.createPersonalUser(viewer("two"));
+    expect(Date.now() - started).toBeLessThan(5_000);
     expect(stored(file).personal?.users?.map((user) => user.username)).toEqual(["one", "two"]);
-    expect(existsSync(file + ".lock")).toBe(false);
   });
 
   it("makes the command line give up with a Chinese message after its wait, writing nothing", async () => {
@@ -157,4 +166,35 @@ describe("a write waits for the lock, gives up politely, and breaks only a stale
     expect(existsSync(join(home, "slow.key"))).toBe(false);
     expect(existsSync(join(file + ".users", "slow.key"))).toBe(false);
   }, 60_000);
+});
+
+describe("a configuration reached through a link", () => {
+  it("is rewritten in place by the server and by the command line, with the lock and the key digests beside the real file", async () => {
+    const { auth, app, config, file, home } = await running();
+    const link = join(mkdtempSync(join(tmpdir(), "yeisme-link-")), "control.json");
+    symlinkSync(file, link);
+    config.config_file = link;
+    try {
+      const web = await auth.createPersonalUser(viewer("web"));
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(stored(file).personal?.users?.map((user) => user.username)).toEqual(["web"]);
+      expect(existsSync(join(file + ".users", "web.key"))).toBe(true);
+      expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+      expect((await signIn(app, "web", web.access_key)).response.status).toBe(200);
+      // The command line given the link as well: same file, same lock, same digest directory.
+      const added = cli("user", link, "add", "cli", "viewer", "Cli", "--key-file", join(home, "cli.key"));
+      expect(added.status, added.stderr).toBe(0);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(stored(file).personal?.users?.map((user) => user.username)).toEqual(["web", "cli"]);
+      expect(existsSync(join(file + ".users", "cli.key"))).toBe(true);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(existsSync(file + ".lock.sqlite")).toBe(true);
+      expect(existsSync(link + ".lock.sqlite")).toBe(false);
+      // A revoke made through the link through the server is the one the command line sees next.
+      await auth.revokePersonalUser("web");
+      expect(JSON.parse(cli("user", link, "list").stdout).map((user: { username: string; enabled: boolean }) => [user.username, user.enabled])).toEqual([["web", false], ["cli", true]]);
+    } finally {
+      rmSync(join(link, ".."), { recursive: true, force: true });
+    }
+  });
 });

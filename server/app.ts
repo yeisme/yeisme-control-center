@@ -5,6 +5,7 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { AuthError, SessionAuth } from "./auth";
+import { clientAddress } from "./client-address";
 import { OwnerReaders, owners } from "./owners";
 import { TaskConnections, taskIdentityOf } from "./task-connections";
 import { ConnectionCatalog, ownerProjectRef } from "./connection-catalog";
@@ -342,7 +343,30 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
     reason: e instanceof AuthError ? e.code : "source_unavailable",
   });
   const services: ControlServices = { config, db, auth, tasks, openTools, notifications, state: controlStateOf(db), clock: deps.clock ?? Date.now };
-  const handle = async (r: Request): Promise<Response> => {
+  /**
+   * Refused sign-ins are the visitor's own text and anyone may send them, so they are written sparingly. The name is recorded
+   * only when it is exactly a configured account (otherwise `(unknown)`: it may be a key pasted into the wrong box). A bucket of
+   * the sign-in limits that a refusal filled is noted once, in the row of that refusal, and the attempts the full bucket then
+   * turns away (429) are not written at all. Failures that need no wrong credential to trigger, such as a missing credential file,
+   * are written at most once a minute per error code.
+   */
+  const loginAuditSeen = new Map<string, number>();
+  const auditLogin = (username: string | undefined, e: unknown) => {
+    const refused = e instanceof AuthError && e.status === 401;
+    const actor = auth.auditName(username);
+    for (const bucket of (e as { trips?: string[] }).trips ?? [])
+      audit.record({ actor, action: "auth.login", meta: { mode: "personal", bucket } }, "denied", "login_rate_limited");
+    if (e instanceof AuthError && e.status === 429) return;
+    if (!refused) {
+      const code = auditError(e);
+      const now = Date.now();
+      if (now - (loginAuditSeen.get(code) ?? -Infinity) < 60_000) return;
+      loginAuditSeen.set(code, now);
+    }
+    audit.record({ actor, action: "auth.login", meta: { mode: "personal" } }, refused ? "denied" : "failed", auditError(e));
+  };
+  /** `info.peer` is the address of the connection the request arrived on, which only the server entry knows. */
+  const handle = async (r: Request, info: { peer?: string } = {}): Promise<Response> => {
     try {
       const url = new URL(r.url),
         path = url.pathname.slice(prefix.length);
@@ -375,7 +399,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         )
           throw new AuthError("invalid_login_request", 400);
         try {
-          const result = await auth.personalLogin(r, body.key || body.password, body.username);
+          const result = await auth.personalLogin(r, body.key || body.password, body.username, clientAddress(info.peer, r.headers.get("x-forwarded-for")));
           audit.record(
             {
               actor: typeof body.username === "string" ? body.username : "owner",
@@ -386,15 +410,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           );
           return json({ ok: true }, 200, { "Set-Cookie": result.cookie });
         } catch (e) {
-          audit.record(
-            {
-              actor: typeof body.username === "string" ? body.username : "owner",
-              action: "auth.login",
-              meta: { mode: "personal" },
-            },
-            e instanceof AuthError && e.status === 401 ? "denied" : "failed",
-            auditError(e),
-          );
+          auditLogin(body.username, e);
           throw e;
         }
       }

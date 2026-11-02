@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { createControlCenter } from "./app";
 import { createObservationLoop, observationSettings } from "./observation-loop";
 import { credentialReminders } from "./observation-credentials";
+import { canonicalConfigPath } from "./config-lock";
 import { guardRejections } from "./process-guard";
 import { planStatic } from "./static";
 import { decoyDigest, validateControlBind, validateControlOrigin } from "./auth";
@@ -46,13 +47,14 @@ const config: ServerConfig = {
   ...baseConfig,
   origin: validateControlOrigin(baseConfig.origin),
   bind: validateControlBind(process.env.YEISME_CONTROL_BIND || baseConfig.bind || "127.0.0.1"),
-  ...(file ? { config_file: resolve(file) } : {}),
+  // The real file, links resolved, so the account writes and their lock use one path. The database stays beside the path that was given.
+  ...(file ? { config_file: canonicalConfigPath(file) } : {}),
   providers: { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
 };
 // Persistence: explicit config wins, then beside the config file, then memory.
 const dbPath =
   config.database?.path ||
-  (config.config_file ? defaultDatabasePath(config.config_file) : ":memory:");
+  (file ? defaultDatabasePath(resolve(file)) : ":memory:");
 const db = openDatabase(dbPath);
 migrateDatabase(db);
 const interrupted = new RunStore(db).markInterrupted();
@@ -109,6 +111,8 @@ const server = createServer(async (req, res) => {
             ? undefined
             : Buffer.concat(chunks),
         }),
+        // Who is on the other end of the connection: the TLS front on this machine, whose forwarding header names the client.
+        { peer: req.socket.remoteAddress },
       );
       res.statusCode = response.status;
       response.headers.forEach((v, k) => {

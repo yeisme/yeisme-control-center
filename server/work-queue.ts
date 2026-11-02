@@ -15,7 +15,7 @@ import type {
   WorkQueueResponse,
 } from "../src/shared/work-queue";
 import { priorityForWorkItem, sortWorkQueueItems, summarizeWorkQueue } from "../src/shared/work-queue";
-import { credentialStateLabels, isCredentialProblem, renewSection, type CredentialStatus } from "../src/shared/credentials";
+import { credentialStateLabels, isCredentialReminder, renewSection, type CredentialStatus } from "../src/shared/credentials";
 import { dramaStageLabels } from "../src/shared/read-model/drama";
 import type { CoverageState } from "../src/request-visibility";
 import type { CreativeFlowProjection, CreativeFlowStageProjection } from "../src/shared/creative-flow";
@@ -366,8 +366,9 @@ export interface WorkQueueInput {
   /** Open tools in scope (DriveBridge, MCP Gateway), read by the server. */
   openTools?: OpenToolProjection[];
   /**
-   * The scope's credential rows, for personal administrators only (the rows `GET /services` carries). Each problem row
-   * becomes a `credential_renewal` item; a refused or unreadable one replaces the `service_blocked` item for its tool.
+   * The scope's credential rows, for personal administrators only (the rows `GET /services` carries). Each row that cannot be
+   * used or will not be for long (unreadable, rejected, expired, expiring) becomes a `credential_renewal` item; a refused or
+   * unreadable one replaces the `service_blocked` item for its tool. A `limited` row has no item: the credentials panel shows it.
    */
   credentials?: CredentialStatus[];
   clientOrigins?: { muweave?: string };
@@ -503,7 +504,7 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     if (item) items.push(item);
   }
   for (const tool of input.openTools || []) items.push(...itemsFromOpenTool(tool, input.scope));
-  const problems = (input.credentials || []).filter((row) => isCredentialProblem(row.state));
+  const problems = (input.credentials || []).filter((row) => isCredentialReminder(row.state));
   if (problems.length) {
     // The slot a service_blocked item reports on: a task connection (its id) or an open tool (its kind as owner and source).
     const connectionIds = new Set(input.connections.map((connection) => connection.id));

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rmSync } from "node:fs";
 import { loginBudget, maxSessionsPerAccount, personalIdleMs } from "../server/auth";
+import { LoginLimiter, loginLimits } from "../server/login-limits";
 import type { Session } from "../server/contracts";
 import { call, password, running, signIn, stored, viewer } from "./personal-server.support";
 
@@ -110,6 +111,8 @@ describe("a name that is no account is checked like a wrong key", () => {
     const { app, auth, config } = await running();
     await auth.createPersonalUser(viewer("reader"));
     rmSync(config.personal!.password_hash_ref);
+    // The address's limit (20 by default) shortened so that the flood is quick; the point is what the answers are.
+    auth.limiter = new LoginLimiter({ ...loginLimits, address: 5 });
     const statuses: number[] = [];
     for (let i = 0; i < 40; i++) statuses.push((await signIn(app, `nobody-${i}`, "yk_live_wrong-wrong-wrong")).response.status);
     // Five refused attempts, then the limit; never a 503 that would tell a name that does not exist from one that does.

@@ -1,7 +1,7 @@
 import type { ScopeBinding } from "./contracts";
 import { credentialStatuses } from "./credentials";
 import { credentialEventKey, type CredentialReading, type CredentialReminderFact, type ObservationServices } from "./observation-loop";
-import { credentialStateLabels, isCredentialProblem, type CredentialStatus } from "../src/shared/credentials";
+import { credentialStateLabels, isCredentialReminder, type CredentialStatus } from "../src/shared/credentials";
 import type { OpenToolProjection } from "../src/shared/open-tools";
 import type { TaskConnectionState } from "../src/task-observation";
 
@@ -23,12 +23,13 @@ export function credentialTitle(row: Pick<CredentialStatus, "label" | "state" | 
 }
 
 /**
- * One reminder fact per credential that needs attention: unreadable, rejected, expired, expiring (at its 7-day or 1-day
- * stage) or limited. The slot, state and stage are the reminder's identity, so each step of a credential's decline is its
- * own reminder; `error_code` is the reason the row gave. A credential that is fine, or only has no recorded expiry, has none.
+ * One reminder fact per credential that cannot be used or will not be for long: unreadable, rejected, expired or expiring (at its
+ * 7-day or 1-day stage). The slot, state and stage are the reminder's identity, so each step of a credential's decline is its
+ * own reminder; `error_code` is the reason the row gave. A credential that is fine, has no recorded expiry, or is only `limited`
+ * (works, some reads refused: the Services credentials panel shows it, nobody is reminded of it) has none.
  */
 export function credentialFacts(rows: readonly CredentialStatus[]): CredentialReminderFact[] {
-  return rows.filter((row) => isCredentialProblem(row.state)).map((row) => ({
+  return rows.filter((row) => isCredentialReminder(row.state)).map((row) => ({
     slot: row.id,
     state: row.state,
     stage: row.stage ?? "-",
@@ -42,8 +43,7 @@ export function credentialFacts(rows: readonly CredentialStatus[]): CredentialRe
  * The states only a reading of the owner can show. The file and the recorded expiry are known every cycle, so a
  * reminder about those is ended as soon as they stop holding; one about these is ended on a reading that says it is over.
  */
-const observedStates = ["rejected", "unreadable", "limited"] as const;
-const accessStates = ["rejected", "unreadable"] as const;
+const observedStates = ["rejected", "unreadable"] as const;
 
 /**
  * Whether a cached connection observation says whether the owner accepts the credential: it was refused, it could not
@@ -60,15 +60,14 @@ function accessKnown(entry: TaskConnectionState): boolean {
 /**
  * Which observed states a slot has no reading of this cycle, so a reminder under them must stay. A connection nothing has
  * read since the process started (the memory of a refusal is not kept across a restart, and a cycle reads only as many
- * connections as its budget allows) and an open tool whose readings so far got no answer are unknown for all of them.
- * A connection that has been read but never got an answer is unknown for the refusal and the unreadable file only;
- * whether its content is refused is answered by the content reads that happened since the process started.
+ * connections as its budget allows), a connection that has been read but never got an answer, and an open tool whose readings so
+ * far got no answer are unknown for both. `limited` is not a state anyone is reminded of, so no key of it is ever held here:
+ * a reminder that an earlier version opened for it ends on the next cycle.
  */
 function unknownStates(row: CredentialStatus, connections: readonly TaskConnectionState[], openTools: readonly OpenToolProjection[]): readonly string[] {
   if (row.id.startsWith("connection:")) {
     const entry = connections.find((candidate) => candidate.id === row.id.slice("connection:".length));
-    if (!entry) return observedStates;
-    return accessKnown(entry) ? [] : accessStates;
+    return entry && accessKnown(entry) ? [] : observedStates;
   }
   if (row.id.startsWith("open_tool:")) return openTools.some((projection) => projection.tool === row.owner) ? [] : observedStates;
   return [];

@@ -104,6 +104,6 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
   const fallbackKind = result ? kindOf(result.mime, undefined) : kindOf(undefined, undefined);
   const sizeClass = size === "lg" ? "size-full min-h-0 rounded-[12px]" : size === "md" ? "size-16 rounded-[10px]" : "size-10 rounded-[9px]";
   return <span ref={host} className={cx("grid shrink-0 place-items-center overflow-hidden border border-line bg-panel-soft", sizeClass, className)} title={state === "forbidden" ? "缩略图读取未授权" : state === "needs_contract" ? "来源未提供缩略图合同" : undefined}>
-    {state === "ready" && src ? <img src={src} alt={result?.name || task.title} className="size-full object-cover" loading="lazy" /> : state === "loading" ? <span className="skeleton size-full" aria-label="加载缩略图" /> : <KindBadge kind={fallbackKind} size="sm" />}
+    {state === "ready" && src ? <img src={src} alt={result?.name || task.title} className="size-full object-cover" loading="lazy" /> : state === "loading" ? <span className="skeleton size-full" role="img" aria-label="加载缩略图" /> : <KindBadge kind={fallbackKind} size="sm" />}
   </span>;
 }

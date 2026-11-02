@@ -186,9 +186,13 @@ export function InlineNotice({ tone = "neutral", icon, children, actions, role, 
   </div>;
 }
 
-/** A text button inside a notice: it takes the notice's tone and stays on the notice's single line. */
+/**
+ * A text button inside a notice: it takes the notice's tone and stays on the notice's single line. Hovering lifts its background
+ * toward the panel colour rather than tinting it with the text colour: that tint took the warning, info and danger tones from
+ * 4.9:1 to 4.3:1 (below the 4.5:1 a 13px label needs), and the lift only ever adds contrast, in both themes.
+ */
 export function NoticeAction({ children, onClick }: { children: ReactNode; onClick: () => void }) {
-  return <button type="button" onClick={onClick} className="inline-flex h-7 shrink-0 items-center whitespace-nowrap rounded-control px-2 text-[13px] font-medium hover:bg-current/10">{children}</button>;
+  return <button type="button" onClick={onClick} className="inline-flex h-7 shrink-0 items-center whitespace-nowrap rounded-control px-2 text-[13px] font-medium hover:bg-panel/60">{children}</button>;
 }
 
 export function SkeletonRows({ rows = 5, className }: { rows?: number; className?: string }) {
