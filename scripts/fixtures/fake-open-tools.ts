@@ -2,6 +2,8 @@ import type { Scenario } from "./world";
 
 /** Bearer credential the fake DriveBridge and Gateway accept; anything else is refused with 401. */
 export const openToolToken = "fixture-open-tool-token";
+/** A token the fake owners never accept: a tool configured with it answers 401 on every read that needs a credential. */
+export const revokedOpenToolToken = "fixture-open-tool-revoked";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();

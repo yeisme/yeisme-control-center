@@ -66,6 +66,14 @@ DriveBridge 与个人 MCP Gateway 不是任务 owner，控制中心只读它们�
 - 缓存：DriveBridge 120 秒（它每次鉴权调用都写审计行），Gateway 60 秒；并发共享；强刷每 15 秒一次；读不到时保留上次读数并标 `stale`，同时写明当前不可用。
 - 出现在：`GET /services?observe=1` 的 `services[].open_tool`；`GET /work-queue` 的 `operation_failure`（近 7 天失败或结果未知，每个工具最多 10 条）与 `service_blocked`（工具读不到、后端不可用）；`GET /tool-catalog` 的 Gateway 工具。
 
+### 凭据状态（`GET /services` 的 `credentials`）
+
+owner 与开放工具不报告凭据到期，所以到期时间由签发的人记在配置里、紧挨 `credential_ref`（`credential_expires_at`、`credential_issued_at`，RFC 3339，要带秒和时区；Auctra 读取密钥用 `flow_credential_*`），由 `personal-config` 的 `--expires-at/--expires-in/--issued-at` 与 `credential list|expiry|replace` 维护。配置字段本身不发往浏览器。
+
+只有**个人管理员**的 `GET /services` 多一个 `credentials` 数组（个人只读账号、OIDC 会话都没有，也没有任何到期时间），由 `serviceDirectory` 用本次请求已有的任务连接观测、开放工具读数和范围连接列表调 `credentialStatuses(config, scope, { connections, scopeConnections, openTools })` 得到，不新增 owner 调用；带 `?observe=1` 用新读的观测，否则只凭文件元数据和记录的到期时间。
+
+每行：`{ id, owner, label, state, reason?, stage?, expires_at?, days_left?, last_accepted_at?, shared_with[] }`。`id` 是槽位，只列这个范围用得到的：`connection:<id>`（连接目录给这个范围的连接，含登记的工具项目）、`open_tool:<kind>`（范围列出的）、`provider:<owner>` 与 `owner:<owner>`（范围绑定了该 owner 才出）、`collection:auctra` 与 `collection:auctra:flow`（范围绑定了 Auctra 项目才出）；已停用的不出。`state` 先中先得：`unreadable`（文件不存在、不是普通文件、有组或其他权限位、本进程读不了、为空，只做 stat 与可读性检查，`reason`：`missing|not_file|permissions|empty`；或观测说读不了，`read_failed`）→ `rejected`（连接观测 `authorization=denied`，`owner_denied`；开放工具带凭据的、本该通过的读取任一 401，`unauthenticated`，或全部 403，`forbidden`；`health` 这类不带凭据的读取与 Gateway 用量这类可选读取上的 401 不算）→ `expired` → `expiring`（≤7 天 `stage` `7d`，≤1 天 `1d`）→ `limited`（凭据被接受但某项读取被拒：`content_denied`、`read_forbidden`）→ `ok` / `unknown_expiry`（记录的到期时间读不了时 `reason` 为 `invalid_expiry`）。`days_left` 向上取整，过期后没有；`last_accepted_at` 只来自给定观测，被拒时没有；`shared_with` 只含同一列表内指向同一文件的其他槽位 id。行里没有路径、地址和令牌。提醒键建议 `credential:<slot>:<state>:<stage ?? "-">`。
+
 ### Anatomia 任务观测
 
 Anatomia 按 `yeisme.task_observation.v1` 接入任务连接（`owner: "anatomia"`），由 Anatomia 侧变更 `anatomia-control-center-task-observation-v1` 提供（开关 `ANATOMIA_TASK_OBSERVATION_ENABLED`，另需 `ANATOMIA_MCP_ENABLED`）。

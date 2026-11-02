@@ -3,6 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { callFlow, connectCommands, faqs, guideTools, moreTools, tagline } from "../src/pages/guide/guide-content";
 import { navItems, navItem } from "../src/app-shell/navigation";
+import { connectedTools, renewGeneral } from "../src/pages/guide/guide-reference";
+import { renewGuideTools, renewSection, renewSectionId } from "../src/shared/credentials";
 
 const allCommands = () => [
   ...guideTools.flatMap((tool) => [tool.install, tool.mcp.command, ...tool.commands.map((item) => item.command), ...tool.check.map((item) => item.command), ...connectCommands(tool, "claude").map((item) => item.command), ...connectCommands(tool, "codex").map((item) => item.command)]),
@@ -60,6 +62,46 @@ describe("使用指南 content", () => {
     for (const name of names) {
       const source = readFileSync(resolve(import.meta.dirname, "../src/pages/guide", name), "utf8");
       expect(source, name).not.toMatch(/from ["'](radix-ui|@radix-ui\/[^"']+)["']|from ["']\.\.\/\.\.\/components\/ui["']/);
+    }
+  });
+
+  it("gives every connected tool renewal steps that end in a credential replace for its own slot", () => {
+    expect(connectedTools.map((tool) => tool.id).sort()).toEqual([...renewGuideTools].sort());
+    const slots = { anatomia: "connection:anatomia-main", drivebridge: "open_tool:drivebridge", gateway: "open_tool:gateway" } as const;
+    for (const tool of connectedTools) {
+      expect(tool.renew.length, tool.id).toBeGreaterThanOrEqual(2);
+      const last = tool.renew.at(-1)!.command;
+      expect(last, tool.id).toMatch(new RegExp(`^bun scripts/personal-config\\.ts credential <config-file> replace ${slots[tool.id]} <key-dir>/`));
+      // The new credential goes into a new file, never over the one the first connection used.
+      const fileIn = (command: string) => command.match(/<key-dir>\/\S+/)?.[0];
+      const first = tool.steps.map((step) => fileIn(step.command)).filter(Boolean).at(-1);
+      expect(fileIn(last), tool.id).toBeDefined();
+      expect(fileIn(last), tool.id).not.toBe(first);
+      for (const step of tool.renew) expect(step.note.length, step.command).toBeGreaterThan(10);
+    }
+  });
+
+  it("stops DriveBridge before it signs and starts it before the credential is replaced, and records the new expiry", () => {
+    const steps = connectedTools.find((tool) => tool.id === "drivebridge")!.renew.map((step) => step.command);
+    const at = (needle: string) => steps.findIndex((command) => command.includes(needle));
+    expect(at("stop")).toBeGreaterThanOrEqual(0);
+    expect(at("stop")).toBeLessThan(at("agents create"));
+    expect(at("agents create")).toBeLessThan(at("start"));
+    expect(at("start")).toBeLessThan(at("credential <config-file> replace"));
+    expect(steps[at("agents create")]).toMatch(/--out <key-dir>\/\S+/);
+    expect(steps[at("credential <config-file> replace")]).toContain("--expires-at <RFC3339>");
+    const gateway = connectedTools.find((tool) => tool.id === "gateway")!.renew.map((step) => step.command);
+    expect(gateway[0]).toMatch(/^mcp-gateway tokens create /);
+    const anatomia = connectedTools.find((tool) => tool.id === "anatomia")!.renew.map((step) => step.command);
+    expect(anatomia[0]).toMatch(/^anatomia service key create .*--out <key-dir>\//);
+  });
+
+  it("points every credential at a renewal section that exists, with the general one for tools without their own", () => {
+    for (const tool of connectedTools) expect(renewSection({ owner: tool.id })).toBe(`guide-renew-${tool.id}`);
+    for (const owner of ["eikona", "sonora", "scaena", "auctra", "aigora"]) expect(renewSection({ owner })).toBe(renewSectionId);
+    expect(renewGeneral.map((step) => step.command).join("\n")).toMatch(/credential <config-file> list[\s\S]*replace connection:<id>[\s\S]*expiry <slot> <RFC3339>/);
+    for (const command of [...connectedTools.flatMap((tool) => tool.renew), ...renewGeneral].map((step) => step.command)) {
+      expect(command).not.toMatch(/https?:\/\/|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\/home\/|\/Users\//);
     }
   });
 

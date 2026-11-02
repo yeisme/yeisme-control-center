@@ -3,7 +3,6 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
-  statSync,
   renameSync,
   rmSync,
 } from "node:fs";
@@ -11,16 +10,23 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
+import { secret } from "../server/auth";
 import { connectionURL, endpointURL } from "../server/task-connections";
 import { isOpenToolKind } from "../src/shared/open-tools";
 import { clientOrigin } from "../src/task-links";
+import { credentialReasonOf, type CredentialFileReason } from "../server/credential-file";
+import { credentialHolder, credentialSlots, credentialStatuses } from "../server/credentials";
+import { parseRfc3339 } from "../src/shared/credentials";
 import type { ServerConfig, TaskConnection, ProviderOwner, ObservationConfig } from "../server/contracts";
 const [command, first, ...rest] = process.argv.slice(2);
 const userActions = ["add", "list", "revoke", "rotate", "enable"];
 // `user <config-file> add …` is the form every command uses; `user add <config-file> …` is accepted as well.
 const [file, ...args] = command === "user" && userActions.includes(first) && rest.length ? [rest[0], first, ...rest.slice(1)] : [first, ...rest];
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|studio|cancel|content|disable|observe|status <config-file> [arguments]";
+  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|credential|studio|cancel|content|disable|observe|status <config-file> [arguments]\n" +
+  "Credential expiry: connect, open-tool, provider and auctra take [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], recorded next to the credential reference (for auctra the dates apply to both keys).\n" +
+  "auctra also takes --private-http, like connect and open-tool: plain http to a private IPv4 address is accepted for its origin.\n" +
+  "  credential <config-file> list | expiry <slot> <RFC3339|none> | replace <slot> <file> [--expires-at|--expires-in] [--issued-at]";
 if (
   !file ||
   ![
@@ -32,6 +38,7 @@ if (
     "auctra",
     "provider",
     "open-tool",
+    "credential",
     "studio",
     "cancel",
     "disable",
@@ -78,6 +85,108 @@ const replacePrivate = (target: string, content: string) => {
   writeFileSync(temp, content, { mode: 0o600, flag: "wx" });
   try { renameSync(temp, target); } catch (error) { rmSync(temp, { force: true }); throw error; }
 };
+/** An RFC 3339 date-time as a UTC ISO string. Seconds and a zone are required: a bare date or a local time is refused. */
+const instant = (value: string, name: string) => {
+  const at = parseRfc3339(value);
+  if (at === undefined) throw Error(`${name} must be an RFC 3339 time with seconds and a zone, such as 2026-11-30T00:00:00Z or 2026-11-30T23:59:59+08:00.`);
+  return new Date(at).toISOString();
+};
+/**
+ * A credential file the control center itself can use: it must pass `secret()`, the function the server reads it with,
+ * so a missing, loose, unreadable, empty or blank file is refused here and not found out when a read fails. The content
+ * is read to check it and never printed.
+ */
+const credentialFile = (file: string, what: string) => {
+  const ref = resolve(file);
+  try {
+    secret(ref);
+  } catch (error) {
+    const problems: Record<CredentialFileReason, string> = {
+      missing: "does not exist or cannot be reached",
+      not_file: "is not a regular file",
+      permissions: "must be mode 0600 (no group or other access) and readable by the user running this command",
+      empty: "is empty or holds only whitespace",
+    };
+    throw Error(`${what} ${problems[credentialReasonOf(error) ?? "missing"]}.`);
+  }
+  return ref;
+};
+interface CredentialDates { expires?: string; issued?: string }
+/** Takes `--expires-at`, `--expires-in` (exclusive with it) and `--issued-at` out of an argument list. */
+const takeDates = (list: string[]) => {
+  let rest = list;
+  const take = (name: string) => {
+    const taken = takeOption(rest, name);
+    if (taken.rest.includes(name)) throw Error(`${name} may be given only once.`);
+    rest = taken.rest;
+    return taken.value;
+  };
+  const expiresAt = take("--expires-at");
+  const expiresIn = take("--expires-in");
+  const issuedAt = take("--issued-at");
+  if (expiresAt !== undefined && expiresIn !== undefined) throw Error("--expires-at and --expires-in cannot be used together.");
+  let lasting: number | undefined;
+  if (expiresIn !== undefined) {
+    const parts = /^([1-9]\d{0,4})([dh])$/.exec(expiresIn);
+    if (!parts) throw Error("--expires-in takes <N>d or <N>h, such as 30d.");
+    lasting = Number(parts[1]) * (parts[2] === "d" ? 86_400_000 : 3_600_000);
+  }
+  const dates: CredentialDates = {
+    ...(expiresAt !== undefined ? { expires: instant(expiresAt, "--expires-at") } : lasting !== undefined ? { expires: new Date(Date.now() + lasting).toISOString() } : {}),
+    ...(issuedAt !== undefined ? { issued: instant(issuedAt, "--issued-at") } : {}),
+  };
+  if (dates.expires && dates.issued && Date.parse(dates.issued) >= Date.parse(dates.expires)) throw Error("--issued-at must be earlier than the expiry.");
+  return { rest, dates };
+};
+/** The dates as config keys next to a credential reference: `credential_*`, or `flow_credential_*` for Auctra's reader key. */
+const datesFor = (dates: CredentialDates, prefix = "credential") => ({
+  ...(dates.expires ? { [`${prefix}_expires_at`]: dates.expires } : {}),
+  ...(dates.issued ? { [`${prefix}_issued_at`]: dates.issued } : {}),
+});
+/**
+ * The dates to write beside a credential reference. New ones win; otherwise the recorded ones stay while the same file
+ * stays (a re-run that only changes an endpoint or a model), and go when the file changes, because they described the
+ * old credential.
+ */
+const datesToKeep = (given: CredentialDates, previous: object | undefined, sameFile: boolean, prefix = "credential"): CredentialDates => {
+  const recorded = (previous ?? {}) as Record<string, unknown>;
+  const kept = (key: string) => sameFile && typeof recorded[`${prefix}_${key}`] === "string" ? recorded[`${prefix}_${key}`] as string : undefined;
+  const dates = { expires: given.expires ?? kept("expires_at"), issued: given.issued ?? kept("issued_at") };
+  if (dates.expires && dates.issued && Date.parse(dates.issued) >= Date.parse(dates.expires)) throw Error("The issue time must be earlier than the expiry, counting the dates already recorded for this file.");
+  return dates;
+};
+const hadExpiry = (entry: object | undefined, prefix = "credential") => !!entry && `${prefix}_expires_at` in entry;
+/**
+ * An owner origin: https or loopback http as `clientOrigin` has it. With `--private-http`, also plain http to a private
+ * IPv4 address, by the rule `endpointURL` applies to open tools (127/8, 10/8, 172.16/12, 192.168/16); a public http
+ * address stays refused, and so does anything that is not a bare origin.
+ */
+const originFor = (value: string, privateHttp: boolean) => {
+  try {
+    return clientOrigin(value);
+  } catch (error) {
+    if (!privateHttp) throw error;
+  }
+  try {
+    const url = endpointURL(value, true, "invalid_client_origin");
+    if (url.origin === value) return url.origin;
+  } catch {
+    // Falls through to the one message below.
+  }
+  throw Error("The origin must be https, loopback http, or with --private-http plain http to a private IPv4 address; give it without a path.");
+};
+/**
+ * What a command says about the expiry it wrote: the date (and that it was carried over from the same file), or, with
+ * none, a notice on how to record it and, if there was one, that it was cleared with the old file.
+ */
+const expiryReport = (written: CredentialDates, given: CredentialDates, slot: string, hadOne = false) => ({
+  ...(written.expires ? { expires_at: written.expires, ...(given.expires ? {} : { expiry_kept: true }) } : {
+    expiry_recorded: false,
+    ...(hadOne ? { expiry_cleared: true } : {}),
+    notice: (hadOne ? "The expiry recorded for the previous credential was cleared. Record the new one" : "No expiry is recorded, so the control center cannot warn before the credential runs out. Record it") + ` with: credential <config-file> expiry ${slot} <RFC3339>.`,
+  }),
+  ...(written.issued ? { issued_at: written.issued } : {}),
+});
 if (command === "init") {
   if (existsSync(path)) throw Error("Target exists; refusing overwrite.");
   const origin = clientOrigin(args[0] || "http://127.0.0.1:4312");
@@ -306,7 +415,8 @@ if (command === "init") {
     save(config);
     console.log(JSON.stringify({ observation: config.observation, network_called: false, next: "restart the control center to reload" }, null, 2));
   } else if (command === "connect") {
-    const [id, owner, endpoint, project, credential_ref, ...flags] = args;
+    const { rest: connectArgs, dates } = takeDates(args);
+    const [id, owner, endpoint, project, credential_ref, ...flags] = connectArgs;
     if (
       !id ||
       !/^[-a-zA-Z0-9_]{1,80}$/.test(id) ||
@@ -315,7 +425,7 @@ if (command === "init") {
       !credential_ref
     )
       throw Error(
-        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content]",
+        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]",
       );
     const c: TaskConnection = {
       id,
@@ -325,11 +435,12 @@ if (command === "init") {
       environment: "personal",
       endpoint,
       project,
-      credential_ref: resolve(credential_ref),
+      credential_ref: credentialFile(credential_ref, "The credential file"),
       enabled: true,
       allow_private_http: flags.includes("--private-http"),
       allow_cancel: false,
       allow_content: flags.includes("--content"),
+      ...datesFor(dates),
     };
     connectionURL(c);
     const all = config.connections || [];
@@ -357,39 +468,51 @@ if (command === "init") {
     console.log(
       "Registered endpoint and credential reference; no network call or permission change.",
     );
+    console.log(dates.expires
+      ? `Recorded credential expiry ${dates.expires} for connection:${id}.`
+      : `No credential expiry recorded; add one with: credential <config-file> expiry connection:${id} <RFC3339>.`);
     if (c.owner !== "anatomia" && pinned && pinned !== project && !flags.includes("--default"))
       console.log(`Kept ${c.owner} default project ${pinned}; pass --default to make ${project} the default.`);
   } else if (command === "auctra") {
     // Auctra refuses collection.* to every key but a service-collector one, and refuses everything else to that key, so the
     // stage read (creative.flow.read) needs a second, service-consumer key. One file is accepted for a single-token deployment.
-    const [origin, project, collectorRef, readerRef, ...flags] = args.filter((arg) => arg !== "--replace");
-    const replace = args.includes("--replace");
+    // Dates given here apply to both keys; give the reader key its own afterwards with `credential <config-file> expiry collection:auctra:flow …`.
+    const { rest: auctraArgs, dates } = takeDates(args);
+    const [origin, project, collectorRef, readerRef, ...flags] = auctraArgs.filter((arg) => arg !== "--replace" && arg !== "--private-http");
+    const replace = auctraArgs.includes("--replace");
+    const privateHttp = auctraArgs.includes("--private-http");
     if (!origin || !project || !collectorRef || flags.length)
-      throw Error("auctra requires <https-origin|loopback-origin> <project:id> <collector-key-file> [reader-key-file] [--replace]");
-    const auctraOrigin = clientOrigin(origin);
+      throw Error("auctra requires <https-origin|loopback-origin> <project:id> <collector-key-file> [reader-key-file] [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
+    const auctraOrigin = originFor(origin, privateHttp);
     if (!/^project:[^\s\\/\x00-\x1f]{1,256}$/.test(project)) throw Error("Auctra project must be the exact project ref, such as project:my-drama.");
-    const keyFiles = [collectorRef, ...(readerRef ? [readerRef] : [])].map((ref) => resolve(ref));
-    for (const keyFile of keyFiles) if (!existsSync(keyFile) || (statSync(keyFile).mode & 0o077)) throw Error("Auctra key files must exist and be 0600.");
+    const keyFiles = [credentialFile(collectorRef, "The Auctra collector key file"), ...(readerRef ? [credentialFile(readerRef, "The Auctra reader key file")] : [])];
     if (config.collection?.auctra && !replace) throw Error("Auctra collection already configured; pass --replace to change it.");
     const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
     if (!scope) throw Error("Personal scope missing.");
-    config.collection = { ...config.collection, auctra: { origin: auctraOrigin, audience: "auctra", credential_ref: keyFiles[0], ...(keyFiles[1] ? { flow_credential_ref: keyFiles[1] } : {}), enabled: true } };
+    // A key whose file stays keeps its recorded dates (an endpoint or project change is not a new credential).
+    const previous = config.collection?.auctra;
+    const collectorDates = datesToKeep(dates, previous, !!previous?.credential_ref && resolve(previous.credential_ref) === keyFiles[0]);
+    const readerDates = datesToKeep(dates, previous, !!keyFiles[1] && !!previous?.flow_credential_ref && resolve(previous.flow_credential_ref) === keyFiles[1], "flow_credential");
+    config.collection = { ...config.collection, auctra: { origin: auctraOrigin, audience: "auctra", credential_ref: keyFiles[0], ...datesFor(collectorDates), ...(keyFiles[1] ? { flow_credential_ref: keyFiles[1], ...datesFor(readerDates, "flow_credential") } : {}), ...(privateHttp ? { allow_private_http: true } : {}), enabled: true } };
     scope.collection = { ...scope.collection, auctra: { tenant: project, project, actor: "personal", audience: "auctra" } };
     save(config);
-    console.log(JSON.stringify({ origin: auctraOrigin, project, scope: scope.id, collector_key_configured: true, reader_key_configured: !!keyFiles[1], network_called: false, next: "restart the control center, then sync from Services" }, null, 2));
+    console.log(JSON.stringify({ origin: auctraOrigin, project, scope: scope.id, collector_key_configured: true, reader_key_configured: !!keyFiles[1], private_http: privateHttp, network_called: false, ...expiryReport(collectorDates, dates, "collection:auctra", hadExpiry(previous)), ...(keyFiles[1] && readerDates.expires !== collectorDates.expires ? { reader_expires_at: readerDates.expires ?? null } : {}), next: "restart the control center, then sync from Services" }, null, 2));
   } else if (command === "provider") {
-    const [owner, endpoint, project, credential_ref, model_ref, submit, status, ...rest] = args;
-    if (!owner || !["eikona", "scaena", "sonora"].includes(owner) || !endpoint || !project || !credential_ref || !model_ref || !submit || args.length < 7)
-      throw Error("provider requires <eikona|scaena|sonora> <https-mcp-endpoint> <project> <0600-credential-file> <model-ref> <submit-action> <status-action|->");
-    const file = resolve(credential_ref);
-    if (!existsSync(file) || (statSync(file).mode & 0o077)) throw Error("Provider credential file must exist and be 0600.");
+    const { rest: providerArgs, dates } = takeDates(args);
+    const [owner, endpoint, project, credential_ref, model_ref, submit, status, ...rest] = providerArgs;
+    if (!owner || !["eikona", "scaena", "sonora"].includes(owner) || !endpoint || !project || !credential_ref || !model_ref || !submit || providerArgs.length < 7)
+      throw Error("provider requires <eikona|scaena|sonora> <https-mcp-endpoint> <project> <0600-credential-file> <model-ref> <submit-action> <status-action|-> [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
+    const file = credentialFile(credential_ref, "The provider credential file");
     const allowedActions = new Set(["generate", "createVideoProviderTask", "voice.audition"]);
     if (!allowedActions.has(submit)) throw Error("Unsupported provider submit action.");
+    const replaced = config.providers?.[owner as ProviderOwner];
+    const written = datesToKeep(dates, replaced, !!replaced?.credential_ref && resolve(replaced.credential_ref) === file);
     const connection = {
       owner: owner as ProviderOwner,
       endpoint,
       project,
       credential_ref: file,
+      ...datesFor(written),
       enabled: true,
       model_refs: [model_ref],
       action_manifest: {
@@ -399,14 +522,16 @@ if (command === "init") {
     };
     config.providers = { ...(config.providers || {}), [owner]: connection };
     save(config);
-    console.log(JSON.stringify({ owner, endpoint, project, model_ref, submit, status: status === "-" ? null : status, credential_configured: true, network_called: false }, null, 2));
+    console.log(JSON.stringify({ owner, endpoint, project, model_ref, submit, status: status === "-" ? null : status, credential_configured: true, network_called: false, ...expiryReport(written, dates, `provider:${owner}`, hadExpiry(replaced)) }, null, 2));
   } else if (command === "open-tool") {
     // A read-only open tool (DriveBridge, MCP Gateway) for the personal scope; `off` disables it and keeps the entry.
-    const [tool, endpoint, credentialRef, ...flags] = args;
+    const { rest: toolArgs, dates } = takeDates(args);
+    const [tool, endpoint, credentialRef, ...flags] = toolArgs;
     const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
     if (!scope) throw Error("Personal scope missing.");
-    if (!isOpenToolKind(tool) || !endpoint) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace], or <drivebridge|gateway> off");
-    if (endpoint === "off" && args.length === 2) {
+    if (!isOpenToolKind(tool) || !endpoint) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], or <drivebridge|gateway> off");
+    if (endpoint === "off" && toolArgs.length === 2) {
+      if (args.length !== toolArgs.length) throw Error("open-tool off takes no expiry options.");
       const existing = config.open_tools?.[tool];
       if (!existing) throw Error("Open tool not configured.");
       existing.enabled = false;
@@ -415,17 +540,75 @@ if (command === "init") {
       console.log(JSON.stringify({ tool, enabled: false, network_called: false, next: "restart the control center to reload" }, null, 2));
     } else {
       const unknown = flags.filter((flag) => !["--private-http", "--replace"].includes(flag));
-      if (!credentialRef || unknown.length) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace]");
+      if (!credentialRef || unknown.length) throw Error("open-tool requires <drivebridge|gateway> <endpoint> <0600-credential-file> [--private-http] [--replace] [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]");
       const allowPrivateHttp = flags.includes("--private-http");
       endpointURL(endpoint, allowPrivateHttp, "open_tool_endpoint_denied");
-      const credential_ref = resolve(credentialRef);
-      if (!existsSync(credential_ref) || (statSync(credential_ref).mode & 0o077)) throw Error("Open tool credential file must exist and be 0600.");
+      const credential_ref = credentialFile(credentialRef, "The open tool credential file");
       if (config.open_tools?.[tool] && !flags.includes("--replace")) throw Error("Open tool already configured; pass --replace to change it.");
-      config.open_tools = { ...config.open_tools, [tool]: { endpoint, credential_ref, ...(allowPrivateHttp ? { allow_private_http: true } : {}), enabled: true } };
+      const replaced = config.open_tools?.[tool];
+      const written = datesToKeep(dates, replaced, !!replaced && resolve(replaced.credential_ref) === credential_ref);
+      config.open_tools = { ...config.open_tools, [tool]: { endpoint, credential_ref, ...datesFor(written), ...(allowPrivateHttp ? { allow_private_http: true } : {}), enabled: true } };
       scope.open_tools = [...new Set([...(scope.open_tools || []), tool])];
       save(config);
-      console.log(JSON.stringify({ tool, scope: scope.id, credential_configured: true, private_http: allowPrivateHttp, network_called: false, next: "restart the control center, then check Services" }, null, 2));
+      console.log(JSON.stringify({ tool, scope: scope.id, credential_configured: true, private_http: allowPrivateHttp, network_called: false, ...expiryReport(written, dates, `open_tool:${tool}`, hadExpiry(replaced)), next: "restart the control center, then check Services" }, null, 2));
     }
+  } else if (command === "credential") {
+    // Owners do not report when a credential expires, so it is recorded here, next to the reference it describes. A slot id
+    // names one credential: connection:<id>, open_tool:<kind>, provider:<owner>, owner:<owner>, collection:auctra[:flow].
+    const [action, slotId, ...more] = args;
+    const slots = credentialSlots(config);
+    const holderOf = (id: string | undefined) => {
+      const holder = id ? credentialHolder(config, id) : undefined;
+      if (!id || !holder) throw Error(`Unknown credential slot${id ? ` "${id}"` : ""}. Valid slots: ${slots.length ? slots.map((slot) => slot.id).join(", ") : "none configured"}.`);
+      return holder;
+    };
+    if (action === "list") {
+      if (args.length !== 1) throw Error("credential list takes no arguments.");
+      // State comes from the file's metadata and the recorded expiry only; the running server adds what the owners answer.
+      const rows = credentialStatuses(config, undefined, { includeDisabled: true }).map((row) => ({
+        slot: row.id,
+        owner: row.owner,
+        enabled: slots.find((slot) => slot.id === row.id)?.enabled !== false,
+        state: row.state,
+        ...(row.reason ? { reason: row.reason } : {}),
+        ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+        ...(row.days_left !== undefined ? { days_left: row.days_left } : {}),
+        ...(row.shared_with.length ? { shared_with: row.shared_with } : {}),
+      }));
+      console.log(JSON.stringify({ credentials: rows, network_called: false }, null, 2));
+    } else if (action === "expiry") {
+      const [value, ...extra] = more;
+      if (!slotId || value === undefined || extra.length) throw Error("credential expiry requires <slot> <RFC3339|none>.");
+      const holder = holderOf(slotId);
+      const expires = value === "none" ? undefined : instant(value, "The expiry");
+      const issued = holder.target[holder.issuedKey];
+      if (expires && typeof issued === "string" && Date.parse(issued) >= Date.parse(expires)) throw Error("The expiry must be later than the recorded issue time.");
+      if (expires) holder.target[holder.expiresKey] = expires;
+      else delete holder.target[holder.expiresKey];
+      save(config);
+      // Every slot records its own expiry, so a file several slots share has to be told to each of them.
+      const file = resolve(String(holder.target[holder.refKey]));
+      const sharing = slots.filter((slot) => slot.id !== slotId && resolve(slot.ref) === file).map((slot) => slot.id);
+      console.log(JSON.stringify({ slot: slotId, ...(expires ? { expires_at: expires } : { expiry_recorded: false }), network_called: false, ...(sharing.length ? { shared_with: sharing, notice: `These slots use the same credential file and each records its own expiry: ${sharing.join(", ")}. Set the same one on them if it applies.` } : {}), next: "restart the control center to reload" }, null, 2));
+    } else if (action === "replace") {
+      const { rest: replaceArgs, dates } = takeDates(more);
+      const [fileArg, ...extra] = replaceArgs;
+      if (!slotId || !fileArg || extra.length) throw Error("credential replace requires <slot> <credential-file> [--expires-at <RFC3339> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>].");
+      const holder = holderOf(slotId);
+      const next = credentialFile(fileArg, "The new credential file");
+      const previous = resolve(String(holder.target[holder.refKey]));
+      // Other slots on the old file keep using it; they are named so they are not forgotten.
+      const sharing = slots.filter((slot) => slot.id !== slotId && resolve(slot.ref) === previous).map((slot) => slot.id);
+      const cleared = !!holder.target[holder.expiresKey];
+      holder.target[holder.refKey] = next;
+      // The old dates described the old credential: they go, unless this command gives new ones.
+      delete holder.target[holder.expiresKey];
+      delete holder.target[holder.issuedKey];
+      if (dates.expires) holder.target[holder.expiresKey] = dates.expires;
+      if (dates.issued) holder.target[holder.issuedKey] = dates.issued;
+      save(config);
+      console.log(JSON.stringify({ slot: slotId, credential_configured: true, network_called: false, ...expiryReport(dates, dates, slotId, cleared), ...(sharing.length ? { still_using_previous_file: sharing } : {}), next: "restart the control center to reload" }, null, 2));
+    } else throw Error("credential requires list | expiry <slot> <RFC3339|none> | replace <slot> <credential-file> [--expires-at|--expires-in] [--issued-at].");
   } else if (command === "studio") {
     const c = config.connections?.find((c) => c.id === args[0]);
     if (!c || c.owner !== "scaena" || args.length !== 2)

@@ -1,7 +1,7 @@
 import type { OpenToolConnection } from "../contracts";
 import { normalizeTools } from "../tool-catalog-normalize";
 import type { OpenToolBackend, OpenToolCheck, OpenToolOperation, OpenToolOperationState, OpenToolUsage } from "../../src/shared/open-tools";
-import { projection, summarizeOperations } from "./projection";
+import { openToolChecks, projection, summarizeOperations } from "./projection";
 import { code, count, list, record, ref, time, OpenToolClient, type Fetcher, type OpenToolAdapter, type OpenToolObservation, type RouteRead } from "./types";
 
 const runStates: Record<string, OpenToolOperationState> = { succeeded: "succeeded", failed: "failed" };
@@ -124,7 +124,7 @@ export class GatewayAdapter implements OpenToolAdapter {
         checks: [health, credential, check("backends", "后端", backendList), check("tools", "工具", toolIndex), check("operations", "运行记录", operations), check("usage", "用量", usage)],
         primary: ["credential", "backends", "tools", "operations", "usage"],
         // The owner console issues ordinary consumer credentials, which cannot read usage (mcp:audit:read).
-        optional: ["usage"],
+        optional: openToolChecks.gateway.optional,
         degraded: attention,
         degradedReason: backends.some((backend) => backend.state === "down") ? "open_tool_backend_down" : "gateway_backend_degraded",
         facts,

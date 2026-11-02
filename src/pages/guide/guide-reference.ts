@@ -250,6 +250,8 @@ export interface ConnectedTool {
   /** What shows up in the control center once connected. */
   sees: string;
   steps: GuideCommand[];
+  /** Replacing the credential before it runs out, or once the tool refuses it; the anchor is `guide-renew-<id>`. */
+  renew: GuideCommand[];
 }
 
 /**
@@ -267,6 +269,10 @@ export const connectedTools: ConnectedTool[] = [
       { command: "anatomia service key create --db <state-dir>/anatomia.db --key-ref service-key:<org>:control-center --observer-tenant tenant:<tenant> --observer-project project:<name> --observer-content --owner-auth-ref <owner-auth-ref> --evidence evidence:<ref> --out <key-dir>/anatomia-observer.key --json", note: "服务端要开 MCP（ANATOMIA_MCP_STREAMABLE_HTTP_ENABLED=true，控制中心访问用的 Host 要在 _ALLOWED_HOSTS 里）和 ANATOMIA_TASK_OBSERVATION_ENABLED=1；tenant 和 project 要与分析上记录的一致；--out 必须是还不存在的绝对路径；只看进度就去掉 --observer-content" },
       { command: "bun scripts/personal-config.ts connect <config-file> anatomia-main anatomia https://<anatomia-host>/mcp project:<name> <key-dir>/anatomia-observer.key --content", note: "只列出属于这个项目的拉片分析；没有记录项目的分析和视频问答不会出现；私网 http 地址加 --private-http" },
     ],
+    renew: [
+      { command: "anatomia service key create --db <state-dir>/anatomia.db --key-ref service-key:<org>:control-center-next --observer-tenant tenant:<tenant> --observer-project project:<name> --observer-content --owner-auth-ref <owner-auth-ref> --evidence evidence:<ref> --out <key-dir>/anatomia-observer-next.key --json", note: "参数和第一次一样，只把 --out 换成一个还不存在的新文件；--key-ref 若提示已存在就换个新名字。旧密钥文件先留着，换好并核对之后再删" },
+      { command: "bun scripts/personal-config.ts credential <config-file> replace connection:anatomia-main <key-dir>/anatomia-observer-next.key", note: "文件必须是 0600。换上时会清掉旧密钥的到期记录；这把密钥有到期时间就加 --expires-at <RFC3339>，没有就不加，「服务」页会写“未记录到期时间”。然后重启控制中心" },
+    ],
   },
   {
     id: "drivebridge",
@@ -275,7 +281,13 @@ export const connectedTools: ConnectedTool[] = [
     sees: "服务健康、上传下载等运行的进度和失败；看不到文件名、路径和空间容量。",
     steps: [
       { command: "drivebridge-server --config <config-file> --state <state-dir> agents create --name yeisme-control-center --space <space-id> --scopes read --days 30 --out <key-dir>/drivebridge-agent.token --json", note: "令牌最长 30 天，到期前重签；服务运行时这条命令会以 state_in_use 退出，先停服务再签；开了治理的实例要用含签发修复的版本，否则密钥用户的空间会被拒（forbidden）" },
-      { command: "bun scripts/personal-config.ts open-tool <config-file> drivebridge https://<drivebridge-host> <key-dir>/drivebridge-agent.token", note: "read 权限也能读这个空间的文件，控制中心只调用健康、能力和运行记录三个接口；私网 http 地址加 --private-http" },
+      { command: "bun scripts/personal-config.ts open-tool <config-file> drivebridge https://<drivebridge-host> <key-dir>/drivebridge-agent.token --expires-in 30d", note: "read 权限也能读这个空间的文件，控制中心只调用健康、能力和运行记录三个接口；私网 http 地址加 --private-http。DriveBridge 不会告诉控制中心令牌什么时候到期，所以登记时用 --expires-in 记下（和签发时的 --days 30 对应），到期前「服务」页会提醒" },
+    ],
+    renew: [
+      { command: "systemctl --user stop <drivebridge-unit>", note: "先停服务：服务运行时，下一条签发命令会以 state_in_use 退出。这里以 systemd 用户服务为例，换成你平时管理 DriveBridge 的办法" },
+      { command: "drivebridge-server --config <drivebridge-config> --state <state-dir> agents create --name yeisme-control-center --space <space-id> --scopes read --days 30 --out <key-dir>/drivebridge-agent-next.token --json", note: "--config 是 DriveBridge 自己的配置，不是控制中心的。--out 必须是还不存在的新文件，权限 0600；新令牌最长 30 天，到期时间是签发的时刻加 30 天，记下来给最后一步用" },
+      { command: "systemctl --user start <drivebridge-unit>", note: "签完马上把服务启动起来；停着的这段时间，文件传输也是停的" },
+      { command: "bun scripts/personal-config.ts credential <config-file> replace open_tool:drivebridge <key-dir>/drivebridge-agent-next.token --expires-at <RFC3339>", note: "<RFC3339> 写新令牌的到期时间，例如 2026-12-02T10:00:00+08:00。换上时会清掉旧令牌的到期记录；然后重启控制中心，旧令牌文件核对后再删" },
     ],
   },
   {
@@ -285,7 +297,21 @@ export const connectedTools: ConnectedTool[] = [
     sees: "后端是否就绪、网关列出的工具（进「模型与工具」）、REST 运行和 7 天调用量；不会替你调用任何工具。",
     steps: [
       { command: "mcp-gateway tokens create --tenant <tenant> --workspace <workspace> --scopes mcp:tools:read,mcp:audit:read --ttl 720h --actor-id yeisme-control-center --credential-dir <key-dir> --json", note: "要用管理令牌（MCP_GATEWAY_ADMIN_TOKEN）签发；一定带 --workspace，否则读不到后端、运行和用量；令牌写进 <key-dir>/tokens/<token-id>.token，不打印明文。个人网关没有管理令牌时，改由属主控制台用 token.create 计划签发并确认，只能签普通 scope，读不到用量，服务页显示“未授权”" },
-      { command: "bun scripts/personal-config.ts open-tool <config-file> gateway https://<gateway-host> <key-dir>/tokens/<token-id>.token", note: "停用：open-tool <config-file> gateway off；改地址或换令牌加 --replace" },
+      { command: "bun scripts/personal-config.ts open-tool <config-file> gateway https://<gateway-host> <key-dir>/tokens/<token-id>.token --expires-in 720h", note: "停用：open-tool <config-file> gateway off；改地址或换令牌加 --replace。--expires-in 720h 对应签发时的 --ttl 720h，登记后到期前「服务」页会提醒" },
+    ],
+    renew: [
+      { command: "mcp-gateway tokens create --tenant <tenant> --workspace <workspace> --scopes mcp:tools:read,mcp:audit:read --ttl 720h --actor-id yeisme-control-center --credential-dir <key-dir> --json", note: "参数和第一次一样，用管理令牌（MCP_GATEWAY_ADMIN_TOKEN）再签一枚；新令牌写进 <key-dir>/tokens/ 下的新文件，不会覆盖旧文件。没有管理令牌时，由属主控制台用 token.create 计划签发并确认" },
+      { command: "bun scripts/personal-config.ts credential <config-file> replace open_tool:gateway <key-dir>/tokens/<new-token-id>.token --expires-in 720h", note: "换上新文件并记下新的到期时间；旧令牌的到期记录会被清掉。然后重启控制中心，旧令牌文件核对后再删" },
     ],
   },
+];
+
+/**
+ * Every other credential the control center holds (Eikona, Sonora, Scaena and Auctra connections): issue the same
+ * kind of credential again, the way the first connection did, then replace it by slot. The slot ids come from `list`.
+ */
+export const renewGeneral: GuideCommand[] = [
+  { command: "bun scripts/personal-config.ts credential <config-file> list", note: "列出每个凭据的槽位、状态和记录的到期时间；输出里没有文件位置和地址。槽位形如 connection:<连接 id>、open_tool:<工具>、collection:auctra" },
+  { command: "bun scripts/personal-config.ts credential <config-file> replace connection:<id> <key-dir>/<new-key-file> --expires-at <RFC3339>", note: "新凭据照第一次接入时的签发命令再签一份（见上面的「接入控制中心」），写进新文件后用这条换上。文件必须是 0600；不给日期，旧的到期记录就清掉" },
+  { command: "bun scripts/personal-config.ts credential <config-file> expiry <slot> <RFC3339>", note: "凭据已经在用、只是没记到期时间时，用它补记；填 none 就清除记录" },
 ];

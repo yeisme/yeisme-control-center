@@ -2,6 +2,8 @@ import { ArrowRight, Clock3 } from "../../icons";
 import { Button, Dot, InlineNotice, Pill, cx, type Tone } from "../../components/ui";
 import { formatBytes, formatCount, formatDurationMs, formatRelative } from "../../shared/read-model/format";
 import { reasonLabel } from "../../shared/read-model/labels";
+import type { CredentialStatus } from "../../shared/credentials";
+import { CredentialLine } from "./CredentialsPanel";
 import {
   openToolOperationStateLabels,
   openToolStateLabels,
@@ -36,7 +38,7 @@ function RunRow({ run }: { run: OpenToolOperation }) {
 }
 
 /** One open tool on the services page: health checks, then runs, backends and usage as the tool reports them. */
-export function OpenToolCard({ name, purpose, tool, onQueue, onCatalog }: { name: string; purpose: string; tool: OpenToolProjection; onQueue: () => void; onCatalog?: () => void }) {
+export function OpenToolCard({ name, purpose, tool, credential, now, onQueue, onCatalog }: { name: string; purpose: string; tool: OpenToolProjection; credential?: CredentialStatus; now: number; onQueue: () => void; onCatalog?: () => void }) {
   const tone = stateTone[tool.state];
   const reason = tool.state !== "ready" && tool.reason ? reasonLabel(tool.reason) : null;
   const counts = tool.operations.counts;
@@ -67,12 +69,15 @@ export function OpenToolCard({ name, purpose, tool, onQueue, onCatalog }: { name
     {tool.facts.length > 0 && <p className="mt-2 truncate text-2xs text-muted">{tool.facts.map((fact) => `${fact.label} ${fact.value}`).join(" · ")}</p>}
     <OpenToolDetails tool={tool} active={active} healthy={healthy} shownRuns={shownRuns} />
     {reason && <InlineNotice tone={tone === "danger" ? "danger" : "warning"} className="mt-3 py-2 text-2xs">原因：{reason}</InlineNotice>}
-    <footer className="mt-auto flex items-center justify-between gap-2 pt-4 text-2xs text-muted">
-      <span className="flex min-w-0 items-center gap-1.5"><Clock3 className="size-3.5 shrink-0" /><span className="truncate">{tool.freshness === "stale" ? `显示 ${formatRelative(tool.observed_at)} 的读数` : `观察于 ${formatRelative(tool.observed_at)}`}</span></span>
-      <span className="flex shrink-0 items-center gap-1">
-        {onCatalog && <Button size="sm" variant="ghost" onClick={onCatalog}>工具目录</Button>}
-        <Button size="sm" variant="ghost" onClick={onQueue}>工作台<ArrowRight className="size-3.5" /></Button>
-      </span>
+    <footer className="mt-auto pt-4 text-2xs text-muted">
+      {credential && <CredentialLine row={credential} now={now} />}
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5"><Clock3 className="size-3.5 shrink-0" /><span className="truncate">{tool.freshness === "stale" ? `显示 ${formatRelative(tool.observed_at)} 的读数` : `观察于 ${formatRelative(tool.observed_at)}`}</span></span>
+        <span className="flex shrink-0 items-center gap-1">
+          {onCatalog && <Button size="sm" variant="ghost" onClick={onCatalog}>工具目录</Button>}
+          <Button size="sm" variant="ghost" onClick={onQueue}>工作台<ArrowRight className="size-3.5" /></Button>
+        </span>
+      </div>
     </footer>
   </article>;
 }

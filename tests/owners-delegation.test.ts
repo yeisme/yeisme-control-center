@@ -141,8 +141,23 @@ describe("owner delegation channel", () => {
     const body = await response.json();
     expect(coverageOf(body, "eikona")).toMatchObject({
       state: "unavailable",
-      reason: "secret_permissions_invalid",
+      reason: "credential_unreadable",
     });
+  });
+
+  it("names a credential file that is missing, empty or not a file as unreadable, not as an unknown outage", async () => {
+    rmSync(credentialRef);
+    const missing = build({}, { eikona: { origin: ownerOrigin, audience, credential_ref: credentialRef } });
+    expect(coverageOf(await (await missing.app(missing.request("/requests?scope=scope-1"))).json(), "eikona")).toMatchObject({ state: "unavailable", reason: "credential_unreadable" });
+    writeFileSync(credentialRef, "", { mode: 0o600 });
+    const empty = build({}, { eikona: { origin: ownerOrigin, audience, credential_ref: credentialRef } });
+    expect(coverageOf(await (await empty.app(empty.request("/requests?scope=scope-1"))).json(), "eikona")).toMatchObject({ state: "unavailable", reason: "credential_unreadable" });
+    const directory = build({}, { eikona: { origin: ownerOrigin, audience, credential_ref: temp } });
+    expect(coverageOf(await (await directory.app(directory.request("/requests?scope=scope-1"))).json(), "eikona")).toMatchObject({ state: "unavailable", reason: "credential_unreadable" });
+    // No owner call is made with a credential that cannot be used.
+    expect(missing.transport.calls).toHaveLength(0);
+    expect(empty.transport.calls).toHaveLength(0);
+    expect(directory.transport.calls).toHaveLength(0);
   });
 
   it("marks request-owner services configured when a credential backs the session", async () => {

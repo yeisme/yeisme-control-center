@@ -45,6 +45,7 @@ const connectionStateLabels: Record<string, string> = {
   cursor_expired: "游标已过期",
   task_not_found: "游标无效",
   connection_endpoint_denied: "连接地址未获准",
+  credential_unreadable: "凭据文件读不到",
   secret_permissions_invalid: "凭据文件权限不正确",
   owner_action_denied: "owner 拒绝动作",
   owner_action_contract_missing: "缺少 owner 动作合同",

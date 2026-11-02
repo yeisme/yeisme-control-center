@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AuthError, boundedJSON, secret } from "./auth";
+import { endpointURL } from "./task-connections";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { CoverageState } from "../src/request-visibility";
 import type { DramaSourceState } from "../src/shared/drama";
@@ -134,6 +135,24 @@ function tokens(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && /^[A-Za-z0-9_.:-]{1,96}$/.test(item)).slice(0, 16) : [];
 }
 function originOf(value: string) { try { return new URL(value).origin; } catch { return null; } }
+/**
+ * The address rule `personal-config auctra` applies, enforced again here so a hand-edited configuration cannot send keys
+ * somewhere else: https, http to loopback, or plain http to a private IPv4 address only when `allow_private_http` is set.
+ */
+function originAllowed(target: { origin: string; allow_private_http?: boolean }) {
+  try {
+    endpointURL(target.origin, target.allow_private_http, "upstream_not_allowed");
+    return true;
+  } catch {
+    // `endpointURL` wants the flag even for loopback http, which the command accepts without it.
+  }
+  try {
+    const url = new URL(target.origin);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && !url.hash && !url.search;
+  } catch {
+    return false;
+  }
+}
 function normalizeRecord(value: unknown): AuctraCollectionRecord | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
@@ -153,7 +172,7 @@ export class AuctraCollectionReader {
     const binding = scope.collection?.auctra;
     if (!target || target.enabled === false) throw new AuthError("source_not_configured", 503);
     if (!binding || !binding.actor || binding.audience !== target.audience) throw new AuthError("delegation_unavailable", 403);
-    if (!originOf(target.origin)) throw new AuthError("upstream_not_allowed", 403);
+    if (!originOf(target.origin) || !originAllowed(target)) throw new AuthError("upstream_not_allowed", 403);
     return { target, binding };
   }
   /**

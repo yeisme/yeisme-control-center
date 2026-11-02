@@ -15,7 +15,7 @@ import { ProviderRunManager } from "../server/provider-live";
 import { hashPassword } from "../server/password";
 import type { ServerConfig, TaskConnection } from "../server/contracts";
 import { delegationToken, observerToken, providerToken, startFakeOwners } from "./fixtures/fake-owners";
-import { openToolToken } from "./fixtures/fake-open-tools";
+import { openToolToken, revokedOpenToolToken } from "./fixtures/fake-open-tools";
 import { usageSeed, type Scenario } from "./fixtures/world";
 import { buildDramaWorld } from "./fixtures/drama-world";
 import { AuctraCollectionStore } from "../server/db/auctra-collection-store";
@@ -44,6 +44,10 @@ await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o60
 await writeFile(observerRef, observerToken + "\n", { mode: 0o600 });
 const openToolRef = join(temp, "open-tool");
 await writeFile(openToolRef, openToolToken + "\n", { mode: 0o600 });
+// FIXTURE_CREDENTIALS=lifecycle: DriveBridge's token runs out in three days, and the Gateway's is one the fake owner refuses (401).
+const lifecycle = process.env.FIXTURE_CREDENTIALS === "lifecycle";
+const revokedToolRef = join(temp, "open-tool-revoked");
+await writeFile(revokedToolRef, revokedOpenToolToken + "\n", { mode: 0o600 });
 process.env.YEISME_FIXTURE_PROVIDER_TOKEN = providerToken;
 
 let videoBytes: Buffer | null = null;
@@ -98,8 +102,8 @@ const config: ServerConfig = {
   collection: { auctra: { origin: owners.origin, audience: audience("auctra"), enabled: true } },
   clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
   open_tools: {
-    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
-    gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
+    drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, ...(lifecycle ? { credential_expires_at: new Date(Date.now() + 3 * 86_400_000).toISOString() } : {}), allow_private_http: true, enabled: true },
+    gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: lifecycle ? revokedToolRef : openToolRef, allow_private_http: true, enabled: true },
   },
   connections: [
     connection("fx-eikona", "eikona", "rain-reunion", "Eikona · 图像生产", { allow_cancel: true }),

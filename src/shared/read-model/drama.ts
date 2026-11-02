@@ -50,6 +50,7 @@ const blockerLabels: Record<string, string> = {
   delegation_unavailable: "缺少访问委托",
   owner_unreadable: "owner 暂时读不到",
   upstream_not_allowed: "来源地址未获授权",
+  credential_unreadable: "控制中心读不到访问密钥文件（不存在、权限不是 0600、为空，或不是普通文件）",
   response_limit_exceeded: "owner 返回内容过大",
   invalid_response: "owner 返回的格式不符合合同",
   collection_target_missing: "控制中心服务端还没有配置 Auctra 收集来源",

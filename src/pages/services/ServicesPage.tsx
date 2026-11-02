@@ -14,6 +14,8 @@ import { taskStateLabels } from "../../task-observation";
 import { createIdempotencyKey, runAction } from "../../shared/action-runner";
 import { blockerLabel, collectionSyncMessage, universeGapText } from "../../shared/read-model/drama";
 import { OpenToolCard } from "./OpenToolCard";
+import { CredentialLine, CredentialsPanel } from "./CredentialsPanel";
+import type { CredentialStatus } from "../../shared/credentials";
 
 type Filter = "all" | "integrated" | "configured" | "gaps";
 
@@ -46,6 +48,10 @@ export default function ServicesPage() {
   const connections = integrated.flatMap((service) => service.connections.map((connection) => ({ service, connection })));
   const readyCount = connections.filter(({ connection }) => connection.runtime?.state === "ready").length;
   const openTools = services.flatMap((service) => service.open_tool ? [{ service, tool: service.open_tool }] : []);
+  // Only personal administrators get credential rows; viewers, other sessions and older servers send none.
+  const credentials = read.data?.credentials ?? [];
+  const credentialOf = (id: string): CredentialStatus | undefined => credentials.find((row) => row.id === id);
+  const now = Date.now();
 
   const visible = useMemo(() => services.filter((service) => {
     if (filter === "integrated" && service.integration === "not_integrated") return false;
@@ -94,7 +100,7 @@ export default function ServicesPage() {
       <section aria-label="已接入连接" className="space-y-3">
         <h2 className="text-title-sm font-semibold text-ink">任务连接<span className="ml-2 text-2xs font-normal text-muted tabular">{connections.length} 条</span></h2>
         {connections.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {connections.map(({ service, connection }) => <ConnectionCard key={service.id + connection.id} service={service} connection={connection} onTasks={() => navigate(`/tasks?connection=${encodeURIComponent(connection.id)}`)} actions={[
+          {connections.map(({ service, connection }) => <ConnectionCard key={service.id + connection.id} service={service} connection={connection} credential={credentialOf(`connection:${connection.id}`)} now={now} onTasks={() => navigate(`/tasks?connection=${encodeURIComponent(connection.id)}`)} actions={[
             { id: "tasks", label: "查看这个连接的任务", icon: <ListTodo />, group: "open", run: () => navigate(`/tasks?connection=${encodeURIComponent(connection.id)}`) },
             // Task connections belong to the service of the same name (eikona, sonora, scaena).
             { id: "project", label: "查看工具项目", icon: <FolderKanban />, group: "open", run: () => navigate(`/projects?catalog=owner&project=${encodeURIComponent(`${service.id}:${connection.project}`)}`) },
@@ -107,9 +113,11 @@ export default function ServicesPage() {
       {openTools.length > 0 && <section aria-label="开放工具" className="space-y-3">
         <h2 className="text-title-sm font-semibold text-ink">开放工具<span className="ml-2 text-2xs font-normal text-muted tabular">{openTools.length} 个</span></h2>
         <div className="grid gap-3 md:grid-cols-2">
-          {openTools.map(({ service, tool }) => <OpenToolCard key={service.id} name={service.name} purpose={service.purpose} tool={tool} onQueue={() => navigate("/")} onCatalog={tool.tool === "gateway" ? () => navigate("/capabilities?tab=tools&owner=gateway") : undefined} />)}
+          {openTools.map(({ service, tool }) => <OpenToolCard key={service.id} name={service.name} purpose={service.purpose} tool={tool} credential={credentialOf(`open_tool:${tool.tool}`)} now={now} onQueue={() => navigate("/")} onCatalog={tool.tool === "gateway" ? () => navigate("/capabilities?tab=tools&owner=gateway") : undefined} />)}
         </div>
       </section>}
+
+      {credentials.length > 0 && <CredentialsPanel rows={credentials} now={now} />}
 
       {services.some((service) => service.id === "auctra") && <AuctraCollectionPanel />}
 
@@ -290,7 +298,7 @@ const channelLabels: Record<string, string> = {
 };
 const channelTone = (state: string): Tone => state === "ready" ? "success" : ["forbidden", "needs_authorization"].includes(state) ? "danger" : state === "needs_contract" ? "review" : "warning";
 
-function ConnectionCard({ service, connection, onTasks, actions }: { service: ServiceDirectoryEntry; connection: ServiceConnectionProjection; onTasks: () => void; actions: ItemAction[] }) {
+function ConnectionCard({ service, connection, credential, now, onTasks, actions }: { service: ServiceDirectoryEntry; connection: ServiceConnectionProjection; credential?: CredentialStatus; now: number; onTasks: () => void; actions: ItemAction[] }) {
   const runtime: ConnectionObservation | undefined = connection.runtime;
   const state = runtime?.state || (connection.enabled ? "not_checked" : "disabled");
   const stateTone: Tone = state === "disabled" ? "neutral" : connectionTone(state);
@@ -336,9 +344,12 @@ function ConnectionCard({ service, connection, onTasks, actions }: { service: Se
     </div>}
     {runtime?.task_families?.length ? <p className="mt-2.5 truncate text-2xs text-muted">任务族：<span className="font-mono">{runtime.task_families.join(", ")}</span></p> : null}
     {reason && reason !== connectionStateLabel(state) && <InlineNotice tone="warning" className="mt-3 py-2 text-2xs">原因：{reason}</InlineNotice>}
-    <footer className="mt-auto flex items-center justify-between gap-2 pt-4 text-2xs text-muted">
-      <span className="flex min-w-0 items-center gap-1.5"><Clock3 className="size-3.5 shrink-0" /><span className="truncate">{runtime ? `检查于 ${formatRelative(runtime.checked_at)} · 最近成功 ${runtime.last_success_at ? formatRelative(runtime.last_success_at) : "无"}` : "未观测"}</span></span>
-      <Button size="sm" variant="ghost" onClick={onTasks}>查看任务<ArrowRight className="size-3.5" /></Button>
+    <footer className="mt-auto pt-4 text-2xs text-muted">
+      {credential && <CredentialLine row={credential} now={now} />}
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5"><Clock3 className="size-3.5 shrink-0" /><span className="truncate">{runtime ? `检查于 ${formatRelative(runtime.checked_at)} · 最近成功 ${runtime.last_success_at ? formatRelative(runtime.last_success_at) : "无"}` : "未观测"}</span></span>
+        <Button size="sm" variant="ghost" onClick={onTasks}>查看任务<ArrowRight className="size-3.5" /></Button>
+      </div>
     </footer>
   </article></ActionsContextMenu>;
 }

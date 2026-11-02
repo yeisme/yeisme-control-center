@@ -136,6 +136,24 @@ bun scripts/personal-config.ts observe <配置文件> off
 
 网页里创建、吊销账号时，服务端重新读取配置文件，只替换 `personal.users`，经同目录临时文件原子改名写回（0600）。所以服务运行期间用 `personal-config` 做的其他修改（观察开关、开放工具、连接等）不会被覆盖，也不会把环境变量带来的值（Provider 端点、绑定地址）写进文件；运行期间用命令行新增的账号也会被保留。配置文件读不到时，创建账号返回 503 且不留半成品；吊销则先在内存里生效再尝试写文件。
 
+## 凭据到期记录与续签
+
+owner 与开放工具不会通过接口报告凭据何时到期，所以到期时间由签发的人记在配置里，紧挨着对应的 `credential_ref`（`credential_expires_at`、`credential_issued_at`，RFC 3339，要带秒和时区）。配置里的这两个字段本身不会发往浏览器；个人管理员的「服务」页「凭据」面板和各卡片页脚收到的是由它算出的到期时间，据此显示“还剩几天”，并在凭据文件读不到（不存在、不是普通文件、权限不是 0600、运行账号读不了、为空）或 owner 拒绝它时标出来。个人只读账号和 OIDC 会话收不到这一段。面板只列这个范围用得到的凭据：它的连接（含在控制中心里登记的工具项目）、它列出的开放工具、它绑定了的 owner 与 Provider，以及它绑定了 Auctra 项目时的 Auctra 两把密钥。
+
+```bash
+# 登记时一起记下（connect、open-tool、provider、auctra 都接受；二选一，--issued-at 可选）
+bun scripts/personal-config.ts open-tool <配置文件> drivebridge https://<主机> <令牌文件> --expires-in 30d
+bun scripts/personal-config.ts open-tool <配置文件> gateway https://<主机> <令牌文件> --expires-at 2026-11-30T00:00:00Z
+
+bun scripts/personal-config.ts credential <配置文件> list                                  # 槽位、状态、到期时间；不含路径和地址
+bun scripts/personal-config.ts credential <配置文件> expiry <槽位> <RFC3339|none>            # 给已在用的凭据补记，或清除
+bun scripts/personal-config.ts credential <配置文件> replace <槽位> <新文件> --expires-in 30d  # 换上新凭据文件
+```
+
+槽位 id：`connection:<连接 id>`、`open_tool:<drivebridge|gateway>`、`provider:<owner>`、`owner:<owner>`、`collection:auctra`（收集密钥）、`collection:auctra:flow`（读取密钥）。`--expires-in` 接受 `<N>d` 或 `<N>h`；`--expires-at` 要带秒和时区。`connect`、`open-tool`、`provider`、`auctra` 和 `credential replace` 都先用服务端读凭据的同一个函数检查文件：必须存在（所以先签发凭据，再登记）、是普通文件、0600、运行命令的账号读得了、不是空白，不满足就拒绝、什么也不写。`credential replace` 总当作新凭据，不给日期就清掉旧日期并提示，同一个旧文件上的其他槽位会列出来，它们要各自 `replace`；`open-tool --replace`、`provider` 与 `auctra --replace` 重跑时文件没变（只改地址或模型）就保留已记录的日期，文件变了才清掉。`credential expiry` 会点名共用同一文件的其他槽位，每个槽位各记各的到期时间。改完后重启服务。各工具的续签步骤见使用指南「接入」章节的「续签凭据」。
+
+控制中心不签发、不续签凭据，也不会因为快到期就自行动作；这里只记录和提示。
+
 ## Provider 与 owner 状态
 
 Provider transport、action contract、任务观测、内容读取和真实生成分别验收。`configured`、`transport verified` 或 `tools/list` 成功都不能直接推导业务 ready。真实 canary 只允许在明确预算和 owner 授权下运行：

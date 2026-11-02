@@ -37,7 +37,9 @@ export interface PrincipalBinding {
 }
 /**
  * When a credential stops working, as recorded by whoever issued it: owners do not report expiry over their APIs,
- * so `personal-config` writes these next to the `credential_ref` they describe. RFC 3339; never sent to clients.
+ * so `personal-config` writes these next to the `credential_ref` they describe. RFC 3339 with seconds and a zone. The
+ * configuration itself never reaches a client; personal administrators receive the resulting `expires_at` in the
+ * credential rows of the service directory.
  */
 export interface CredentialLifecycle {
   credential_expires_at?: string;
@@ -129,6 +131,8 @@ export interface ServerConfig {
     flow_credential_ref?: string;
     flow_credential_expires_at?: string;
     flow_credential_issued_at?: string;
+    /** The origin may be plain http on a private IPv4 address (set by `personal-config auctra --private-http`). */
+    allow_private_http?: boolean;
     enabled?: boolean;
   } & CredentialLifecycle>>;
   clients?: Partial<Record<"muweave", {

@@ -13,6 +13,16 @@ import {
 const listLimit = 20;
 const attentionWindowMs = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Which of a tool's checks the adapter reads without the credential (`auth: false`), and which of the others only
+ * mean the credential was not granted that read when they are refused. The adapters build their projections from this
+ * list and the credential status reads the same one, so they cannot disagree about what a refusal says.
+ */
+export const openToolChecks: Record<OpenToolKind, { open: string[]; optional: string[] }> = {
+  drivebridge: { open: ["health"], optional: [] },
+  gateway: { open: ["health"], optional: ["usage"] },
+};
+
 const coverageFor: Record<OpenToolState, CoverageState> = {
   ready: "complete",
   degraded: "partial",

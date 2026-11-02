@@ -1,7 +1,7 @@
 import { Wrench } from "../../icons";
 import { Reveal } from "./guide-motion";
 import { CommandLine, SectionHeading } from "./guide-parts";
-import { clientConfigs, connectedTools, controlCenterSteps, troubleshooting } from "./guide-reference";
+import { clientConfigs, connectedTools, controlCenterSteps, renewGeneral, troubleshooting } from "./guide-reference";
 
 export function ConfigSection() {
   return <section className="guide-section" aria-labelledby="guide-config">
@@ -48,6 +48,23 @@ export function ConnectedToolsSection() {
         <div className="mt-3 space-y-2">{tool.steps.map((step) => <CommandLine key={step.command} command={step.command} note={step.note} />)}</div>
       </Reveal>)}
     </div>
+  </section>;
+}
+
+/**
+ * 续签凭据: how to replace a credential before it runs out, or once the tool refuses it. Each tool has its own anchor,
+ * `guide-renew-<tool>`, which the services page links to from that tool's credential; the rest share `guide-renew`.
+ */
+export function RenewSection() {
+  return <section className="guide-section" aria-labelledby="guide-renew">
+    <SectionHeading id="guide-renew" eyebrow="续签凭据" title="凭据快到期，或者被工具拒绝了" body="控制中心不会替你续签，也不会签发新凭据：到期前在工具那边按原来的办法再签一份，用 credential replace 换上，再重启控制中心。工具不会告诉控制中心凭据什么时候到期，到期时间要在登记或换上时自己记下来，「服务」页才能提前提醒。" />
+    {connectedTools.map((tool) => <div key={tool.id} data-renew-tool={tool.id}>
+      <h3 className="guide-sub" id={`guide-renew-${tool.id}`}>{tool.name}</h3>
+      <div className="mt-3 space-y-2">{tool.renew.map((step) => <CommandLine key={step.command} command={step.command} note={step.note} />)}</div>
+    </div>)}
+    <h3 className="guide-sub">其他凭据</h3>
+    <p className="guide-sub-lead">Eikona、Sonora、Scaena 的连接和 Auctra 的密钥照同样的办法换：</p>
+    <div className="mt-3 space-y-2">{renewGeneral.map((step) => <CommandLine key={step.command} command={step.command} note={step.note} />)}</div>
   </section>;
 }
 

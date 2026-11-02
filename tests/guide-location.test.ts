@@ -55,6 +55,17 @@ describe("guide location", () => {
     expect(locateSection("guide-tool-eikona-mcp")).toEqual({ chapter: "tools", page: "eikona" });
     expect(locateSection("guide-showcase-audio")).toEqual({ chapter: "cases", page: null });
   });
+
+  it("opens a credential's renewal section on 接入, in the signed-in route and on the public page", () => {
+    for (const tool of ["anatomia", "drivebridge", "gateway"]) {
+      const id = `guide-renew-${tool}`;
+      expect(locateSection(id)).toEqual({ chapter: "connect", page: null });
+      expect(appGuidePath(at({ chapter: "connect", section: id }))).toBe(`/guide/connect?section=${id}`);
+      expect(parseAppGuide("/guide/connect", new URLSearchParams(`section=${id}`))).toEqual(at({ chapter: "connect", section: id }));
+      expect(publicGuideHref(at({ chapter: "connect", section: id }))).toBe(`guide.html?chapter=connect#${id}`);
+    }
+    expect(locateSection("guide-renew")).toEqual({ chapter: "connect", page: null });
+  });
 });
 
 describe("guide chapters", () => {

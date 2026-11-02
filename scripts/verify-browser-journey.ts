@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { chromium, expect, type Page, type Route } from "@playwright/test";
+import { openToolToken } from "./fixtures/fake-open-tools";
 
 // I1/I2 browser journey: starts fixture owners + the real server app + Vite, then drives the UI
 // through the full read chain (scope switch, late responses, degraded sources) with redacted evidence.
@@ -19,10 +20,10 @@ const results: { name: string; status: "passed" | "failed"; detail?: string }[] 
 const stdout: string[] = [];
 const stderr: string[] = [];
 
-async function startFixture(scenario: string, latency = 0) {
+async function startFixture(scenario: string, latency = 0, extraEnv: Record<string, string> = {}) {
   const child = spawn("bun", ["scripts/fixture-preview.ts"], {
     cwd: root,
-    env: { ...process.env, FIXTURE_SCENARIO: scenario, FIXTURE_LATENCY_MS: String(latency), FIXTURE_PASSWORD: password, FIXTURE_UI_PORT: String(ports.ui), FIXTURE_API_PORT: String(ports.api), FIXTURE_OWNER_PORT: String(ports.owner) },
+    env: { ...process.env, ...extraEnv, FIXTURE_SCENARIO: scenario, FIXTURE_LATENCY_MS: String(latency), FIXTURE_PASSWORD: password, FIXTURE_UI_PORT: String(ports.ui), FIXTURE_API_PORT: String(ports.api), FIXTURE_OWNER_PORT: String(ports.owner) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
@@ -1651,6 +1652,66 @@ try {
     if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
   });
   await degraded.close();
+
+  // Credential lifecycle: DriveBridge's token runs out in three days, and the token the Gateway is configured with is one its owner refuses.
+  await stopFixture(fixture);
+  fixture = await startFixture("rich", 0, { FIXTURE_CREDENTIALS: "lifecycle" });
+  const lifecycle = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  const lifecyclePage = await lifecycle.newPage();
+  const lifecycleErrors: string[] = [];
+  lifecyclePage.on("pageerror", (error) => lifecycleErrors.push(error.message));
+  await check("credentials: the expiring and the refused token are marked on their cards, refused rows come first and the renew link opens the guide", async () => {
+    await login(lifecyclePage);
+    await lifecyclePage.goto(`${ui}/#/services`, { waitUntil: "domcontentloaded" });
+    const panel = lifecyclePage.getByRole("region", { name: "凭据" });
+    await panel.waitFor({ timeout: 30_000 });
+    const gatewayRow = panel.locator('[data-credential-row="open_tool:gateway"]');
+    await expect(gatewayRow).toHaveAttribute("data-state", "rejected", { timeout: 30_000 });
+    await expect(panel.locator('[data-credential-row="open_tool:drivebridge"]')).toHaveAttribute("data-state", "expiring");
+    // Problem rows come first and, among them, the refused ones; healthy rows fold away below.
+    const states = await panel.locator("[data-credential-row]").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-state")));
+    if (states[0] !== "rejected") throw new Error(`refused_row_not_first:${states.join(",")}`);
+    if (states.lastIndexOf("rejected") > states.indexOf("expiring")) throw new Error(`refused_after_expiring:${states.join(",")}`);
+    const firstQuiet = states.findIndex((state) => state === "unknown_expiry" || state === "ok");
+    if (firstQuiet >= 0 && states.slice(0, firstQuiet).some((state) => state === "unknown_expiry" || state === "ok") || states.slice(firstQuiet).some((state) => state !== "unknown_expiry" && state !== "ok")) throw new Error(`quiet_rows_not_last:${states.join(",")}`);
+    if (await panel.locator("[data-credentials-quiet]").evaluate((details) => (details as HTMLDetailsElement).open)) throw new Error("healthy_rows_not_collapsed");
+    // Cards: the footer chip says what is wrong, and an expiring or refused token links to its renewal steps.
+    const drive = lifecyclePage.locator('[data-open-tool="drivebridge"] [data-credential="open_tool:drivebridge"]');
+    await drive.getByText(/\d{2}-\d{2} 到期 · 还剩 3 天/).waitFor({ timeout: 20_000 });
+    const renew = drive.getByRole("link", { name: /续签方法/ });
+    if (await renew.getAttribute("href") !== "#/guide/connect?section=guide-renew-drivebridge") throw new Error(`renew_href:${await renew.getAttribute("href")}`);
+    const gatewayChip = lifecyclePage.locator('[data-open-tool="gateway"] [data-credential="open_tool:gateway"]');
+    await gatewayChip.getByText("凭据被拒").waitFor({ timeout: 20_000 });
+    if (await gatewayChip.getByRole("link", { name: /续签方法/ }).getAttribute("href") !== "#/guide/connect?section=guide-renew-gateway") throw new Error("gateway_renew_href");
+    // An administrator sees how to record an expiry that is missing; nothing on the page names a path or an address.
+    await panel.locator("[data-credential-backfill]").getByText("credential <config-file> expiry <slot> <RFC3339>", { exact: false }).waitFor();
+    const text = await lifecyclePage.locator('[data-page="services"]').innerText();
+    for (const leaked of [openToolToken, "fixture-open-tool-revoked", "/tmp/", "credential_ref", "127.0.0.1"]) if (text.includes(leaked)) throw new Error(`credential_leak:${leaked}`);
+    await shot(lifecyclePage, "services-credentials");
+    await expectAccessible(lifecyclePage, "services-credentials");
+    await panel.locator("[data-credentials-quiet] summary").click();
+    await expectAccessible(lifecyclePage, "services-credentials-open");
+    // The link lands on that tool's renewal steps inside the 接入 chapter.
+    await renew.click();
+    await lifecyclePage.waitForURL(/#\/guide\/connect\?section=guide-renew-drivebridge/);
+    const heading = lifecyclePage.locator("#guide-renew-drivebridge");
+    await heading.waitFor({ timeout: 15_000 });
+    await expect(heading).toBeInViewport({ timeout: 10_000 });
+    await lifecyclePage.getByRole("navigation", { name: "指南章节" }).getByRole("link", { name: "接入", exact: true }).waitFor();
+    const steps = await lifecyclePage.locator('[data-renew-tool="drivebridge"]').innerText();
+    if (!steps.includes("agents create") || !steps.includes("state_in_use") || !steps.includes("credential <config-file> replace open_tool:drivebridge")) throw new Error("renew_steps_missing");
+    if (lifecycleErrors.length) throw new Error(lifecycleErrors.join(" | "));
+  });
+  await check("credentials in the dark theme: the panel and its folded rows pass axe", () => inDarkTheme(lifecyclePage, async () => {
+    await lifecyclePage.goto(`${ui}/#/services`, { waitUntil: "domcontentloaded" });
+    const panel = lifecyclePage.getByRole("region", { name: "凭据" });
+    await panel.waitFor({ timeout: 30_000 });
+    await expect(panel.locator('[data-credential-row="open_tool:gateway"]')).toHaveAttribute("data-state", "rejected", { timeout: 30_000 });
+    await settled(lifecyclePage);
+    await panel.locator("[data-credentials-quiet] summary").click();
+    await expectAccessible(lifecyclePage, "services-credentials@dark");
+  }));
+  await lifecycle.close();
 } finally {
   await stopFixture(fixture);
   await browser.close();

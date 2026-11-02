@@ -228,6 +228,8 @@ const unwrapResource = (value: any) => {
 const coverageFromError = (error: unknown): { state: CatalogCoverageState; reason: string } => {
   if (error instanceof AuthError) {
     const code = error.code;
+    // A key file the control center cannot use (missing, loose, empty) is a fault to show, not a provider nobody set up.
+    if (code === "credential_unreadable") return { state: "unavailable", reason: code };
     if (error.status === 403 || /unauthori|forbidden|denied|AUTH_/i.test(code)) return { state: "forbidden", reason: code };
     if (/credential/i.test(code)) return { state: "not_configured", reason: code };
     if (/contract|not_found|NOT_FOUND|unsupported/i.test(code)) return { state: "needs_contract", reason: code };

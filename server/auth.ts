@@ -1,8 +1,9 @@
 import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync, statSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
 import type { ControlCenterRole } from "../src/service-directory";
+import { credentialFileProblem, type CredentialFileReason } from "./credential-file";
 import { checkPassword, credentialVersion, hashPassword } from "./password";
 import { SessionStore } from "./db/session-store";
 import { createMemoryDB } from "./db/client";
@@ -16,10 +17,21 @@ export class AuthError extends Error {
   }
 }
 export function secret(ref: string) {
-  const stat = statSync(ref);
-  if (!stat.isFile() || stat.mode & 0o077)
-    throw new AuthError("secret_permissions_invalid", 503);
-  return readFileSync(ref, "utf8").trim();
+  const problem = credentialFileProblem(ref);
+  if (problem) throw credentialUnreadable(problem);
+  let value: string;
+  try {
+    value = readFileSync(ref, "utf8").trim();
+  } catch (error) {
+    // The stat passed, so the file went away or belongs to someone else by the time it is read.
+    throw credentialUnreadable((error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "permissions");
+  }
+  if (!value) throw credentialUnreadable("empty");
+  return value;
+}
+/** One error for every reason a credential file cannot be used; `reason` says which, and never names the file. */
+function credentialUnreadable(reason: CredentialFileReason) {
+  return Object.assign(new AuthError("credential_unreadable", 503), { reason });
 }
 export function validateEndpoint(value: string, issuer: string) {
   const url = new URL(value),

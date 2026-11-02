@@ -9,7 +9,7 @@ import { GuideChapterNav, GuideChapterPager, GuideLink, GuideOutline, type Guide
 import { CommandLine, Picker, SectionHeading, scrollIntoViewGently } from "./guide-parts";
 import { ToolPage, ToolsOverview, toolOutline } from "./GuideTools";
 import { AgentReplaySection } from "./AgentReplay";
-import { ConfigSection, ConnectedToolsSection, ControlCenterSection, TroubleSection } from "./Reference";
+import { ConfigSection, ConnectedToolsSection, ControlCenterSection, RenewSection, TroubleSection } from "./Reference";
 import { ShowcaseSection } from "./Showcase";
 import { showcaseRecord } from "./showcase";
 import { HeroStory } from "./HeroStory";
@@ -190,7 +190,7 @@ export function GuideContent({ location, nav, catalog, link, page = "guide" }: {
       : location.chapter === "cases"
         ? <><ShowcaseSection /><AgentReplaySection client={location.client} onClient={(id) => choose({ client: id })} /></>
         : location.chapter === "connect"
-          ? <><ConfigSection /><ControlCenterSection /><ConnectedToolsSection /></>
+          ? <><ConfigSection /><ControlCenterSection /><ConnectedToolsSection /><RenewSection /></>
           : <>
             <TroubleSection />
             <section className="guide-tagline-section" aria-label="核心原则"><TaglineReveal words={tagline} /></section>

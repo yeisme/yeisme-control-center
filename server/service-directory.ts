@@ -3,6 +3,7 @@ import type { ScopeBinding, ServerConfig, Session, TaskConnection } from "./cont
 import { auctraConnection } from "./auctra";
 import type { TaskConnectionState } from "../src/task-observation";
 import type { OpenToolKind, OpenToolProjection } from "../src/shared/open-tools";
+import { credentialStatuses, isPersonalAdmin } from "./credentials";
 
 /**
  * Aggregates per-service freshness from live connection observations.
@@ -96,5 +97,8 @@ export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, sess
         ),
       };
     }),
+    // Personal administrators only: the rows carry expiry dates and which credential files are shared. They are computed
+    // from what this request already has (observations and open tool readings, fresh with `?observe=1`, otherwise none).
+    ...(isPersonalAdmin(config, session) ? { credentials: credentialStatuses(config, scope, { connections: observations, openTools: openTools.projections, scopeConnections }) } : {}),
   };
 }

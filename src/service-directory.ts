@@ -1,5 +1,6 @@
 import type { ConnectionObservation } from "./task-observation";
 import type { OpenToolProjection } from "./shared/open-tools";
+import type { CredentialStatus } from "./shared/credentials";
 // Product metadata only. Registration is not proof of deployment or authorization.
 export type ServiceKind = "service" | "local_tool" | "workspace" | "design";
 export interface ServiceDefinition {
@@ -41,6 +42,11 @@ export interface ServiceDirectoryEntry extends ServiceDefinition {
 export interface ServiceDirectory {
   schema_version: "yeisme.service_directory.v1";
   services: ServiceDirectoryEntry[];
+  /**
+   * Personal sessions only: one row per credential the server holds for this scope (state, expiry, whether the owner
+   * still accepts it), computed from what is already known; no owner is called for it.
+   */
+  credentials?: CredentialStatus[];
 }
 export type ControlCenterRole = "admin" | "viewer";
 export interface ControlCenterSession {

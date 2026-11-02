@@ -97,6 +97,7 @@ const reasonLabels: Record<string, string> = {
   open_tool_response_too_large: "工具的响应超过 1 MiB，已丢弃",
   open_tool_invalid_response: "工具的响应不是预期的格式",
   open_tool_credential_unreadable: "控制中心读不到凭据文件，或文件权限不是 0600",
+  credential_unreadable: "控制中心读不到凭据文件：文件不存在、不是普通文件、权限不是 0600，或内容为空",
   open_tool_endpoint_denied: "配置里的地址不被接受：要 https，私网 http 需显式允许",
   open_tool_backend_down: "后端健康检查失败",
   open_tool_attention: "有需要处理的后端或运行",

@@ -54,6 +54,11 @@ export const chapterOutlines: Record<GuideChapterId, GuideOutlineItem[]> = {
     { id: "guide-config", label: "Claude Code 与 Codex" },
     { id: "guide-control-center", label: "接入控制中心" },
     { id: "guide-control-center-more", label: "更多工具" },
+    { id: "guide-renew", label: "续签凭据", children: [
+      { id: "guide-renew-anatomia", label: "Anatomia" },
+      { id: "guide-renew-drivebridge", label: "DriveBridge" },
+      { id: "guide-renew-gateway", label: "MCP Gateway" },
+    ] },
   ],
   help: [
     { id: "guide-trouble", label: "排障" },

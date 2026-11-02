@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ProviderRunManager } from "../server/provider-live";
 import type { ScopeBinding, ServerConfig } from "../server/contracts";
 
@@ -81,5 +84,30 @@ describe("provider read-only discovery", () => {
     const sonora = rows.find((row) => row.owner === "sonora");
     expect(sonora?.readiness).toBe("unavailable");
     expect(sonora?.blocker).toBe("sonora_provider_not_ready");
+  });
+
+  describe("a key file the control center cannot use", () => {
+    const dir = mkdtempSync(join(tmpdir(), "provider-key-"));
+    afterAll(() => rmSync(dir, { recursive: true, force: true }));
+    const keyed = (credential_ref: string) => ({ ...config, providers: { scaena: { ...config.providers!.scaena!, credential_env: undefined, credential_ref } } }) as ServerConfig;
+    const readiness = async (credentialRef: string) => (await new ProviderRunManager(keyed(credentialRef), fetcher().fetch).capabilities(scope)).find((row) => row.owner === "scaena");
+
+    it("is unavailable with its own reason, never a provider that was simply not configured", async () => {
+      const loose = join(dir, "loose.key");
+      writeFileSync(loose, "a-token\n", { mode: 0o600 });
+      chmodSync(loose, 0o644);
+      const empty = join(dir, "empty.key");
+      writeFileSync(empty, "", { mode: 0o600 });
+      for (const [name, path] of [["loose", loose], ["empty", empty], ["missing", join(dir, "absent.key")], ["a directory", dir]]) {
+        const row = await readiness(path);
+        expect(row, name).toMatchObject({ readiness: "unavailable", blocker: "credential_unreadable" });
+      }
+    });
+
+    it("still calls a provider with no key at all not configured", async () => {
+      const row = (await new ProviderRunManager({ ...config, providers: { scaena: { ...config.providers!.scaena!, credential_env: "TEST_UNSET_PROVIDER_TOKEN" } } }, fetcher().fetch).capabilities(scope)).find((candidate) => candidate.owner === "scaena");
+      expect(row?.readiness).toBe("needs_configuration");
+      expect(row?.blocker).toBe("provider_credential_missing");
+    });
   });
 });

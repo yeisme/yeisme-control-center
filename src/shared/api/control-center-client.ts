@@ -1,6 +1,7 @@
 import type { TaskConnectionState, TaskEvent, TaskPage, TaskSnapshot } from "../../task-observation";
 import type { ProcessObservation, ProcessCheckpoint, PromptCaptureObservation } from "../../observation-contract";
 import type { ServiceDirectoryEntry } from "../../service-directory";
+import type { CredentialStatus } from "../credentials";
 import type { AttachmentRead, ContentRead, Coverage, CoverageState, Owner, RequestProjection, RequestQuery, RequestSummary } from "../../request-visibility";
 import type { ControlCenterErrorClass } from "../types";
 import type { ActionConfirmRequest, ActionDescriptor, ActionPreview, ActionPreviewRequest, ActionReceipt } from "../action-contract";
@@ -371,6 +372,8 @@ export interface NotificationMuteRule {
 export interface ServicesResponse extends Epoch {
   schema_version?: string;
   services: ServiceDirectoryEntry[];
+  /** Personal administrators only; absent for other sessions and from servers that predate it. */
+  credentials?: CredentialStatus[];
 }
 
 export type AuctraCollectionCoverage = "complete" | "partial" | "needs_contract" | "forbidden" | "unavailable" | "unknown" | "stale";
