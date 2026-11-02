@@ -890,6 +890,11 @@ try {
     await page.keyboard.type("?/");
     if (await page.evaluate(() => (document.activeElement as HTMLInputElement | null)?.value) !== "?/") throw new Error("shortcut_fired_while_typing");
     if (await sheet.count()) throw new Error("shortcut_sheet_opened_while_typing");
+    // Leave the search empty: the box writes its text into the address 300 ms after typing, and on a slow machine that write
+    // lands after the next check's goto to this same route, which then lists "?/" matches instead of its task.
+    await page.keyboard.press("Control+a");
+    await page.keyboard.press("Backspace");
+    await page.waitForFunction(() => !new URLSearchParams(location.hash.split("?")[1] || "").get("q"), undefined, { timeout: 5_000 });
   });
   await check("the command palette offers recent items and runs theme and shortcut actions", async () => {
     await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
