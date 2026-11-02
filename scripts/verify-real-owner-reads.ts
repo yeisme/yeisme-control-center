@@ -40,7 +40,7 @@ await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n")
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
   port,
-  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "drama.episodes", "work-queue", "open-tools"],
+  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "auctra.collection.sync", "drama.episodes", "work-queue", "open-tools"],
   real_owner_reads: true,
   provider_calls: false,
   mutations: false,
@@ -205,10 +205,25 @@ try {
     counts: { tools: catalog.body?.tools?.length || 0, actions: catalog.body?.actions?.length || 0, models: catalog.body?.models?.length || 0, channels: catalog.body?.channels?.length || 0 },
     latest_ready_models: (catalog.body?.models || []).filter((model: any) => model.status === "latest_ready").length,
   } : { status: "route_unavailable" };
+  // With an Auctra collection configured, sync it first: a read of Auctra that writes only this run's temporary index (the
+  // config copy sits in a private temp directory), so the episode board below lists the synced episodes. Counts only.
+  let collectionSync: Record<string, unknown> = { status: "not_configured" };
+  if (config.collection?.auctra && config.collection.auctra.enabled !== false) {
+    const sync = await request(`/api/control-center/v1/auctra/collection/sync?scope=${encodeURIComponent(scope)}`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: "{}",
+    });
+    if (sync.response.status >= 500 && sync.response.status !== 503) throw new Error(`collection_sync_failed:${sync.response.status}`);
+    const result = sync.body?.result || sync.body || {};
+    collectionSync = { status: sync.response.status, error: sync.body?.error || null, coverage: result.coverage ?? null, complete: result.complete ?? null, pages: result.pages ?? null, counts: result.counts ?? null, blocker: result.blocker ?? null };
+  }
   // Episode board and attention queue are read-only. Record counts, states and coverage only: never refs, titles or bodies.
-  const taskEpisodeRefs = [...new Set([...activeRows, ...historyRows].map((row: any) => row?.episode_ref).filter((ref: unknown): ref is string => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref === ref.trim() && !/[\x00-\x1f\x7f]/.test(ref)))].slice(0, 12);
+  const taskEpisodeRefs =[...new Set([...activeRows, ...historyRows].map((row: any) => row?.episode_ref).filter((ref: unknown): ref is string => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref === ref.trim() && !/[\x00-\x1f\x7f]/.test(ref)))].slice(0, 12);
   const dramaParams = new URLSearchParams({ scope });
   for (const ref of taskEpisodeRefs) dramaParams.append("episode_ref", ref);
+  // After a sync, read every listed episode's stages instead of deferring them, so the rail shows real owner states.
+  if (collectionSync.status === 200) dramaParams.set("read", "all");
   const dramaList = await request(`/api/control-center/v1/drama/episodes?${dramaParams}`, { headers: authHeaders });
   const queueRead = await request(`/api/control-center/v1/work-queue?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
   if (queueRead.response.status !== 200) throw new Error(`work_queue_read_failed:${queueRead.response.status}`);
@@ -257,6 +272,7 @@ try {
     owners: ownerRows,
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
+    collection_sync: collectionSync,
     drama_board: dramaBoard,
     open_tools: openTools,
     task_rows: { active: activeRows.length, history: historyRows.length },
