@@ -6,20 +6,20 @@ import {
 } from "node:crypto";
 import { AuthError, SessionAuth } from "./auth";
 import { OwnerReaders, owners } from "./owners";
-import { TaskConnections, taskIdentity, taskIdentityOf } from "./task-connections";
+import { TaskConnections, taskIdentityOf } from "./task-connections";
 import { ConnectionCatalog, ownerProjectRef } from "./connection-catalog";
 import { MediaBridge } from "./media";
 import { serviceDirectory } from "./service-directory";
 import type { TaskSnapshot } from "../src/task-observation";
 import type { ServerConfig, ScopeBinding, Session, Owner } from "./contracts";
-import { AuditStore, auditActions, type AuditAction } from "./db/audit";
+import { AuditStore, auditActions, type AuditAction, type AuditContext, type AuditOutcome } from "./db/audit";
 import { SessionStore } from "./db/session-store";
 import { RunStore } from "./db/run-store";
 import { ActionService, type PreviewRecord } from "./actions";
 import type { ActionConfirmRequest, ActionPreviewRequest, ActionReceipt } from "../src/shared/action-contract";
 import { createMemoryDB, type ControlDB } from "./db/client";
-import { NotificationStore, attentionStates, countsAsUnread, type FailureFact } from "./notifications";
-import { taskSigningKey } from "./db/control-state";
+import { NotificationStore, attentionStates, countsAsUnread, failureFact } from "./notifications";
+import { controlStateOf, taskSigningKey, type ControlState } from "./db/control-state";
 import { rekeyNotifications } from "./db/notification-rekey";
 import { ToolCatalogService } from "./tool-catalog";
 import { ToolCatalogStore } from "./db/tool-catalog-store";
@@ -39,6 +39,7 @@ import { workQueueKinds } from "../src/shared/work-queue";
 import { DramaService, dramaLimits, validDramaRef } from "./drama";
 import { collectionSyncLimits, syncCollection } from "./auctra-sync";
 import { ScaenaStoryboardReader } from "./scaena-storyboard";
+import { observationStatus, type ObservationLoop } from "./observation-loop";
 import {
   defaultRequestQuery,
   type RequestQuery,
@@ -112,19 +113,40 @@ export function errorClass(e: AuthError): string {
   return "unavailable";
 }
 
-export function createApp(
-  config: ServerConfig,
-  deps: {
-    auth?: SessionAuth;
-    readers?: OwnerReaders;
-    tasks?: TaskConnections;
-    providers?: ProviderRunManager;
-    auctra?: AuctraCollectionReader;
-    scaenaStoryboard?: ScaenaStoryboardReader;
-    openTools?: OpenToolService;
-    db?: ControlDB;
-  } = {},
-) {
+/** What a process may hand to `createControlCenter`; everything is optional and defaults to the real thing. */
+export interface ControlCenterDeps {
+  auth?: SessionAuth;
+  readers?: OwnerReaders;
+  tasks?: TaskConnections;
+  providers?: ProviderRunManager;
+  auctra?: AuctraCollectionReader;
+  scaenaStoryboard?: ScaenaStoryboardReader;
+  openTools?: OpenToolService;
+  db?: ControlDB;
+  /** Milliseconds since the epoch; the background loop reads time through it. */
+  clock?: () => number;
+}
+
+/**
+ * What the background observation loop (and any other process-level job) may use. It is the same objects the request
+ * handler uses, so a background write and a browser request see one ledger, one connection cache and one config.
+ */
+export interface ControlServices {
+  config: ServerConfig;
+  db: ControlDB;
+  /** Sessions and the personal accounts behind them; `server/personal-accounts.ts` reads the accounts from `config`. */
+  auth: SessionAuth;
+  tasks: TaskConnections;
+  openTools: OpenToolService;
+  notifications: NotificationStore;
+  /** Small named values kept with the database, such as when background observation was first enabled. */
+  state: ControlState;
+  clock: () => number;
+  /** Set by the process that runs the background loop (server/index.ts); `GET /observation/status` reads it. */
+  observation?: ObservationLoop;
+}
+
+export function createControlCenter(config: ServerConfig, deps: ControlCenterDeps = {}) {
   const db = deps.db ?? createMemoryDB(),
     // Task keys stay valid across restarts: the signing key is kept with the database. If it cannot be stored, keys
     // are signed per process, as before.
@@ -211,6 +233,27 @@ export function createApp(
         : "unavailable";
   const auditError = (e: unknown) =>
     e instanceof AuthError ? e.code : "source_unavailable";
+  /**
+   * Runs `work` between an "initiated" audit row and its outcome. Audit-first: when the initiated row cannot be
+   * written, `work` never runs. A normal return records "succeeded" unless `work` calls `settle` to say otherwise (a
+   * sync that stopped early, a read the owner refused); a throw records denied, failed or unavailable from the error.
+   */
+  const audited = async <T>(
+    context: AuditContext,
+    work: (settle: (outcome: Exclude<AuditOutcome, "initiated">, errorCode?: string) => void) => Promise<T> | T,
+  ): Promise<T> => {
+    const eventId = audit.begin(context);
+    let outcome: Exclude<AuditOutcome, "initiated"> = "succeeded";
+    let errorCode: string | undefined;
+    try {
+      const value = await work((next, code) => { outcome = next; errorCode = code; });
+      audit.complete(eventId, outcome, errorCode);
+      return value;
+    } catch (e) {
+      audit.complete(eventId, auditOutcome(e), auditError(e));
+      throw e;
+    }
+  };
   const readCreativeFlow = (scope: ScopeBinding, session: Session, query: { episode_ref?: string; breakdown_ref?: string } = {}) => drama.flow(scope, session, query);
   /**
    * One reminder per batch and finished state, for every project member; its link opens that batch directly. Lists and
@@ -224,6 +267,14 @@ export function createApp(
       if (!ending) continue;
       for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: batch.id + ":" + batch.state, category: "generation_batch", title: `批次「${batch.name}」${ending}`, path: `/creation?${new URLSearchParams({ sharedProject: projectID, batch: batch.id })}` });
     }
+  };
+  /** A new project, or a change to who shares one, is announced to every member once; the preview ref names the event. */
+  const announceProject = (session: Session, record: PreviewRecord, result: string[]) => {
+    const { action, target_ref } = record.request;
+    if (action !== "project.create" && action !== "project.members.set" && action !== "project.update") return;
+    const projectID = action === "project.create" ? result[0] : target_ref;
+    const project = collaboration.project(session, projectID);
+    for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: record.preview.preview_ref, category: "project_assignment", title: `项目「${project.name}」的共享设置已更新`, path: `/projects?sharedProject=${encodeURIComponent(projectID)}` });
   };
 
   const sign = (payload: any) => {
@@ -270,7 +321,8 @@ export function createApp(
     observed_at: new Date().toISOString(),
     reason: e instanceof AuthError ? e.code : "source_unavailable",
   });
-  return async (r: Request): Promise<Response> => {
+  const services: ControlServices = { config, db, auth, tasks, openTools, notifications, state: controlStateOf(db), clock: deps.clock ?? Date.now };
+  const handle = async (r: Request): Promise<Response> => {
     try {
       const url = new URL(r.url),
         path = url.pathname.slice(prefix.length);
@@ -389,6 +441,16 @@ export function createApp(
           shared_projects: collaboration.list(session),
         });
       }
+      if (path === "/observation/status") {
+        if (r.method !== "GET") return methodNotAllowed(["GET"]);
+        // Background observation reads connection data with the server's own credentials, so, like tasks, only personal
+        // sessions ask about it; any role may. This answers from memory and config and never calls an owner.
+        if (!session.personal) throw new AuthError("personal_connection_required", 403);
+        const wanted = url.searchParams.get("scope");
+        const scopes = (auth.principal(session)?.scopes || []).filter((candidate) => !wanted || candidate.id === wanted);
+        if (wanted && !scopes.length) throw new AuthError("scope_not_found", 404);
+        return json(withEpoch(session, observationStatus(services, identityOf(session), scopes.map((candidate) => candidate.id), wanted ?? undefined)));
+      }
       if (path === "/admin/personal-users" || path.startsWith("/admin/personal-users/")) {
         if (!session.personal || auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
         if (r.method === "GET") return json({ users: auth.listPersonalUsers() });
@@ -399,38 +461,24 @@ export function createApp(
           let body;
           try { body = JSON.parse(raw); } catch { throw new AuthError("invalid_request", 400); }
           if (!body || typeof body.username !== "string" || typeof body.name !== "string" || !["admin", "viewer"].includes(body.role) || !Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string") || Object.keys(body).some((key) => !["username", "name", "role", "scope_ids"].includes(key))) throw new AuthError("invalid_request", 400);
-          const eventId = audit.begin({
+          const created = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             action: "admin.user_created",
             targetRef: body.username,
-          });
-          try {
-            const created = await auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids });
-            audit.complete(eventId, "succeeded");
-            return json(created, 201);
-          } catch (e) {
-            audit.complete(eventId, auditOutcome(e), auditError(e));
-            throw e;
-          }
+          }, () => auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids }));
+          return json(created, 201);
         }
         const revoke = path.match(/^\/admin\/personal-users\/([^/]+)\/revoke$/);
         if (revoke && r.method === "POST") {
           auth.csrf(r, session);
           const username = decodeURIComponent(revoke[1]);
-          const eventId = audit.begin({
+          await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             action: "admin.user_revoked",
             targetRef: username,
-          });
-          try {
-            auth.revokePersonalUser(username);
-            audit.complete(eventId, "succeeded");
-          } catch (e) {
-            audit.complete(eventId, auditOutcome(e), auditError(e));
-            throw e;
-          }
+          }, () => auth.revokePersonalUser(username));
           return json({ ok: true });
         }
         return methodNotAllowed(["GET", "POST"]);
@@ -648,31 +696,15 @@ export function createApp(
         // `limit` is the page size; one sync keeps reading pages until Auctra has none left or a sync limit stops it.
         const limit = Number(body.limit || url.searchParams.get("limit") || collectionSyncLimits.pageSize);
         if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new AuthError("invalid_query", 400);
-        const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "auctra.collection.sync", owner: "auctra", purpose: "metadata_collection" });
-        try {
-          const result = await syncCollection({ reader: auctra, store: collectionStore, config }, scope, session, { cursor: body.cursor || url.searchParams.get("cursor") || undefined, updated_after: body.updated_after || url.searchParams.get("updated_after") || undefined, limit });
+        const result = await audited({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "auctra.collection.sync", owner: "auctra", purpose: "metadata_collection" }, async (settle) => {
+          const synced = await syncCollection({ reader: auctra, store: collectionStore, config }, scope, session, { cursor: body.cursor || url.searchParams.get("cursor") || undefined, updated_after: body.updated_after || url.searchParams.get("updated_after") || undefined, limit });
           // A sync that stored some pages succeeded as far as it got; the stop reason stays on the audit row.
-          audit.complete(eventId, result.counts.returned || result.complete ? "succeeded" : "unavailable", result.blocker || undefined);
-          return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.sync.v1", sync_ref: "sync_" + randomBytes(12).toString("hex"), scope: scope.id, ...result }), 200);
-        } catch (e) {
-          audit.complete(eventId, auditOutcome(e), auditError(e));
-          throw e;
-        }
+          settle(synced.counts.returned || synced.complete ? "succeeded" : "unavailable", synced.blocker || undefined);
+          return synced;
+        });
+        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.sync.v1", sync_ref: "sync_" + randomBytes(12).toString("hex"), scope: scope.id, ...result }), 200);
       }
       const subject = session.issuer + "|" + session.subject;
-      const failureOf = (task: TaskSnapshot): FailureFact => ({
-        scope_id: scope.id,
-        task_key: task.task_key || "",
-        // From the verified snapshot, not the key string the browser proposed.
-        task_identity: task.connection_id ? taskIdentity({ scope: scope.id, c: task.connection_id, ref: task.locator.task_ref, family: task.locator.task_family }) : taskIdentityOf(task.task_key || ""),
-        state: task.state,
-        revision: task.revision || "",
-        native_state: task.native_state || "",
-        error_code: task.provider_recovery?.error_code || "",
-        title: task.title,
-        owner: task.locator.owner,
-        project: task.locator.project,
-      });
       if (path === "/notifications" || path.startsWith("/notifications/")) {
         // Reminder state is control-center data and follows the signed-in scope.
         const identity = { scopeId: scope.id, sessionId: session.id, subject };
@@ -725,7 +757,7 @@ export function createApp(
             if (!candidate || typeof candidate.task_key !== "string") continue;
             try { verified.push(await tasks.detail(candidate.task_key, scope)); } catch { verificationComplete = false; }
           }
-          const observed = verified.filter((task) => attentionStates.has(task.state)).map(failureOf);
+          const observed = verified.filter((task) => attentionStates.has(task.state)).map((task) => failureFact(scope.id, task));
           // Open reminders whose task the browser now lists as not failing: confirm with the owner before marking them
           // recovered, so a stale page can never silence a failure. At most 20 extra owner reads per sync.
           const present = Array.isArray(body.present_task_keys) ? body.present_task_keys.filter((key) => typeof key === "string").slice(0, 4000) : [];
@@ -735,7 +767,7 @@ export function createApp(
           for (const key of present.filter((key) => candidates.has(taskIdentityOf(key)) && !failing.has(taskIdentityOf(key))).slice(0, 20)) {
             try {
               const task = await tasks.detail(key, scope);
-              if (!attentionStates.has(task.state)) recovered.push(failureOf(task).task_identity);
+              if (!attentionStates.has(task.state)) recovered.push(failureFact(scope.id, task).task_identity);
             } catch { verificationComplete = false; }
           }
           const result = notifications.sync({
@@ -817,21 +849,16 @@ export function createApp(
         let body: ActionPreviewRequest;
         try { body = JSON.parse(raw) as ActionPreviewRequest; } catch { throw new AuthError("invalid_action_request", 400); }
         if (!body || body.scope_id !== scope.id || typeof body.owner !== "string" || typeof body.target_kind !== "string" || typeof body.target_ref !== "string" || typeof body.action !== "string" || typeof body.expected_revision !== "string" || typeof body.idempotency_key !== "string" || !body.input || typeof body.input !== "object") throw new AuthError("invalid_action_request", 400);
-        const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.preview", owner: body.owner, targetRef: body.target_ref, meta: { action: body.action, target_kind: body.target_kind } });
-        try {
+        const preview = await audited({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.preview", owner: body.owner, targetRef: body.target_ref, meta: { action: body.action, target_kind: body.target_kind } }, async () => {
           authorizeAction(session, body.action);
           if (isCollaborationAction(body.action)) collaboration.authorize(session, body.action, body.target_ref, body.input);
           if (body.action === "generation.batch.create") body.input.items = await generationBatches.verify(session, body.target_ref, body.input.items);
           if (body.action === "provider_runs.create" && scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
           if (body.action === "owner_project.connect") await checkToolProject(session, scope, body.input || {});
           if (body.action === "owner_project.disconnect") registeredIn(session, scope, body.input?.connection_id);
-          const preview = actions.preview(body, identityOf(session));
-          audit.complete(eventId, "succeeded");
-          return json(withEpoch(session, preview));
-        } catch (e) {
-          audit.complete(eventId, auditOutcome(e), auditError(e));
-          throw e;
-        }
+          return actions.preview(body, identityOf(session));
+        });
+        return json(withEpoch(session, preview));
       }
       if (path === "/actions/confirm" && r.method === "POST") {
         auth.csrf(r, session);
@@ -840,58 +867,48 @@ export function createApp(
         let body: ActionConfirmRequest;
         try { body = JSON.parse(raw) as ActionConfirmRequest; } catch { throw new AuthError("invalid_action_request", 400); }
         if (!body || body.scope_id !== scope.id || typeof body.preview_ref !== "string" || typeof body.preview_digest !== "string" || typeof body.idempotency_key !== "string") throw new AuthError("invalid_action_request", 400);
-        const eventId = audit.begin({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.confirm", targetRef: body.preview_ref });
-        try {
+        const receipt = await audited({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.confirm", targetRef: body.preview_ref }, async (settle) => {
           const original = actions.record(body.preview_ref, identityOf(session), scope.id);
           authorizeAction(session, original.request.action);
           if (isCollaborationAction(original.request.action)) collaboration.authorize(session, original.request.action, original.request.target_ref, original.request.input);
           const local = isCollaborationAction(original.request.action) && !["generation.input.prepare", "generation.batch.submit", "generation.batch.reconcile"].includes(original.request.action);
           if (original.request.action === "generation.batch.create") original.request.input.items = await generationBatches.verify(session, original.request.target_ref, original.request.input.items);
-          const receipt = local ? actions.confirmLocal(body, (record) => {
+          const done = local ? actions.confirmLocal(body, (record) => {
             const result = collaboration.execute(session, record.request.action as import("../src/shared/collaboration").CollaborationAction, record.request.target_ref, record.request.expected_revision, record.request.input);
-            const projectID = record.request.action === "project.create" ? result[0] : record.request.target_ref;
-            if (["project.create", "project.members.set", "project.update"].includes(record.request.action)) {
-              const p = collaboration.project(session, projectID);
-              for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: record.preview.preview_ref, category: "project_assignment", title: `项目「${p.name}」的共享设置已更新`, path: `/projects?sharedProject=${encodeURIComponent(projectID)}` });
-            }
-            return { ...ActionService.unavailable(record, ""), state: "succeeded", owner_state: "updated", error_code: null, result_refs: result };
+            announceProject(session, record, result);
+            return ActionService.succeeded(record, { owner_state: "updated", result_refs: result });
           }, identityOf(session)) : await actions.confirm(body, async (record: PreviewRecord): Promise<ActionReceipt> => {
             if (record.preview.availability !== "available") return ActionService.unavailable(record, record.preview.blockers[0] || "action_unavailable");
             const input = record.request.input;
             if (record.request.action === "generation.input.prepare") {
               const items = await generationBatches.prepare(session, record.request.target_ref, input, record.request.idempotency_key);
-              return { ...ActionService.unavailable(record, ""), state: "succeeded", error_code: null, generation_items: items, result_refs: items.map((v) => v.input_ref) };
+              return ActionService.succeeded(record, { generation_items: items, result_refs: items.map((v) => v.input_ref) });
             }
             if (record.request.action === "generation.batch.submit" || record.request.action === "generation.batch.reconcile") {
               const batch = await generationBatches.operate(session, record.request.target_ref, String(input.batch_id), record.request.action === "generation.batch.submit");
               announceBatches(batch.project_id, [batch]);
-              return { ...ActionService.unavailable(record, ""), state: batch.state === "unknown" ? "unknown" : "succeeded", error_code: batch.state === "unknown" ? "generation_reconcile_required" : null, owner_state: batch.state, operation_ref: batch.id, result_refs: [batch.id] };
+              return ActionService.outcome(record, batch.state === "unknown" ? "unknown" : "succeeded", { error_code: batch.state === "unknown" ? "generation_reconcile_required" : null, owner_state: batch.state, operation_ref: batch.id, result_refs: [batch.id] });
             }
             if (isCollaborationAction(record.request.action)) {
               if (record.request.action === "generation.batch.create") input.items = await generationBatches.verify(session, record.request.target_ref, input.items);
               const result = collaboration.execute(session, record.request.action, record.request.target_ref, record.request.expected_revision, input);
-              const projectID = record.request.action === "project.create" ? result[0] : record.request.target_ref;
-              if (record.request.action === "project.create" || record.request.action === "project.members.set" || record.request.action === "project.update") {
-                const project = collaboration.project(session, projectID);
-                for (const recipient of collaboration.recipients(projectID)) notifications.event({ scope: projectID, recipient, event: record.preview.preview_ref, category: "project_assignment", title: `项目「${project.name}」的共享设置已更新`, path: `/projects?sharedProject=${encodeURIComponent(projectID)}` });
-              }
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref,
-                state: "succeeded", owner_state: "updated", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: result };
+              announceProject(session, record, result);
+              return ActionService.succeeded(record, { owner_state: "updated", result_refs: result });
             }
             if (record.request.action === "task.cancel") {
               if (input.confirm !== true || typeof input.expected_revision !== "string") throw new AuthError("invalid_action_input", 400);
               const result = await tasks.cancel(record.request.target_ref, scope, input.expected_revision, record.request.idempotency_key, false);
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: result.receipt.outcome === "unknown" ? "unknown" : result.receipt.outcome === "cancelled" || result.receipt.outcome === "already_terminal" ? "succeeded" : "failed", owner_state: result.receipt.outcome, error_code: null, observed_at: result.receipt.occurred_at || new Date().toISOString(), operation_ref: result.receipt.ref, result_refs: [] };
+              return ActionService.outcome(record, result.receipt.outcome === "unknown" ? "unknown" : result.receipt.outcome === "cancelled" || result.receipt.outcome === "already_terminal" ? "succeeded" : "failed", { owner_state: result.receipt.outcome, observed_at: result.receipt.occurred_at || undefined, operation_ref: result.receipt.ref });
             }
             if (record.request.action === "provider_runs.create") {
               if (scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
               const run = await providers.create(input as any, scope, session);
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "submitted", owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs };
+              return ActionService.outcome(record, run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "submitted", { owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs });
             }
             if (record.request.action === "provider_runs.reconcile") {
               if (typeof input.run_ref !== "string") throw new AuthError("invalid_action_input", 400);
               const run = await providers.reconcile(input.run_ref);
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "succeeded", owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs };
+              return ActionService.outcome(record, run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "succeeded", { owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs });
             }
             if (record.request.owner === "control-center" && record.request.action.startsWith("collection.record.")) {
               const expected = String(input.expected_revision || "");
@@ -904,7 +921,7 @@ export function createApp(
                   : record.request.action === "collection.record.labels.set"
                     ? collectionStore.labels(scope.id, recordRef, expected, actor, Array.isArray(input.labels) ? input.labels.filter((value): value is string => typeof value === "string") : [])
                     : collectionStore.note(scope.id, recordRef, expected, actor, typeof input.note === "string" ? input.note : "");
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: recordRef, state: "succeeded", owner_state: result.collection_state, error_code: null, observed_at: new Date().toISOString(), operation_ref: recordRef, result_refs: [recordRef] };
+              return ActionService.succeeded(record, { owner_state: result.collection_state, operation_ref: recordRef, result_refs: [recordRef] });
             }
             if (record.request.owner === "control-center" && record.request.action === "owner_project.connect") {
               // Checked again: time passed since the preview, and the owner may have changed its mind.
@@ -916,14 +933,14 @@ export function createApp(
               }
               tasks.forget(connection);
               auth.sessions.bumpAll();
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref, state: "succeeded", owner_state: "connected", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: [connection] };
+              return ActionService.succeeded(record, { owner_state: "connected", result_refs: [connection] });
             }
             if (record.request.owner === "control-center" && record.request.action === "owner_project.disconnect") {
               const found = registeredIn(session, scope, input.connection_id);
               connectionCatalog.disconnect(found.id, scope);
               tasks.forget(found.id);
               auth.sessions.bumpAll();
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref, state: "succeeded", owner_state: "disconnected", error_code: null, observed_at: new Date().toISOString(), operation_ref: null, result_refs: [found.id] };
+              return ActionService.succeeded(record, { owner_state: "disconnected", result_refs: [found.id] });
             }
             if (record.request.owner === "control-center" && record.request.action.startsWith("project.metadata.")) {
               const separator = record.request.target_ref.indexOf(":");
@@ -938,37 +955,35 @@ export function createApp(
                 : record.request.action === "project.metadata.hide"
                   ? projectMetadata.hide(scope.id, owner, projectRef, expected, actor)
                   : projectMetadata.unhide(scope.id, owner, projectRef, expected, actor);
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: "control-center", target_ref: record.request.target_ref, state: "succeeded", owner_state: result.hidden ? "hidden" : "visible", error_code: null, observed_at: new Date().toISOString(), operation_ref: record.request.target_ref, result_refs: [record.request.target_ref] };
+              return ActionService.succeeded(record, { owner_state: result.hidden ? "hidden" : "visible", operation_ref: record.request.target_ref, result_refs: [record.request.target_ref] });
             }
             if (record.request.action === "admin.user.create") {
               if (typeof input.username !== "string" || typeof input.name !== "string" || !["admin", "viewer"].includes(String(input.role)) || !Array.isArray(input.scope_ids)) throw new AuthError("invalid_action_input", 400);
               const created = await auth.createPersonalUser({ username: input.username, name: input.name, role: input.role as "admin" | "viewer", scope_ids: input.scope_ids.filter((value): value is string => typeof value === "string") });
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: "succeeded", owner_state: "created", error_code: null, observed_at: new Date().toISOString(), operation_ref: created.user.username, result_refs: [] };
+              return ActionService.succeeded(record, { owner_state: "created", operation_ref: created.user.username });
             }
             if (record.request.action === "admin.user.revoke") {
               if (typeof input.username !== "string") throw new AuthError("invalid_action_input", 400);
               auth.revokePersonalUser(input.username);
-              return { receipt_ref: "receipt_" + randomBytes(12).toString("hex"), action: record.request.action, owner: record.request.owner, target_ref: record.request.target_ref, state: "succeeded", owner_state: "revoked", error_code: null, observed_at: new Date().toISOString(), operation_ref: input.username, result_refs: [] };
+              return ActionService.succeeded(record, { owner_state: "revoked", operation_ref: input.username });
             }
             return ActionService.unavailable(record, "owner_action_adapter_not_configured");
           }, identityOf(session));
-          audit.complete(eventId, receipt.state === "succeeded" || receipt.state === "submitted" ? "succeeded" : receipt.state === "needs_contract" ? "unavailable" : "failed", receipt.error_code || undefined);
-          if (receipt.action.startsWith("project.metadata.")) {
+          settle(done.state === "succeeded" || done.state === "submitted" ? "succeeded" : done.state === "needs_contract" ? "unavailable" : "failed", done.error_code || undefined);
+          if (done.action.startsWith("project.metadata.")) {
             audit.record({
               actor: session.issuer + "|" + session.subject,
               sessionId: session.id,
               scopeId: scope.id,
               action: "actions.confirm",
-              owner: receipt.owner,
-              targetRef: receipt.target_ref,
-              meta: { action: receipt.action, state: receipt.state, owner_state: receipt.owner_state },
-            }, receipt.state === "succeeded" ? "succeeded" : receipt.state === "needs_contract" ? "unavailable" : "failed", receipt.error_code || undefined);
+              owner: done.owner,
+              targetRef: done.target_ref,
+              meta: { action: done.action, state: done.state, owner_state: done.owner_state },
+            }, done.state === "succeeded" ? "succeeded" : done.state === "needs_contract" ? "unavailable" : "failed", done.error_code || undefined);
           }
-          return json(withEpoch(session, receipt), 202);
-        } catch (e) {
-          audit.complete(eventId, auditOutcome(e), auditError(e));
-          throw e;
-        }
+          return done;
+        });
+        return json(withEpoch(session, receipt), 202);
       }
       const receiptMatch = path.match(/^\/actions\/receipts\/([^/]+)$/);
       if (receiptMatch && r.method === "GET") {
@@ -1022,7 +1037,7 @@ export function createApp(
           typeof body.idempotency_key !== "string" ||
           (body.trace_ref !== undefined && typeof body.trace_ref !== "string") || !creativeInputValid)
           throw new AuthError("invalid_provider_request", 400);
-        const eventId = audit.begin({
+        const result = await audited({
           actor: session.issuer + "|" + session.subject,
           sessionId: session.id,
           scopeId: scope.id,
@@ -1030,15 +1045,12 @@ export function createApp(
           owner: body.owner,
           targetRef: body.idempotency_key,
           meta: { modality: body.modality, model_ref: body.model_ref, budget_amount: body.budget_cap.amount },
+        }, async (settle) => {
+          const created = await providers.create(body as ProviderRunRequest, scope, session);
+          settle(created.state === "failed" ? "failed" : "succeeded", created.error_code ?? undefined);
+          return created;
         });
-        try {
-          const result = await providers.create(body as ProviderRunRequest, scope, session);
-          audit.complete(eventId, result.state === "failed" ? "failed" : "succeeded", result.error_code ?? undefined);
-          return json(result, 202);
-        } catch (e) {
-          audit.complete(eventId, auditOutcome(e), auditError(e));
-          throw e;
-        }
+        return json(result, 202);
       }
       const providerRun = path.match(/^\/provider-runs\/([^/]+)(\/events|\/reconcile)?$/);
       if (providerRun) {
@@ -1049,22 +1061,15 @@ export function createApp(
         if (r.method === "GET" && !providerRun[2]) return json(run);
         if (r.method === "POST" && providerRun[2] === "/reconcile") {
           auth.csrf(r, session);
-          const eventId = audit.begin({
+          const reconciled = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             scopeId: scope.id,
             action: "provider_runs.reconcile",
             owner: run.owner,
             targetRef: runRef,
-          });
-          try {
-            const reconciled = await providers.reconcile(runRef);
-            audit.complete(eventId, "succeeded");
-            return json(reconciled);
-          } catch (e) {
-            audit.complete(eventId, auditOutcome(e), auditError(e));
-            throw e;
-          }
+          }, () => providers.reconcile(runRef));
+          return json(reconciled);
         }
         if (r.method === "GET" && providerRun[2] === "/events") {
           const encoder = new TextEncoder();
@@ -1231,28 +1236,21 @@ export function createApp(
             Object.keys(b).some((k) => k !== "purpose")
           )
             throw new AuthError("invalid_request", 400);
-          const eventId = audit.begin({
+          const granted = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             scopeId: scope.id,
             action: "tasks.artifact_access",
             targetRef: decodeURIComponent(artifact[2]),
             purpose: b.purpose,
-          });
-          try {
-            const granted = await media.issue(
-              session,
-              scope,
-              decodeURIComponent(artifact[1]),
-              decodeURIComponent(artifact[2]),
-              b.purpose as "preview" | "download" | "thumbnail",
-            );
-            audit.complete(eventId, "succeeded");
-            return json(granted);
-          } catch (e) {
-            audit.complete(eventId, auditOutcome(e), auditError(e));
-            throw e;
-          }
+          }, () => media.issue(
+            session,
+            scope,
+            decodeURIComponent(artifact[1]),
+            decodeURIComponent(artifact[2]),
+            b.purpose as "preview" | "download" | "thumbnail",
+          ));
+          return json(granted);
         }
         const t = path.match(
           /^\/tasks\/([^/]+)(\/events|\/cancel|\/cancel-receipt)?$/,
@@ -1306,27 +1304,20 @@ export function createApp(
               )
             )
               throw new AuthError("invalid_request", 400);
-            const eventId = audit.begin({
+            const result = await audited({
               actor: session.issuer + "|" + session.subject,
               sessionId: session.id,
               scopeId: scope.id,
               action: "tasks.cancel",
               targetRef: key,
               meta: { expected_revision: b.expected_revision, idempotency_key: b.idempotency_key },
-            });
-            try {
-              const result = await tasks.cancel(
-                key,
-                scope,
-                b.expected_revision,
-                b.idempotency_key,
-              );
-              audit.complete(eventId, "succeeded");
-              return json(result);
-            } catch (e) {
-              audit.complete(eventId, auditOutcome(e), auditError(e));
-              throw e;
-            }
+            }, () => tasks.cancel(
+              key,
+              scope,
+              b.expected_revision,
+              b.idempotency_key,
+            ));
+            return json(result);
           }
         }
         return methodNotAllowed(["GET", "POST"]);
@@ -1485,7 +1476,7 @@ export function createApp(
         )
           throw new AuthError("invalid_content_request", 400);
         // Audit-first, same as text content: no owner call without a durable row.
-        const eventId = audit.begin({
+        return await audited({
           actor: session.issuer + "|" + session.subject,
           sessionId: session.id,
           scopeId: scope.id,
@@ -1494,8 +1485,7 @@ export function createApp(
           targetRef: id + "#" + attachmentRef,
           purpose: body.purpose.trim(),
           meta: { direction: body.direction },
-        });
-        try {
+        }, async (settle) => {
           const read = await readers.attachmentContent(
             owner,
             id,
@@ -1513,7 +1503,6 @@ export function createApp(
               read.mime!,
               read.data,
             );
-            audit.complete(eventId, "succeeded");
             return json({
               state: "complete",
               mime: granted.mime,
@@ -1524,12 +1513,7 @@ export function createApp(
               receipt_ref: read.receipt_ref,
             });
           }
-          audit.complete(
-            eventId,
-            read.state === "forbidden" || read.state === "unavailable"
-              ? "unavailable"
-              : "succeeded",
-          );
+          if (read.state === "forbidden" || read.state === "unavailable") settle("unavailable");
           return json({
             state: read.state,
             text: read.text,
@@ -1537,10 +1521,7 @@ export function createApp(
             receipt_ref: read.receipt_ref,
             mime: read.mime,
           });
-        } catch (e) {
-          audit.complete(eventId, auditOutcome(e), auditError(e));
-          throw e;
-        }
+        });
       }
       const observationRead = path.match(
         /^\/requests\/(aigora|scaena|eikona|sonora)\/([^/]+)\/observations$/,
@@ -1588,7 +1569,7 @@ export function createApp(
           )
             throw new AuthError("invalid_content_request", 400);
           // Audit-first: the initiated row must be durable before any owner read.
-          const eventId = audit.begin({
+          const content = await audited({
             actor: session.issuer + "|" + session.subject,
             sessionId: session.id,
             scopeId: scope.id,
@@ -1597,9 +1578,8 @@ export function createApp(
             targetRef: id,
             purpose: body.purpose.trim(),
             meta: { direction: body.direction },
-          });
-          try {
-            const content = await readers.content(
+          }, async (settle) => {
+            const read = await readers.content(
               owner,
               id,
               body.direction,
@@ -1607,17 +1587,10 @@ export function createApp(
               session,
               scope,
             );
-            audit.complete(
-              eventId,
-              content.state === "forbidden" || content.state === "unavailable"
-                ? "unavailable"
-                : "succeeded",
-            );
-            return json(content);
-          } catch (e) {
-            audit.complete(eventId, auditOutcome(e), auditError(e));
-            throw e;
-          }
+            if (read.state === "forbidden" || read.state === "unavailable") settle("unavailable");
+            return read;
+          });
+          return json(content);
         }
       }
       return methodNotAllowed([]);
@@ -1630,4 +1603,10 @@ export function createApp(
       );
     }
   };
+  return { handle, services };
+}
+
+/** The request handler alone, for callers that run no background work. */
+export function createApp(config: ServerConfig, deps: ControlCenterDeps = {}) {
+  return createControlCenter(config, deps).handle;
 }

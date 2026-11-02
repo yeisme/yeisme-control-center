@@ -232,6 +232,11 @@ function rawResultRef(value: unknown, index: number): string | undefined {
 }
 
 /** Who a task is to the control center: scope, connection, owner ref and family. The key order is fixed. */
+/** Counts owner requests: a caller passes one to `call` and reads how many HTTP requests that call made. */
+export interface RequestMeter {
+  requests: number;
+}
+
 export interface TaskIdentityParts {
   scope: string;
   c: string;
@@ -276,6 +281,10 @@ export class TaskConnections {
   ) {}
   connections(scope: ScopeBinding) {
     return this.catalog.forScope(scope);
+  }
+  /** True when the next call through this connection first opens an MCP session, which is one more owner request. */
+  needsHandshake(connectionId: string) {
+    return !this.initialized.has(connectionId);
   }
   /** Drops everything remembered about a connection id, after it was registered, removed or only probed. */
   forget(id: string) {
@@ -379,8 +388,9 @@ export class TaskConnections {
     try { return project(await work); }
     finally { if (this.observing.get(c.id) === work) this.observing.delete(c.id); }
   }
-  private async wire(c: TaskConnection, body: unknown, protocol?: string, content = false) {
-    const response = await this.fetcher(connectionURL(c), {
+  private async wire(c: TaskConnection, body: unknown, protocol?: string, content = false, meter?: RequestMeter) {
+    const url = connectionURL(c);
+    const init: RequestInit = {
       method: "POST",
       redirect: "error",
       signal: AbortSignal.timeout(6000),
@@ -391,7 +401,9 @@ export class TaskConnections {
         ...(protocol ? { "MCP-Protocol-Version": protocol } : {}),
       },
       body: JSON.stringify(body),
-    });
+    };
+    if (meter) meter.requests += 1;
+    const response = await this.fetcher(url, init);
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status === 401 || response.status === 403) {
@@ -415,7 +427,8 @@ export class TaskConnections {
     }
     return boundedJSON(response, 2 * 1024 * 1024);
   }
-  async call(c: TaskConnection, action: string, args: Record<string, unknown>) {
+  /** `meter` counts the owner requests this call itself makes, the MCP handshake included. */
+  async call(c: TaskConnection, action: string, args: Record<string, unknown>, meter?: RequestMeter) {
     if (!actions.has(action)) throw new AuthError("owner_action_contract_missing", 422);
     if (contentAction(action) && c.allow_content !== true)
       throw new AuthError("content_not_authorized", 403);
@@ -441,7 +454,7 @@ export class TaskConnections {
               capabilities: {},
               clientInfo: { name: "yeisme-control-center", version: "0.1.0" },
             },
-          });
+          }, undefined, false, meter);
           if (
             init.id !== id ||
             init.error ||
@@ -494,6 +507,7 @@ export class TaskConnections {
           },
           protocol,
           contentAction(action),
+          meter,
         );
         if (v.id !== id) throw new AuthError("invalid_mcp_response", 503);
         const rawToolCode = v.result?.structuredContent?.error?.code;
@@ -639,13 +653,18 @@ export class TaskConnections {
         }).toString();
       task.work_url = target.href;
     }
-    task.task_key = this.token({
-      scope: scope.id,
-      c: c.id,
-      ref: task.locator.task_ref,
-      family: task.locator.task_family,
-    });
+    task.task_key = this.taskKey(scope.id, c.id, task);
     return task;
+  }
+  private taskKey(scopeId: string, connectionId: string, task: Pick<TaskSnapshot, "locator">) {
+    return this.token({ scope: scopeId, c: connectionId, ref: task.locator.task_ref, family: task.locator.task_family });
+  }
+  /**
+   * Rows read through one scope as another scope that has the same connection sees them: a task key names its scope, so
+   * only the key differs. Lets the background loop read a shared connection once for all its scopes.
+   */
+  forScope(rows: TaskSnapshot[], scope: ScopeBinding): TaskSnapshot[] {
+    return rows.map((task) => (task.connection_id ? { ...task, task_key: this.taskKey(scope.id, task.connection_id, task) } : task));
   }
   async resolve(
     scope: ScopeBinding,
@@ -677,6 +696,44 @@ export class TaskConnections {
       throw new AuthError("task_not_found", 404);
     return { c, ref: v.ref as string, family: v.family as string };
   }
+  /**
+   * One page of one connection's task list. `from` runs inside the read, so a cursor that cannot be used is reported as
+   * that connection's state, like any other failed read. `next` is the owner's own continuation, not yet signed.
+   * `skip` is set on a failed read whose answer did arrive and named a continuation, so a caller that gives the page up
+   * can go on after it. `requests` is how many owner requests the read made, the MCP handshake included.
+   * `walk` is a page of the background walk beyond page 1: it leaves the connection's channel state, which browsers
+   * show, alone, so one bad deep page never reads as the list being down.
+   */
+  private async readPage(c: TaskConnection, scope: ScopeBinding, mode: "active" | "history", from: () => string | undefined, walk = false) {
+    const coverage: TaskConnectionState = {
+      id: c.id,
+      owner: c.owner,
+      instance_id: c.instance_id,
+      label: c.label,
+      environment: c.environment,
+      project: c.project,
+      state: "ready",
+      observed_at: new Date().toISOString(),
+    };
+    const meter: RequestMeter = { requests: 0 };
+    let cursor: string | undefined;
+    let following: string | undefined;
+    const track = () => !walk || cursor === undefined;
+    try {
+      cursor = from();
+      const data = await this.call(c, "control_center.tasks.list", { mode, limit: 50, ...(cursor ? { cursor } : {}) }, meter);
+      following = typeof data?.next_cursor === "string" && data.next_cursor ? (data.next_cursor as string) : undefined;
+      if (!Array.isArray(data?.rows) || data.rows.length > 50)
+        throw new AuthError("invalid_task_page", 503);
+      const rows = data.rows.map((r: any) => this.project(r, c, scope)) as TaskSnapshot[];
+      if (track()) this.setChannel(c, mode, { state: "ready", observed_at: new Date().toISOString() });
+      return { coverage, channels: this.channels.get(c.id), rows, next: following, skip: undefined as string | undefined, requests: meter.requests };
+    } catch (e) {
+      coverage.state = connectionStateFor(e);
+      if (track()) this.setChannel(c, mode, channelObservation(e));
+      return { coverage: { ...coverage, channels: this.channels.get(c.id) }, channels: this.channels.get(c.id), rows: [] as TaskSnapshot[], next: undefined as string | undefined, skip: following, requests: meter.requests };
+    }
+  }
   async list(
     scope: ScopeBinding,
     mode: "active" | "history",
@@ -687,57 +744,32 @@ export class TaskConnections {
       this.connections(scope)
         .filter((c) => !continuation || Object.hasOwn(cursors, c.id))
         .map(async (c) => {
-          const coverage: TaskConnectionState = {
-            id: c.id,
-            owner: c.owner,
-            instance_id: c.instance_id,
-            label: c.label,
-            environment: c.environment,
-            project: c.project,
-            state: "ready",
-            observed_at: new Date().toISOString(),
+          const page = await this.readPage(c, scope, mode, () => {
+            if (!cursors[c.id]) return undefined;
+            const p = this.decode(cursors[c.id]);
+            if (
+              p.c !== c.id ||
+              p.scope !== scope.id ||
+              p.mode !== mode ||
+              p.exp < Date.now()
+            )
+              throw new AuthError("cursor_expired", 409);
+            return p.cursor as string | undefined;
+          });
+          return {
+            coverage: page.coverage,
+            channels: page.channels,
+            rows: page.rows,
+            cursor: page.next
+              ? this.sign({
+                  c: c.id,
+                  scope: scope.id,
+                  mode,
+                  cursor: page.next,
+                  exp: Date.now() + 300_000,
+                })
+              : undefined,
           };
-          try {
-            let cursor: string | undefined;
-            if (cursors[c.id]) {
-              const p = this.decode(cursors[c.id]);
-              if (
-                p.c !== c.id ||
-                p.scope !== scope.id ||
-                p.mode !== mode ||
-                p.exp < Date.now()
-              )
-                throw new AuthError("cursor_expired", 409);
-              cursor = p.cursor;
-            }
-            const data = await this.call(c, "control_center.tasks.list", {
-              mode,
-              limit: 50,
-              ...(cursor ? { cursor } : {}),
-            });
-            if (!Array.isArray(data?.rows) || data.rows.length > 50)
-              throw new AuthError("invalid_task_page", 503);
-            this.setChannel(c, mode, { state: "ready", observed_at: new Date().toISOString() });
-            return {
-              coverage,
-              channels: this.channels.get(c.id),
-              rows: data.rows.map((r: any) => this.project(r, c, scope)),
-              cursor:
-                typeof data.next_cursor === "string" && data.next_cursor
-                  ? this.sign({
-                      c: c.id,
-                      scope: scope.id,
-                      mode,
-                      cursor: data.next_cursor,
-                      exp: Date.now() + 300_000,
-                    })
-                  : undefined,
-            };
-          } catch (e) {
-            coverage.state = connectionStateFor(e);
-            this.setChannel(c, mode, channelObservation(e));
-            return { coverage: { ...coverage, channels: this.channels.get(c.id) }, rows: [], cursor: undefined };
-          }
         }),
     );
     return {
@@ -747,6 +779,21 @@ export class TaskConnections {
         result.filter((r) => r.cursor).map((r) => [r.coverage.id, r.cursor!]),
       ),
     };
+  }
+  /**
+   * One page for each named connection of the scope, continuing from the owner cursor the caller kept for it
+   * (undefined starts at the first page). For the background loop, which walks a long list over several cycles: those
+   * cursors stay in server memory, are not signed and never reach a browser, and a page beyond the first leaves the
+   * connection's channel state alone. Per connection: its state, the rows, `next` (the owner's cursor for the page
+   * after a good page), `skip` (the same for a page that failed after the owner answered) and the owner requests made.
+   */
+  async scan(scope: ScopeBinding, mode: "active" | "history", from: ReadonlyMap<string, string | undefined>) {
+    const result = await Promise.all(
+      this.connections(scope)
+        .filter((c) => from.has(c.id))
+        .map((c) => this.readPage(c, scope, mode, () => from.get(c.id), true)),
+    );
+    return result.map((page) => ({ id: page.coverage.id, state: page.coverage.state, rows: page.rows, next: page.next, skip: page.skip, requests: page.requests }));
   }
   async detail(raw: string, scope: ScopeBinding) {
     const { c, ref, family } = this.locate(raw, scope);

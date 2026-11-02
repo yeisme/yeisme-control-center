@@ -76,6 +76,35 @@ Anatomia 按 `yeisme.task_observation.v1` 接入任务连接（`owner: "anatomia
 - 媒体：`anatomia.task_artifact_grant.v1`，地址必须同源、恰为 `/api/v1/control-center/artifact-grants/<32 位十六进制>`、无 query 与 fragment、125 秒内过期，取媒体时带同一个观察凭据。
 - 取消：一律 `cancel_not_supported`。
 
+### 后台观察（yeisme.observation_status.v1）
+
+配置 `observation.enabled` 且 `observation` 块有效、进程环境没有设 `YEISME_CONTROL_BACKGROUND=off` 时，服务端自己周期性读任务连接和开放工具，把失败变成提醒，不需要打开浏览器。默认关闭。
+
+- 读什么：每个基础范围（不含共享项目范围）的每个任务连接，活动与历史列表各第一页，外加滚动读取（见下）；提醒按列表行判断，恢复也只看列表行，不读任务详情；同步时 `complete: false`，列表里没出现的任务不会被标成消失，提醒保持 live。每 `open_tools_every` 个周期（默认 3，第一个周期会读）读一次 DriveBridge / MCP Gateway，`operations.attention` 里失败或结果未知的运行变成类别 `operation` 的提醒，每个工具每周期最多 10 条，链接到 `/services`。不调用 Provider，不调用 Auctra，不写 owner。
+- 一个连接读一次：同一个连接被几个范围共用时，每个周期只读一次、只走一份预算和一个滚动位置，读到的行再按各范围分发给各自的接收人；任务键里带范围，所以分发时每个范围用自己的键，浏览器按键打开任务不会串范围。
+- 滚动读取：owner 的分页顺序不由控制中心决定（例如 Scaena 按不含时间的 id 升序，失败的运行只在 `history`，`video-task`、`delegation` 族和阻塞的委托只在游标之后），`control_center.tasks.list` 没有“更新时间晚于”之类的过滤，所以第一页不能代表“最近失败的”。每个连接在内存里有一个滚动位置，先走历史列表再走活动列表，用 owner 自己的游标一页页走，下个周期从上次停的地方接着走，走完活动列表后从头再来。第一页每周期都读，同时充当从头开始的那一页。游标只在服务进程内存里，重启后重新走；owner 的游标不签名、不出服务端。
+- 滚动页读失败：这是滚动读取自己的事，不是连接的事。游标保留，下个周期再读同一页；同一页连续失败 3 次后放弃这一页：owner 的回答到了并给出了下一页的游标（例如页里有一行控制中心拒收，整页被拒）就接着走下一页，否则（连接错误、超时、429/503）这个列表后面的部分读不到，视为这个列表走到头。放弃一页记 `walk_page_skipped` 与 `pages_skipped`；还没放弃的失败记 `walk_page_failed`。连接的第一页照常每个周期读，不进入退避；滚动页的结果也不写进连接的通道状态（浏览器看到的 `channels`），只有第一页的读取会写。放弃过页的一遍不算完整的一遍。相反，连接的**第一页**读失败才是连接的失败：整个连接按下面的退避等待，并忘掉滚动位置（游标可能已作废）。
+- 同一任务在一个周期里的多行：同一个任务在这个周期读到的几页里出现不止一行（比如历史第一页里是失败、活动列表较深的一页里是进行中）时，只要有一行显示失败，这个任务就按失败算，不会被另一页上看起来正常的那一行“恢复”；只有没有任何一行失败的任务才会被标成恢复。这样提醒的打开与恢复不随滚动读取走到哪一页而来回翻。
+- 给谁：绑定该范围的每个已启用的个人管理员账号（含配置里的旧版所有者，且其角色为 admin），或 `observation.recipients` 列出的其中管理员；只读账号永远收不到。提醒以会话 `background` 逐人写入，一个接收人写入失败（记 `reminder_write_failed`）不影响同一范围的其他接收人，下个周期会补写；之后浏览器同步同一次失败落在同一行，不会重复。
+- 预算按 owner 的实际 HTTP 请求数算：每周期至多 40 次，其中包括每个连接的 MCP 握手（`initialize`，进程内每个连接第一次读时多一次）、每个列表页，以及开放工具读取的每个请求（DriveBridge 3 次、Gateway 6 次；读取命中缓存时为 0，但预算按最多的情况预留）。每个读到的连接保底预留 3 次（活动、历史第一页，加一页滚动读取），还没有会话的再加 1 次握手，所以第一个周期每个连接占 4 次，之后占 3 次；预留不下的连接留到下个周期，从它开始轮转。剩下的请求按轮分给仍有页可读的连接，每个连接每周期至多 8 次请求（握手与两个第一页计入）。周期默认 10 分钟（5–1440）；连接读不到后等待时间翻倍，最长 60 分钟；启动后约 1 分钟才跑第一次；两个周期不会同时运行；`stop()` 后不再发起下一轮读取，`stop()` 后立刻 `start()` 只留一个定时器。收到 SIGTERM / SIGINT 时先 `server.close()` 不再接新连接，再停循环，再退出（最长等 8 秒）。
+- 记在内存里的东西（退避、滚动位置）只在所有范围的连接都列得出来时才清理已不在配置里的连接；某个范围的连接这次列不出来（已登记的连接来自数据库）时什么也不丢。
+- 防刷屏：这一段观察的起点（`observation_enabled_at`）与上个周期的开始（`observation_last_cycle_at`）记入 `control_state`；只有最近更新晚于“起点前 24 小时”的任务才打开新提醒。持续运行或短时间重启不移动起点；某周期开始离上个周期开始超过 24 小时（间隔更长时取两个间隔）时，该周期以自己的开始为新起点，所以停用很久再启用不会为期间的每个失败开提醒。
+- 配置校验：启动时一次性检查 `observation` 块：`enabled` 布尔；`interval_minutes` 5–1440 的数（缺省 10）；`open_tools_every` 1–1000 的整数（缺省 3）；`recipients` 至多 100 个非空字符串的数组。有问题的块按代码写日志（`observation_not_an_object`、`observation_enabled_not_boolean`、`observation_interval_out_of_range`、`observation_open_tools_every_out_of_range`、`observation_recipients_invalid`；不写值）并当作未启用，不再夹到范围内。接收人查找与状态路由读配置不会抛错。
+- `GET /observation/status[?scope=]`：个人会话，任意角色。响应字段：
+
+  | 字段 | 含义 |
+  | --- | --- |
+  | `schema_version` | `yeisme.observation_status.v1` |
+  | `enabled` / `config_valid` / `running` | 配置启用且有效 / `observation` 块有效 / 本进程的循环在跑 |
+  | `interval_minutes` / `open_tools_every` | 周期参数（块无效时为缺省值） |
+  | `scope` | 被问的范围，未带 `?scope=` 时为 `null`（会话没有该范围返回 404） |
+  | `observed` / `recipient` | 被问范围里有人收后台提醒 / 当前用户是接收人 |
+  | `next_run_at` | 下一次运行时间或 `null` |
+  | `last_cycle` | 尚未运行为 `null`；否则 `started_at`、`finished_at`，以及 `calls`、`pages_read`、`pages_skipped`、`reminders_opened`、`reminders_recovered`、`connections_read`、`connections_skipped`、`scan_incomplete`、`open_tools_read` 和按错误码的 `errors` |
+
+  `last_cycle` 的计数只含被问范围，未带 `?scope=` 时是该会话自己所有范围相加（同一个范围出现几次只算一次）；不含别的范围的数、错误码或连接，也不含地址、路径、密钥或提醒文本。不调用 owner。`calls` 是为该范围的连接与开放工具发出的 owner HTTP 请求数（握手、列表页、开放工具的各个请求）；几个范围共用的连接或开放工具对每个用到它的范围各记一次，而进程日志里的总数只记一次。`pages_read` 是要过的列表页数，`pages_skipped` 是放弃的滚动页数。`scan_incomplete` 是自进程启动起还没走完一遍（活动与历史都走到末尾，且没有放弃过页）的连接数，含还没读过的；它降到 0 说明每个连接都完整走过一遍。
+- 凭据提醒（类别 `credential`，事件键 `credential:<slot>:<state>:<stage>`）由凭据生命周期提供事实，循环负责写入；循环本身不判断凭据状态。
+
 ### Auctra collection owner
 
 Auctra 使用独立的 `ScopeBinding.collection.auctra`，不加入媒体 request owner union。`server/auctra.ts` 消费 owner `collection.snapshot` 与 `collection.record.show`，本地只保留脱敏、无正文的索引。浏览器读取 `/auctra/collection`、`/auctra/collection/records/{record_ref}`，通过 `/auctra/collection/sync` 显式同步。

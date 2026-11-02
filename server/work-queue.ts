@@ -409,11 +409,15 @@ function workflowItem(stage: CreativeFlowStageProjection, flow: CreativeFlowProj
   };
 }
 
+/** Reminders share one ledger; only the ones about a task failing (the default category) can stand for a failed task. */
+const isFailureReminder = (notification: TaskNotification) => !notification.category || notification.category === "failure";
+
 export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQueueResponse {
   const items: WorkQueueItem[] = [];
   // Reminders and tasks meet on the task identity: the signed key may differ after a restart.
   const identityOf = (key: string) => taskIdentityOf(key || "");
-  const quiet = new Set(input.notifications.filter((n) => n.state === "archived" || n.state === "muted").map((n) => `${n.task_identity || identityOf(n.task_key)}|${n.task_revision}|${n.task_state}|${n.native_state}|${n.last_error_code}`));
+  const failureReminders = input.notifications.filter(isFailureReminder);
+  const quiet = new Set(failureReminders.filter((n) => n.state === "archived" || n.state === "muted").map((n) => `${n.task_identity || identityOf(n.task_key)}|${n.task_revision}|${n.task_state}|${n.native_state}|${n.last_error_code}`));
   const taskIdentities = new Set<string>();
   for (const task of input.tasks) {
     const item = itemFromTask(task, input.scope.id, now);
@@ -424,7 +428,7 @@ export function buildWorkQueue(input: WorkQueueInput, now = Date.now()): WorkQue
     items.push(item);
   }
   const listed = new Set<string>();
-  for (const notification of input.notifications) {
+  for (const notification of failureReminders) {
     const identity = notification.task_identity || identityOf(notification.task_key);
     if (taskIdentities.has(identity) || listed.has(identity) || notification.state === "archived" || notification.state === "muted" || notification.recovered_at) continue;
     listed.add(identity);

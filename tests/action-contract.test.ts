@@ -34,6 +34,25 @@ describe("control center action contract", () => {
     expect(receipt.state).toBe("needs_contract");
   });
 
+  it("builds one receipt shape for every outcome: succeeded, any other settled state, and a refusal", async () => {
+    const service = new ActionService();
+    const preview = service.preview(input);
+    const record = service.record(preview.preview_ref, "legacy", "scope-1");
+    const done = ActionService.succeeded(record);
+    expect(done).toEqual({ receipt_ref: expect.stringMatching(/^receipt_[0-9a-f]{32}$/), action: "task.cancel", owner: "control-center", target_ref: "task-1", state: "succeeded", owner_state: null, error_code: null, observed_at: expect.any(String), operation_ref: null, result_refs: [] });
+    expect(Object.keys(done)).toEqual(["receipt_ref", "action", "owner", "target_ref", "state", "owner_state", "error_code", "observed_at", "operation_ref", "result_refs"]);
+    const detailed = ActionService.succeeded(record, { owner_state: "updated", operation_ref: "op-1", result_refs: ["a", "b"], observed_at: "2026-10-30T00:00:00.000Z", generation_items: [] });
+    expect(detailed).toMatchObject({ state: "succeeded", owner_state: "updated", error_code: null, operation_ref: "op-1", result_refs: ["a", "b"], observed_at: "2026-10-30T00:00:00.000Z", generation_items: [] });
+    // Items appear only when there are some to carry, and always last.
+    expect(Object.keys(detailed).at(-1)).toBe("generation_items");
+    expect("generation_items" in done).toBe(false);
+    expect(ActionService.outcome(record, "unknown", { error_code: "generation_reconcile_required", owner_state: "unknown" })).toMatchObject({ state: "unknown", error_code: "generation_reconcile_required", owner_state: "unknown" });
+    expect(ActionService.outcome(record, "submitted", { owner_state: "running" }).state).toBe("submitted");
+    expect(ActionService.unavailable(record, "owner_action_adapter_not_configured")).toMatchObject({ state: "needs_contract", error_code: "owner_action_adapter_not_configured", owner_state: null, result_refs: [] });
+    // Two receipts never share a reference.
+    expect(ActionService.succeeded(record).receipt_ref).not.toBe(done.receipt_ref);
+  });
+
   it("reuses a receipt for the same preview and idempotency key", async () => {
     const service = new ActionService();
     const preview = service.preview(input);

@@ -231,21 +231,36 @@ export class ActionService {
     });
   }
 
+  /** A receipt for an action the control center could not run: the owner has no contract for it, or refused it up front. */
   static unavailable(record: PreviewRecord, reason: string): ActionReceipt {
+    return ActionService.outcome(record, "needs_contract", { error_code: reason });
+  }
+
+  /** A receipt for an action that finished. Every success path builds its receipt here, so they all have one shape. */
+  static succeeded(record: PreviewRecord, fields: ReceiptFields = {}): ActionReceipt {
+    return ActionService.outcome(record, "succeeded", fields);
+  }
+
+  /** A receipt in any other settled state: submitted, failed, unknown. `succeeded` and `unavailable` are the common cases. */
+  static outcome(record: PreviewRecord, state: ActionState, fields: ReceiptFields = {}): ActionReceipt {
     return {
       receipt_ref: "receipt_" + randomUUID().replaceAll("-", ""),
       action: record.request.action,
       owner: record.request.owner as ActionOwner,
       target_ref: record.request.target_ref,
-      state: "needs_contract" as ActionState,
-      owner_state: null,
-      error_code: reason,
-      observed_at: new Date().toISOString(),
-      operation_ref: null,
-      result_refs: [],
+      state,
+      owner_state: fields.owner_state ?? null,
+      error_code: fields.error_code ?? null,
+      observed_at: fields.observed_at ?? new Date().toISOString(),
+      operation_ref: fields.operation_ref ?? null,
+      result_refs: fields.result_refs ?? [],
+      ...(fields.generation_items ? { generation_items: fields.generation_items } : {}),
     };
   }
 }
+
+/** What an action reports beyond its state; anything left out is null, or empty for the result refs. */
+export type ReceiptFields = Partial<Pick<ActionReceipt, "owner_state" | "error_code" | "observed_at" | "operation_ref" | "result_refs" | "generation_items">>;
 
 export type { PreviewRecord };
 

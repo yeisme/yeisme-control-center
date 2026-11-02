@@ -11,11 +11,13 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { hashPassword } from "../server/password";
-import { createApp } from "../server/app";
+import { createControlCenter } from "../server/app";
 import { SessionAuth } from "../server/auth";
 import { AuditStore } from "../server/db/audit";
 import { SessionStore } from "../server/db/session-store";
 import { createMemoryDB, type ControlDB } from "../server/db/client";
+import { taskNotifications } from "../server/db/schema";
+import { createObservationLoop } from "../server/observation-loop";
 import {
   delegationToken,
   observerToken,
@@ -111,6 +113,8 @@ const config: ServerConfig = {
   },
   collection: { auctra: { origin: owners.origin, audience: audience("auctra"), credential_ref: serviceRef, enabled: true } },
   clients: { muweave: { origin: "http://127.0.0.1:4399", enabled: true } },
+  // Background observation is configured but never started here: the checks run one cycle by hand.
+  observation: { enabled: true },
   open_tools: {
     drivebridge: { endpoint: `${owners.origin}/drivebridge`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
     gateway: { endpoint: `${owners.origin}/gateway`, credential_ref: openToolRef, allow_private_http: true, enabled: true },
@@ -132,7 +136,9 @@ process.env.YEISME_CONTRACT_PROVIDER_TOKEN = providerToken;
 const db: ControlDB = createMemoryDB();
 const auth = new SessionAuth(config, undefined, new SessionStore(db));
 const audit = new AuditStore(db);
-const app = createApp(config, { db, auth });
+const { handle: app, services } = createControlCenter(config, { db, auth });
+const loop = createObservationLoop(services, { log: () => undefined });
+services.observation = loop;
 
 let cookie = "";
 let csrf = "";
@@ -451,6 +457,76 @@ try {
     const { json } = await call(`/api/control-center/v1/tool-catalog?scope=${scopeIds[0]}`);
     assert.deepEqual(json.tools.filter((tool: { owner: string }) => tool.owner === "gateway").map((tool: { name: string }) => tool.name), ["eikona_search", "eikona_execute", "sonora_execute", "gateway_tools_search"]);
     assert.equal(json.actions.some((action: { owner: string }) => action.owner === "gateway"), false);
+  });
+
+  // Background observation (W3): no browser sync has been made on this server so far, so every failure reminder below
+  // was opened by the loop alone.
+  let cycle: Awaited<ReturnType<typeof loop.runCycle>> | undefined;
+  await check("observation: a background cycle opens failure and operation reminders for the admin with no session, and none for the viewer", async () => {
+    const before = owners.hits();
+    cycle = await loop.runCycle();
+    assert.ok(cycle.calls <= 40, `calls ${cycle.calls}`);
+    assert.ok(cycle.reminders_opened >= 4, `opened ${cycle.reminders_opened}`);
+    assert.deepEqual(cycle.errors, {});
+    // Only task owners behind connections and the two open tools were read: no Provider, no Auctra, no request API.
+    const delta = Object.fromEntries(Object.entries(owners.hits()).map(([key, n]) => [key, n - (before[key] || 0)]).filter(([, n]) => (n as number) > 0));
+    for (const key of Object.keys(delta)) assert.ok(key.startsWith("mcp/fx-") || key === "drivebridge" || key === "gateway", `unexpected owner traffic: ${key}`);
+    // The budget counts the requests the owners really got: MCP handshakes and every request of an open-tool reading included.
+    const requests = Object.values(delta).reduce((sum, n) => sum + (n as number), 0);
+    assert.equal(requests, cycle.calls, `the cycle reported ${cycle.calls} calls and the owners got ${requests} requests`);
+    assert.ok(requests <= 40, `requests ${requests}`);
+    for (const key of ["mcp/fx-sonora", "mcp/fx-anatomia", "mcp/fx-anatomia-locked"]) assert.ok(delta[key] >= 2 && delta[key] <= 3, `${key} was read ${delta[key]} times`);
+    // fx-eikona keeps 119 finished tasks, three pages of history: page 1 of both lists, then the rolling read took pages 2 and 3.
+    assert.equal(delta["mcp/fx-eikona"], 4, `mcp/fx-eikona was read ${delta["mcp/fx-eikona"]} times`);
+    // The open tools were read a moment ago by the checks above and are served from the service's own cache.
+    const { json } = await call(`/api/control-center/v1/notifications?scope=${scopeIds[0]}&limit=100`);
+    const failures = json.rows.filter((row: { category: string }) => row.category === "failure").map((row: { title: string; owner: string }) => `${row.owner}:${row.title}`);
+    assert.ok(failures.includes("eikona:站台 · 人群背景（高分辨率）"), failures.join(" | "));
+    assert.ok(failures.includes("anatomia:视频问答：参考片-雨夜.mp4"), failures.join(" | "));
+    const operations = json.rows.filter((row: { category: string }) => row.category === "operation");
+    assert.deepEqual(operations.map((row: { title: string }) => row.title).sort(), ["DriveBridge 上传失败", "DriveBridge 导出失败", "MCP Gateway 工具调用失败"]);
+    for (const row of operations) assert.equal(row.target_path, "/services");
+    // Written by the loop under its own session; the browser never synced.
+    const ledger = db.select().from(taskNotifications).all().filter((row) => row.category === "failure" || row.category === "operation");
+    assert.ok(ledger.length > 0 && ledger.every((row) => row.sessionId === "background" && row.subject === "yeisme:personal|" + username), "reminders were not all written by the loop for the admin");
+    // The viewer has the same scope and receives nothing.
+    const login = await app(new Request(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: "contract-viewer", password }) }));
+    assert.equal(login.status, 200);
+    const viewerCookie = "yeisme_session=" + login.headers.getSetCookie().map((entry) => entry.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const viewerRows = await app(new Request(origin + `/api/control-center/v1/notifications?scope=${scopeIds[0]}`, { headers: { Origin: origin, Cookie: viewerCookie } }));
+    assert.deepEqual((await viewerRows.json()).rows, []);
+  });
+
+  await check("observation: opening those reminders neither duplicates on a second cycle nor turns operation reminders into task failures in the work queue", async () => {
+    const again = await loop.runCycle();
+    assert.equal(again.reminders_opened, 0);
+    const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}&kind=task_failure&limit=100`);
+    for (const item of json.items) assert.ok(!/DriveBridge|MCP Gateway/.test(item.title), `operation reminder surfaced as a task: ${item.title}`);
+  });
+
+  await check("observation: /observation/status answers without calling an owner and carries no address, path or key", async () => {
+    const before = owners.hits();
+    const { response, json } = await call(`/api/control-center/v1/observation/status?scope=${scopeIds[0]}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(owners.hits(), before);
+    assert.equal(json.schema_version, "yeisme.observation_status.v1");
+    assert.deepEqual([json.enabled, json.running, json.recipient, json.interval_minutes, json.open_tools_every], [true, false, true, 10, 3]);
+    assert.deepEqual([json.config_valid, json.scope, json.observed], [true, scopeIds[0], true]);
+    assert.ok(json.last_cycle.calls > 0 && json.last_cycle.calls <= 40);
+    assert.ok(json.last_cycle.pages_read > 0 && json.last_cycle.pages_read <= json.last_cycle.calls, `pages ${json.last_cycle.pages_read}`);
+    assert.ok(json.last_cycle.scan_incomplete >= 0 && json.last_cycle.connections_read === 4, `connections ${json.last_cycle.connections_read}`);
+    assert.ok(json.last_cycle.started_at && json.last_cycle.finished_at);
+    assert.equal(json.epoch, 1);
+    const body = JSON.stringify(json);
+    for (const leaked of [owners.origin, temp, observerRef, observerToken, serviceToken, openToolToken, "credential_ref", "站台"]) assert.equal(body.includes(leaked), false, leaked);
+    // A viewer may read it too, and is not a recipient.
+    const login = await app(new Request(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: "contract-viewer", password }) }));
+    const viewerCookie = "yeisme_session=" + login.headers.getSetCookie().map((entry) => entry.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const viewer = await app(new Request(origin + `/api/control-center/v1/observation/status?scope=${scopeIds[0]}`, { headers: { Origin: origin, Cookie: viewerCookie } }));
+    assert.equal(viewer.status, 200);
+    assert.equal((await viewer.json()).recipient, false);
+    assert.equal(JSON.stringify(owners.hits()), JSON.stringify(before));
+    assert.equal((await app(new Request(origin + "/api/control-center/v1/observation/status", { headers: { Origin: origin } }))).status, 401);
   });
 
   await check("episode board: explicit Auctra sync, then rails built from live Auctra + Scaena reads", async () => {

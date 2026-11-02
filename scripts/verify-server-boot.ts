@@ -51,10 +51,10 @@ await writeFile(configRef, JSON.stringify({
 }, null, 2) + "\n", { mode: 0o600 });
 
 const logs: string[] = [];
-const startServer = () => new Promise<{ child: ReturnType<typeof spawn>; output: () => string }>((resolve, reject) => {
+const startServer = (options: { config?: string; env?: Record<string, string> } = {}) => new Promise<{ child: ReturnType<typeof spawn>; output: () => string }>((resolve, reject) => {
   const child = spawn("bun", ["server/index.ts"], {
     cwd: root as string,
-    env: { ...process.env, YEISME_CONTROL_CONFIG: configRef },
+    env: { ...process.env, YEISME_CONTROL_CONFIG: options.config ?? configRef, ...options.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -74,6 +74,21 @@ const stopServer = (child: ReturnType<typeof spawn>) =>
     child.kill("SIGTERM");
     setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 5000);
   });
+/** SIGTERM, then how the process left: its exit code (null when a signal killed it) and whether it had to be killed. */
+const terminate = (child: ReturnType<typeof spawn>, signal: NodeJS.Signals = "SIGTERM") =>
+  new Promise<{ code: number | null; killed: boolean }>((resolve) => {
+    let killed = false;
+    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, 5000);
+    child.once("exit", (code) => { clearTimeout(timer); resolve({ code, killed }); });
+    child.kill(signal);
+  });
+const waitFor = async (condition: () => boolean, label: string, ms = 3000) => {
+  const until = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > until) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
 const request = async (path: string, init: RequestInit = {}) => {
   const response = await fetch(base + path, {
     ...init,
@@ -184,6 +199,65 @@ try {
       assert.equal(json!.username, username);
     } finally {
       await stopServer(third.child);
+    }
+  });
+
+  await check("background observation starts only when configured and is not started by YEISME_CONTROL_BACKGROUND=off", async () => {
+    const base = JSON.parse(await fs.readFile(configRef, "utf8"));
+    const observed = join(temp, "config-observed.json");
+    await writeFile(observed, JSON.stringify({ ...base, observation: { enabled: true, interval_minutes: 5 } }, null, 2) + "\n", { mode: 0o600 });
+    const status = async () => {
+      const { response, json } = await request("/api/control-center/v1/observation/status?scope=boot-scope", { headers: { Cookie: cookie } });
+      assert.equal(response.status, 200);
+      return json!;
+    };
+    // Not configured: the loop does not exist, and the server says so.
+    const plain = await startServer();
+    try {
+      assert.deepEqual(Object.fromEntries(Object.entries(await status()).filter(([key]) => ["enabled", "running", "next_run_at", "last_cycle", "recipient"].includes(key))), { enabled: false, running: false, next_run_at: null, last_cycle: null, recipient: true });
+      assert.equal(plain.output().includes("background observation"), false);
+    } finally {
+      await stopServer(plain.child);
+    }
+    // Configured: it runs, its first cycle is scheduled, and SIGTERM stops it before the process exits cleanly.
+    const on = await startServer({ config: observed });
+    try {
+      await waitFor(() => on.output().includes("background observation on: every 5 min"), "the start message");
+      const body = await status();
+      assert.deepEqual([body.enabled, body.running, body.interval_minutes, body.open_tools_every], [true, true, 5, 3]);
+      assert.ok(Date.parse(String(body.next_run_at)) - Date.now() > 30_000 && Date.parse(String(body.next_run_at)) - Date.now() <= 80_000, "the first cycle is about a minute away");
+      assert.equal(body.last_cycle, null);
+    } finally {
+      const left = await terminate(on.child);
+      assert.deepEqual(left, { code: 0, killed: false });
+      const log = on.output();
+      const closed = log.indexOf("no longer accepting connections (SIGTERM)");
+      const stopped = log.indexOf("background observation stopped (SIGTERM)");
+      assert.ok(stopped >= 0, "the loop was not stopped before exit");
+      assert.ok(closed >= 0 && closed < stopped, "the server must stop accepting connections before the loop is stopped");
+    }
+    // A malformed observation block is logged by code and treated as off; it never makes the status route fail.
+    const invalid = join(temp, "config-invalid-observation.json");
+    await writeFile(invalid, JSON.stringify({ ...base, observation: { enabled: true, interval_minutes: 0, recipients: "not-a-list" } }, null, 2) + "\n", { mode: 0o600 });
+    const broken = await startServer({ config: invalid });
+    try {
+      await waitFor(() => broken.output().includes("background observation is off: the observation block in the config is invalid (observation_interval_out_of_range, observation_recipients_invalid)"), "the invalid block message");
+      const body = await status();
+      assert.deepEqual([body.enabled, body.config_valid, body.running, body.next_run_at, body.last_cycle], [false, false, false, null, null]);
+      assert.equal(broken.output().includes("background observation on"), false);
+      assert.equal(broken.output().includes("not-a-list"), false, "the log must name the problem, never the value");
+    } finally {
+      await stopServer(broken.child);
+    }
+    // Configured but switched off for this process, as the release candidate check does.
+    const off = await startServer({ config: observed, env: { YEISME_CONTROL_BACKGROUND: "off" } });
+    try {
+      await waitFor(() => off.output().includes("switched off by YEISME_CONTROL_BACKGROUND=off"), "the switched-off message");
+      const body = await status();
+      assert.deepEqual([body.enabled, body.running, body.next_run_at], [true, false, null]);
+      assert.equal(off.output().includes("background observation on"), false);
+    } finally {
+      await stopServer(off.child);
     }
   });
 } catch (error) {

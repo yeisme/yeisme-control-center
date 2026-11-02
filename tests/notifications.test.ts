@@ -8,9 +8,12 @@ import {
   DEMOTE_AFTER_MS,
   HISTORY_AFTER_MS,
   NotificationStore,
+  countsAsUnread,
+  failureFact,
   failureFingerprint,
   type FailureFact,
 } from "../server/notifications";
+import { signTaskIdentity, taskIdentity, taskIdentityOf } from "../server/task-connections";
 import { countsAsHomeAttention, failureVersionLabel, taskAllowsSafeCancel, taskDeleteAvailable } from "../src/notifications";
 import type { ServerConfig, Session } from "../server/contracts";
 import type { TaskSnapshot } from "../src/task-observation";
@@ -152,6 +155,61 @@ describe("failure reminders", () => {
     expect(taskAllowsSafeCancel({ state: "running", allowed_actions: [{ action: "cancel", enabled: false }] })).toBe(false);
     expect(taskDeleteAvailable()).toBe(false);
     expect(failureFingerprint(fact())).toContain("upstream_timeout");
+  });
+});
+
+describe("failure facts", () => {
+  const snapshot = (over: Record<string, unknown> = {}) => ({
+    task_key: signTaskIdentity(taskIdentity({ scope, c: "eikona-a", ref: "run-1", family: "run" }), Buffer.from("k")),
+    connection_id: "eikona-a", state: "failed", revision: "rev-9", native_state: "provider_failed", title: "站台背景",
+    locator: { owner: "eikona", project: "rain", task_family: "run", task_ref: "run-1" }, ...over,
+  }) as unknown as TaskSnapshot;
+
+  it("names the task by the identity of its verified snapshot, which is the identity half of its key", () => {
+    const task = snapshot();
+    const built = failureFact(scope, task);
+    expect(built).toEqual({ scope_id: scope, task_key: task.task_key, task_identity: taskIdentityOf(task.task_key!), state: "failed", revision: "rev-9", native_state: "provider_failed", error_code: "", title: "站台背景", owner: "eikona", project: "rain" });
+    // The same failure read again, under another signature, is the same fingerprint: one reminder.
+    const resigned = snapshot({ task_key: signTaskIdentity(taskIdentity({ scope, c: "eikona-a", ref: "run-1", family: "run" }), Buffer.from("other")) });
+    expect(failureFingerprint(failureFact(scope, resigned))).toBe(failureFingerprint(built));
+    // Another scope is another identity.
+    expect(failureFact("scope-b", task).task_identity).not.toBe(built.task_identity);
+  });
+
+  it("carries the owner's error code and falls back to the key's identity without a connection", () => {
+    const withCode = failureFact(scope, snapshot({ provider_recovery: { error_code: "InvalidApiKey" } }));
+    expect(withCode.error_code).toBe("InvalidApiKey");
+    const plain = failureFact(scope, snapshot({ connection_id: undefined, task_key: "identity-half.signature", revision: undefined, native_state: undefined }));
+    expect(plain).toMatchObject({ task_identity: "identity-half", revision: "", native_state: "", error_code: "" });
+  });
+});
+
+describe("server-authored events", () => {
+  const event = (over: Record<string, unknown> = {}) => ({ scope: "scope-a", recipient: "user-a", event: "operation:drivebridge:op_1:failed", category: "operation", title: "DriveBridge 导出失败", path: "/services", ...over });
+
+  it("opens the services page with the owner, its error code and its state, once per recipient and scope", () => {
+    const reminders = store();
+    const first = reminders.openEvent({ ...event(), owner: "drivebridge", errorCode: "resume_required", taskState: "failed", nativeState: "interrupted", sessionId: "background", now: "2026-10-30T00:00:00.000Z" });
+    expect(first.created).toBe(true);
+    expect(reminders.openEvent(event()).created).toBe(false);
+    expect(reminders.event(event())).toBe(first.id);
+    const [row] = reminders.list("scope-a", "", "user-a");
+    expect(row).toMatchObject({ id: first.id, category: "operation", target_path: "/services", owner: "drivebridge", last_error_code: "resume_required", task_state: "failed", native_state: "interrupted", session_id: "background", first_seen_at: "2026-10-30T00:00:00.000Z", state: "unread" });
+    expect(countsAsUnread(row)).toBe(true);
+    // It is not a task failure, so it never counts as home attention.
+    expect(reminders.actionable(row)).toBe(false);
+    // Another recipient, another scope or another event is another row.
+    expect(reminders.openEvent(event({ recipient: "user-b" })).created).toBe(true);
+    expect(reminders.openEvent(event({ scope: "scope-b" })).created).toBe(true);
+    expect(reminders.openEvent(event({ event: "operation:drivebridge:op_1:unknown" })).created).toBe(true);
+  });
+
+  it("keeps the earlier shape for collaboration events and refuses any other target", () => {
+    const reminders = store();
+    reminders.event({ scope: "project_1", recipient: "user-a", event: "preview_1", category: "project_assignment", title: "项目「雨」的共享设置已更新", path: "/projects?sharedProject=project_1" });
+    expect(reminders.list("project_1", "", "user-a")[0]).toMatchObject({ category: "project_assignment", owner: "control-center", task_state: "succeeded", last_error_code: "", session_id: "", target_path: "/projects?sharedProject=project_1" });
+    for (const path of ["/tasks", "/servicesx", "https://example.test/services", "services", "/services/../tasks"]) expect(() => reminders.event(event({ path }))).toThrowError(/invalid_notification_target/);
+    for (const path of ["/services", "/services?tab=open-tools", "/reminders", "/creation?batch=1", "/projects"]) expect(() => reminders.event(event({ path, event: path }))).not.toThrow();
   });
 });
 

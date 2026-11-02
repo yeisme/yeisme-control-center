@@ -3,7 +3,8 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createApp } from "./app";
+import { createControlCenter } from "./app";
+import { createObservationLoop, observationSettings } from "./observation-loop";
 import { planStatic } from "./static";
 import { validateControlBind, validateControlOrigin } from "./auth";
 import type { ServerConfig } from "./contracts";
@@ -51,9 +52,19 @@ const dbPath =
 const db = openDatabase(dbPath);
 migrateDatabase(db);
 const interrupted = new RunStore(db).markInterrupted();
-const app = createApp(config, { db }),
+const { handle: app, services } = createControlCenter(config, { db }),
   root = resolve("dist");
-createServer(async (req, res) => {
+// Background observation turns failures into reminders with no browser open. The release candidate check starts the
+// server with YEISME_CONTROL_BACKGROUND=off so it never reads an owner on its own.
+const backgroundOff = process.env.YEISME_CONTROL_BACKGROUND === "off";
+// The observation block is checked once, here. A malformed block is logged by code and treated as switched off; it is
+// never an error for the server or for /observation/status.
+const observationConfig = observationSettings(config);
+if (!observationConfig.valid) console.log(`[control-center] background observation is off: the observation block in the config is invalid (${observationConfig.problems.join(", ")})`);
+const observation = observationConfig.enabled && !backgroundOff ? createObservationLoop(services) : undefined;
+if (observation) services.observation = observation;
+if (observationConfig.enabled && backgroundOff) console.log("[control-center] background observation is configured but switched off by YEISME_CONTROL_BACKGROUND=off");
+const server = createServer(async (req, res) => {
   try {
     if (req.headers.host !== new URL(config.origin).host) {
       res.writeHead(421);
@@ -123,12 +134,38 @@ createServer(async (req, res) => {
     res.writeHead(500, { "Content-Type": "application/json" });
     res.end('{"error":"request_failed"}');
   }
-}).listen(config.port, config.bind, () =>
+});
+server.listen(config.port, config.bind, () => {
   console.log(
     "Control center listening on " + config.bind + ":" + config.port,
     dbPath === ":memory:"
       ? "(persistence: memory only)"
       : "(persistence: " + dbPath + ")",
     interrupted > 0 ? "(recovered " + interrupted + " interrupted provider run(s) as unknown)" : "",
-  ),
-);
+  );
+  if (observation) {
+    observation.start();
+    console.log(`[control-center] background observation on: every ${observationConfig.intervalMinutes} min, open tools every ${observationConfig.openToolsEvery} cycles`);
+  }
+});
+// On a signal the server first stops accepting connections, then the running loop is stopped (its timer is cancelled
+// and a cycle in flight is waited for, but not for long), then the process leaves. Without a loop the process keeps the
+// default behaviour of both signals.
+if (observation) {
+  let leaving = false;
+  const leave = (signal: NodeJS.Signals) => {
+    if (leaving) return;
+    leaving = true;
+    const grace = setTimeout(() => process.exit(0), 8000);
+    // No new request may start a read while the last cycle finishes.
+    try { server.close(); } catch { /* not listening yet: nothing to stop */ }
+    console.log(`[control-center] no longer accepting connections (${signal})`);
+    void observation.stop().finally(() => {
+      clearTimeout(grace);
+      console.log(`[control-center] background observation stopped (${signal})`);
+      process.exit(0);
+    });
+  };
+  process.once("SIGTERM", leave);
+  process.once("SIGINT", leave);
+}

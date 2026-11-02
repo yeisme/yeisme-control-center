@@ -84,6 +84,18 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     return new Response(null, { status: 404 });
   }
 
+  /**
+   * Requests the main origin served, keyed by first path segment (`mcp/<connection>` for task owners), so a check can
+   * prove which owners a code path touched. Fixture switches are not counted.
+   */
+  const hits: Record<string, number> = {};
+  const countHit = (path: string) => {
+    if (path.startsWith("/__fixture/")) return;
+    const [, first, second] = path.split("/");
+    const key = first === "mcp" && second ? `mcp/${second}` : first || "/";
+    hits[key] = (hits[key] || 0) + 1;
+  };
+
   const lookup = (connection: string, ref: string) => world.tasks[connection]?.find((task) => task.ref === ref);
 
   function listTasks(connection: string, mode: string, cursor: string | undefined, limit: number) {
@@ -343,6 +355,7 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       let url: URL;
       try { url = new URL(request.url); } catch { return new Response(null, { status: 400 }); }
       const path = url.pathname;
+      countHit(path);
       const auth = request.headers.get("authorization");
       if (options.latencyMs) await sleep(options.latencyMs * (url.searchParams.get("project_id") === "coast-letters" || path.includes("coast") ? 3 : 1));
       if (path === "/__fixture/anatomia-grant") {
@@ -411,6 +424,8 @@ export function startFakeOwners(options: FakeOwnerOptions) {
     origin,
     origins: { eikona: `http://127.0.0.1:${options.requestPorts.eikona}`, sonora: `http://127.0.0.1:${options.requestPorts.sonora}` },
     world,
+    /** A copy of the request counts so far; see `countHit`. */
+    hits: () => ({ ...hits }),
     stop: () => { server.stop(true); eikonaApi.stop(true); sonoraApi.stop(true); },
   };
 }

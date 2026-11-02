@@ -74,12 +74,14 @@ const contentBody = {
   text: "business text only",
 };
 
-type Mode = "ok" | "deny" | "fail";
+type Mode = "ok" | "deny" | "fail" | "forbidden_state" | "unavailable_state";
 function setup(mode: Mode = "ok", db?: ControlDB) {
   const transport = ownerFetch((url) => {
     if (url.pathname.endsWith("/content:read")) {
       if (mode === "deny") return jsonResponse({ error: "forbidden" }, 403);
       if (mode === "fail") return jsonResponse({}, 500);
+      // The owner answers, and says in the body that it will not (or cannot) show the content.
+      if (mode === "forbidden_state" || mode === "unavailable_state") return jsonResponse({ data: { ...contentBody, state: mode === "forbidden_state" ? "forbidden" : "unavailable", text: undefined } });
       return jsonResponse({ data: contentBody });
     }
     return jsonResponse({
@@ -173,6 +175,17 @@ describe("audit-first content authorization", () => {
     const rows = audit.page({ limit: 10, action: "requests.content_read" }).rows;
     expect(rows[0].outcome).toBe("denied");
     expect(rows[0].error_code).toBe("owner_forbidden");
+  });
+
+  it("records an owner's own refusal or outage, answered with 200, as unavailable and without an error code", async () => {
+    for (const mode of ["forbidden_state", "unavailable_state"] as const) {
+      const { app, audit, request } = setup(mode);
+      const response = await app(request("/requests/eikona/req-1/content:read?scope=scope-1", "POST", { direction: "input", purpose: "operator review" }));
+      expect(response.status).toBe(200);
+      expect((await response.json()).state).toBe(mode === "forbidden_state" ? "forbidden" : "unavailable");
+      const [row] = audit.page({ limit: 10, action: "requests.content_read" }).rows;
+      expect(row).toMatchObject({ outcome: "unavailable", error_code: null, target_ref: "req-1", purpose: "operator review" });
+    }
   });
 
   it("never audits or contacts owners for unauthenticated reads", async () => {

@@ -143,6 +143,27 @@ describe("work queue projection", () => {
     expect(newer.items.filter((item) => item.kind === "task_failure")).toHaveLength(1);
   });
 
+  it("turns only task-failure reminders into task items, never a batch, project, operation or credential reminder", () => {
+    const reminder = (over: Record<string, unknown>) => ({
+      id: "n", scope_id: scope.id, session_id: "", subject: session.subject, task_key: "", task_revision: "", task_identity: "",
+      failure_fingerprint: "fp", state: "unread", priority: "normal", presence: "live", task_state: "succeeded", native_state: "",
+      title: "提醒", owner: "control-center", project: "project:one", first_seen_at: "2026-10-20T00:00:00.000Z", last_seen_at: "2026-10-20T00:01:00.000Z",
+      acknowledged_at: null, muted_at: null, archived_at: null, snoozed_until: null, last_error_code: "", reopened: false, ...over,
+    }) as never;
+    const queue = (notifications: unknown[]) => buildWorkQueue({ scope, session, tasks: [], connections: [], notifications: notifications as never }).items;
+    const others = ["generation_batch", "project_assignment", "operation", "credential"].map((category) => reminder({ id: category, category, title: category, failure_fingerprint: category }));
+    expect(queue(others)).toEqual([]);
+    // Even one that carries a failing state (an operation reminder keeps the run's state) is not a failed task.
+    expect(queue([reminder({ id: "op", category: "operation", task_state: "failed", owner: "drivebridge", failure_fingerprint: "op", title: "DriveBridge 导出失败" })])).toEqual([]);
+    // A failure reminder with no category, or the default one, still stands for its task while the task is not listed.
+    const failure = (category: string | undefined) => queue([reminder({ id: "f", ...(category ? { category } : {}), task_key: "task:gone.sig", task_state: "failed", native_state: "failed", owner: "eikona", title: "已消失的失败" })]);
+    for (const category of [undefined, "failure"]) expect(failure(category).map((item) => `${item.kind}:${item.title}`)).toEqual(["task_failure:已消失的失败"]);
+    expect(queue([reminder({ id: "u", category: "failure", task_key: "task:gone.sig", task_state: "unknown", owner: "sonora" })]).map((item) => item.kind)).toEqual(["task_unknown"]);
+    // Handled operation reminders do not hide a real task failure that shares nothing with them.
+    const mixed = buildWorkQueue({ scope, session, tasks: [task()], connections: [], notifications: [reminder({ id: "op", category: "operation", state: "archived", task_state: "failed" })] });
+    expect(mixed.items.filter((item) => item.kind === "task_failure")).toHaveLength(1);
+  });
+
   it("sorts by risk before freshness and binds paging to filtered items", () => {
     const items = [
       { work_ref: "low", kind: "handoff_ready", owner: "auctra", project: "p", scope_id: "s", title: "low", state: "handoff_ready", native_state: "handoff_ready", priority: "normal", attention_reason: "", observed_at: "2026-10-20T00:10:00Z", freshness: "fresh", coverage: "complete", revision: "", source_ref: "low", safe_links: [], allowed_actions: [], preview_state: "needs_contract" },

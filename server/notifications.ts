@@ -3,7 +3,8 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { AuthError } from "./auth";
 import type { ControlDB } from "./db/client";
 import { notificationMuteRules, taskNotifications } from "./db/schema";
-import { taskIdentityOf } from "./task-connections";
+import { taskIdentity, taskIdentityOf } from "./task-connections";
+import type { TaskSnapshot } from "../src/task-observation";
 
 /** Failure facts that open an in-app reminder. Owner state stays read-only. */
 export const attentionStates = new Set([
@@ -40,6 +41,26 @@ export interface FailureFact {
   title?: string;
   owner?: string;
   project?: string;
+}
+
+/**
+ * The failure fact a verified task snapshot yields in one scope. The browser sync and the background observation loop
+ * both build their facts here, so the same failure always gets the same fingerprint and therefore the same reminder.
+ */
+export function failureFact(scopeId: string, task: TaskSnapshot): FailureFact {
+  return {
+    scope_id: scopeId,
+    task_key: task.task_key || "",
+    // From the verified snapshot, not the key string a browser proposed.
+    task_identity: task.connection_id ? taskIdentity({ scope: scopeId, c: task.connection_id, ref: task.locator.task_ref, family: task.locator.task_family }) : taskIdentityOf(task.task_key || ""),
+    state: task.state,
+    revision: task.revision || "",
+    native_state: task.native_state || "",
+    error_code: task.provider_recovery?.error_code || "",
+    title: task.title,
+    owner: task.locator.owner,
+    project: task.locator.project,
+  };
 }
 
 export interface TaskNotification {
@@ -92,6 +113,34 @@ export interface NotificationMuteRule {
 }
 
 type Row = typeof taskNotifications.$inferSelect;
+
+/** In-app places a server-authored reminder may open. */
+const eventTargets = /^\/(projects|creation|reminders|services)(\?|$)/;
+
+/**
+ * A server-authored reminder: collaboration events, open-tool operations that need attention and, once the credential
+ * lifecycle exists, credential problems. It is written once per recipient, scope and `event`.
+ */
+export interface ReminderEvent {
+  scope: string;
+  recipient: string;
+  /** Names the event for this recipient and scope; a repeat of it is not written again. */
+  event: string;
+  category: string;
+  title: string;
+  /** In-app link the reminder opens: /projects, /creation, /reminders or /services. */
+  path: string;
+  /** The owner or tool the event concerns; defaults to the control center. */
+  owner?: string;
+  /** An owner error code or state name worth keeping with the reminder; never owner text. */
+  errorCode?: string;
+  /** What the owner reports for the subject, shown by the state pill; defaults to "succeeded". */
+  taskState?: string;
+  nativeState?: string;
+  /** What wrote the row: browsers leave it empty and the background observation loop writes "background". */
+  sessionId?: string;
+  now?: string;
+}
 
 function clip(value: string | undefined, max: number) {
   return (value || "").slice(0, max);
@@ -527,15 +576,22 @@ export class NotificationStore {
     return this.requireView(id);
   }
 
-  /** Server-authored collaboration events share the existing reminder ledger. */
-  event(input: { scope: string; recipient: string; event: string; category: string; title: string; path: string }) {
-    if (!/^\/(projects|creation|reminders)(\?|$)/.test(input.path)) throw new AuthError("invalid_notification_target", 400);
-    const now = new Date().toISOString();
+  /** Server-authored events share the existing reminder ledger. */
+  event(input: ReminderEvent) {
+    return this.openEvent(input).id;
+  }
+
+  /** Like `event`, and says whether this call wrote the row: one event is written once per recipient and scope. */
+  openEvent(input: ReminderEvent) {
+    if (!eventTargets.test(input.path)) throw new AuthError("invalid_notification_target", 400);
+    const now = input.now || new Date().toISOString();
     const key = notificationId(input.recipient, input.scope + "|" + input.event);
-    this.db.insert(taskNotifications).values({ id: key, scopeId: input.scope, sessionId: "", subject: input.recipient,
+    if (this.db.select({ id: taskNotifications.id }).from(taskNotifications).where(eq(taskNotifications.id, key)).get()) return { id: key, created: false };
+    this.db.insert(taskNotifications).values({ id: key, scopeId: input.scope, sessionId: input.sessionId ?? "", subject: input.recipient,
       taskKey: "", failureFingerprint: input.event, category: input.category, title: clip(input.title, 240), targetPath: input.path,
-      firstSeenAt: now, lastSeenAt: now, project: input.scope, owner: "control-center", taskState: "succeeded" }).onConflictDoNothing().run();
-    return key;
+      firstSeenAt: now, lastSeenAt: now, project: input.scope, owner: clip(input.owner, 64) || "control-center", taskState: input.taskState || "succeeded",
+      nativeState: clip(input.nativeState, 120), lastErrorCode: clip(input.errorCode, 120) }).onConflictDoNothing().run();
+    return { id: key, created: true };
   }
 }
 
