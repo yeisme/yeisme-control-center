@@ -1,0 +1,31 @@
+# search Specification
+
+## Purpose
+TBD - created by archiving change yeisme-control-center-studio-v21. Update Purpose after archive.
+## Requirements
+### Requirement: 一处搜全站
+⌘K（Windows 和 Linux 上是 Ctrl K）SHALL 在一个面板里搜索页面、操作、最近打开、任务、作品、剧集、提醒、请求和配方。
+- 匹配度最高的 3 条排在最前，其余按类分组，每组 5 条，可「显示全部」。
+- 命中的字 MUST 高亮。
+- 顶栏上的快捷键标签 MUST 按平台显示。
+
+#### Scenario: 设置类查询
+- **WHEN** 用户输入「深色」「跟随系统」或「快捷键」
+- **THEN** 对应的操作排在第一条
+
+### Requirement: 分类范围与服务端补查
+面板 SHALL 提供分类范围标签（全部、页面与操作、任务、作品、剧集、提醒、请求、配方），也支持 `任务:` 这样的前缀。
+- 输入至少 2 个字时，再向服务端补查请求、剧集、提醒和配方：防抖 300ms，可以取消，结果缓存 15 秒。
+- 某个来源读不到时，MUST 如实写出原因，MUST NOT 把它显示成「没有结果」。
+
+#### Scenario: 只搜作品
+- **WHEN** 用户切到「作品」范围并输入一个词
+- **THEN** 只列出作品结果，命中的字被高亮
+
+### Requirement: 预览不申请新句柄
+宽度不小于 900px 时，面板 SHALL 在右侧显示所选项的预览。预览 MUST 只使用已缓存的缩略图，MUST NOT 为预览申请新的媒体授权。
+
+#### Scenario: 没有缓存
+- **WHEN** 所选作品的缩略图还没有缓存
+- **THEN** 预览只显示类型图标和文字信息，不发出媒体授权请求
+

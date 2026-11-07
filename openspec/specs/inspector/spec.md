@@ -1,0 +1,54 @@
+# inspector Specification
+
+## Purpose
+TBD - created by archiving change yeisme-control-center-studio-v21. Update Purpose after archive.
+## Requirements
+### Requirement: 三种布局一个外壳
+右侧面板 SHALL 由同一个外壳承载，按宽度分三种布局：
+
+| 宽度 | 布局 | 行为 |
+|---|---|---|
+| ≥1280 | 停靠成浮卡 | 四周内缩 12px，页面右侧让出面板宽度 |
+| 768–1279 | 抽屉 | 点遮罩即关闭 |
+| <768 | 底部 sheet | 顶到安全区下 10px；按住顶部（把手或标题区，不含按钮）下拉，过 140px 或快速下滑即关闭，否则弹回 |
+
+悬浮与最大化两种模式 MUST 保留。手机上一律用底部 sheet：悬浮卡片在手机上一样盖住列表，却没有遮罩可以点回去。
+
+#### Scenario: 手机下拉
+- **WHEN** 用户在手机上按住 sheet 顶部往下拉 300px 后松手
+- **THEN** sheet 关闭，地址里不再有 `task`；只拉 30px 并停住再松手时，sheet 弹回原位
+
+#### Scenario: 1440 宽停靠
+- **WHEN** 在 1440 宽打开任务检查器
+- **THEN** 面板距视口右缘 12px，宽度与页面右侧的让位相等
+
+### Requirement: 可调宽度
+停靠的面板 SHALL 在左缘提供调宽把手（`role=separator`）：
+- 可以拖动；
+- ←/→ 每次 16px，按住 Shift 时每次 64px；
+- Home / End 到两端；
+- Enter 复位。
+
+宽度范围是 400–720px，按账号保存。默认宽度 MUST 仍是 `clamp(400px,34vw,520px)`。
+
+#### Scenario: 键盘调宽
+- **WHEN** 用户聚焦把手，按三次 →
+- **THEN** 面板宽度减少 48px，刷新后保持
+
+### Requirement: 上一项、下一项与不闪烁
+面板 SHALL 提供上一项 / 下一项，快捷键是 `[` 和 `]`。
+- 切换条目时，MUST 只交叉淡化正文，外壳不重挂。
+- 分区导航 MUST NOT 因为父组件重新渲染而闪烁。
+- 从面板自己关闭（关闭按钮、Esc、点遮罩、下拉）时，面板留下一个静止的副本滑出并淡出。副本 MUST 是 `inert`，对读屏隐藏，并去掉 id、名称、角色、链接和 data 属性，这样任何定位器、焦点和读屏都找不到它；页面在同一帧就恢复可点。从别处关闭（后退、换页、退出登录）时面板直接消失。
+
+#### Scenario: 下一个任务
+- **WHEN** 用户在任务检查器里按 `]`
+- **THEN** 面板显示列表中的下一个任务，外壳元素没有被替换，地址里的 `task` 随之更新
+
+### Requirement: 叠层顺序
+从面板里打开的抽屉、对话框和菜单 MUST 显示在面板之上，并能接收焦点和点击。
+
+#### Scenario: 从检查器交给 Agent
+- **WHEN** 用户在任务检查器里点「交给 Agent」
+- **THEN** 交接抽屉在最上层（`elementFromPoint` 落在抽屉内），可以复制并关闭，关闭后焦点回到检查器里的按钮上
+
