@@ -4,6 +4,7 @@ import { auctraConnection } from "./auctra";
 import type { TaskConnectionState } from "../src/task-observation";
 import type { OpenToolKind, OpenToolProjection } from "../src/shared/open-tools";
 import { credentialStatuses, isPersonalAdmin } from "./credentials";
+import { createServiceManifest } from "../src/shared/service-manifest";
 
 /**
  * Aggregates per-service freshness from live connection observations.
@@ -41,14 +42,15 @@ export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, sess
   return {
     schema_version: "yeisme.service_directory.v1",
     services: serviceDefinitions.map((definition): ServiceDirectoryEntry => {
+      const manifest = createServiceManifest({ service_id: definition.id, name: definition.name, kind: definition.kind, owner_path: definition.owner_path, purpose: definition.purpose, integration: definition.integration, contract: { manifest: "ready" } });
       // Open tools are read with the server's own credential, like task connections, so only personal sessions see them.
       if (session.personal && openTools.configured.includes(definition.id as OpenToolKind)) {
         const openTool = openTools.projections.find((projection) => projection.tool === definition.id);
-        if (!openTool) return { ...definition, connections: [], configuration: "configured", observation: "not_checked", coverage: { state: "not_recorded" } };
+        if (!openTool) return { ...definition, manifest, connections: [], configuration: "configured", observation: "not_checked", coverage: { state: "not_recorded" } };
         const observed_at = openTool.observed_at;
         const covered = openTool.coverage.state;
         const state = openTool.freshness === "stale" ? "stale" as const : covered === "complete" || covered === "forbidden" || covered === "needs_contract" || covered === "unavailable" ? covered : "partial" as const;
-        return { ...definition, connections: [], configuration: "configured", observation: "not_checked", observed_at, coverage: { state, observed_at }, open_tool: openTool };
+        return { ...definition, manifest, connections: [], configuration: "configured", observation: "not_checked", observed_at, coverage: { state, observed_at }, open_tool: openTool };
       }
       const connections = session.personal
         ? scopeConnections.filter(c => c.owner === definition.id)
@@ -60,7 +62,7 @@ export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, sess
             project: c.project,
             enabled: c.enabled,
             configuration: c.enabled ? "configured" as const : "disabled" as const,
-            content_requested: c.allow_content === true,
+            content_requested: c.allow_content !== false,
             cancellation_requested: c.allow_cancel === true,
             runtime: c.enabled ? observations.find(v => v.id === c.id)?.runtime : undefined,
           }))
@@ -78,6 +80,7 @@ export function serviceDirectory(config: ServerConfig, scope: ScopeBinding, sess
           : definition.integration === "not_integrated" ? "needs_contract" : "not_configured";
       return {
         ...definition,
+        manifest,
         connections,
         configuration,
         observation: "not_checked",

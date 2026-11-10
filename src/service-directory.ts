@@ -1,6 +1,7 @@
 import type { ConnectionObservation } from "./task-observation";
 import type { OpenToolProjection } from "./shared/open-tools";
 import type { CredentialStatus } from "./shared/credentials";
+import type { ServiceManifest } from "./shared/service-manifest";
 // Product metadata only. Registration is not proof of deployment or authorization.
 export type ServiceKind = "service" | "local_tool" | "workspace" | "design";
 export interface ServiceDefinition {
@@ -25,6 +26,8 @@ export interface ServiceConnectionProjection {
   runtime?: ConnectionObservation;
 }
 export interface ServiceDirectoryEntry extends ServiceDefinition {
+  /** Uniform four-part contract status; this is metadata only and never grants execution. */
+  manifest?: ServiceManifest;
   connections: ServiceConnectionProjection[];
   configuration: "configured" | "not_configured" | "needs_contract";
   /** Fixed literal kept for compatibility; freshness now uses coverage. */
