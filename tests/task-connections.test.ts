@@ -67,6 +67,96 @@ const row = {
   provider_payload: "secret sentinel",
 };
 describe("task observation transport", () => {
+  it("accepts an Eikona public file URL and still rejects other off-origin links", async () => {
+    const artifactRef = "eikona://artifact/img_test";
+    const task = {
+      ...row,
+      state: "succeeded",
+      results: [{ ref: artifactRef, name: "result.png", mime: "image/png", bytes: 12, state: "ready" }],
+      allowed_actions: [{ action: "preview", enabled: true }, { action: "download", enabled: true }],
+    };
+    const raw: { results: Array<{ ref: string; thumbnail?: { state: string; ref: string } }> } = {
+      ...task,
+      results: [{ ref: artifactRef }],
+    };
+    const good = "https://eikona-mcp.gateway.invalid/api/v1/artifact-files/run_public/artifact_001";
+    let url = good;
+    let accessKind: string | undefined = "public_url";
+    const fetcher = async (_url: unknown, init?: RequestInit) => {
+      const b = JSON.parse(String(init?.body));
+      if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } });
+      const action = b.params.arguments.action;
+      const data = action.endsWith(".list") ? { rows: [task] } : action === "control_center.tasks.get" ? raw : task;
+      if (action === "artifact.access") {
+        return Response.json({
+          id: b.id,
+          result: {
+            structuredContent: { result: { data: { schema_version: "eikona.artifact_access_grant.v1", ...(accessKind ? { access_kind: accessKind } : {}), url, expires_at: new Date(Date.now() + 60_000).toISOString() } } },
+            content: [{ type: "resource_link", uri: url }],
+          },
+        });
+      }
+      return Response.json({ id: b.id, result: { structuredContent: { result: { data } } } });
+    };
+    const t = new TaskConnections({ ...cfg, connections: [{ ...c, allow_content: true }], providers: { eikona: { owner: "eikona", endpoint: "https://eikona-mcp.gateway.invalid/mcp", credential_ref: ref, enabled: true } } }, fetcher as typeof fetch);
+    const key = (await t.list(scope, "history")).rows[0].task_key!;
+    expect((await t.artifact(key, scope, artifactRef)).url.href).toBe(good);
+    for (const bad of [
+      good.replace("https://", "http://"),
+      good.replace("/artifact-files/", "/artifact-access/"),
+      "https://untrusted.example/api/v1/artifact-files/run_public/artifact_001",
+      good + "?token=secret",
+      good + "#fragment",
+    ]) {
+      url = bad;
+      await expect(t.artifact(key, scope, artifactRef)).rejects.toThrow("media_address_denied");
+    }
+    url = "http://127.0.0.1:1234/api/v1/artifact-access/acc_" + "a".repeat(48);
+    accessKind = undefined;
+    expect((await t.artifact(key, scope, artifactRef)).url.href).toBe(url);
+    const thumbnail = good + "?variant=thumbnail";
+    url = thumbnail;
+    accessKind = "public_url";
+    raw.results[0] = { ref: artifactRef, thumbnail: { state: "ready", ref: artifactRef + "#thumbnail" } };
+    expect((await t.artifact(key, scope, artifactRef, "thumbnail")).url.href).toBe(thumbnail);
+    for (const bad of [thumbnail + "&token=secret", good + "?variant=other", good + "?variant=thumbnail&extra=1"]) {
+      url = bad;
+      await expect(t.artifact(key, scope, artifactRef, "thumbnail")).rejects.toThrow("media_address_denied");
+    }
+  });
+  it("reads Eikona MCP bridge envelopes where the grant sits under structuredContent.projection and attachments", async () => {
+    const artifactRef = "eikona://artifact/img_bridge";
+    const task = {
+      ...row,
+      state: "succeeded",
+      results: [{ ref: artifactRef, name: "result.png", mime: "image/png", bytes: 12, state: "ready" }],
+      allowed_actions: [{ action: "preview", enabled: true }, { action: "download", enabled: true }],
+    };
+    const publicURL = "https://eikona-mcp.gateway.invalid/api/v1/artifact-files/run_public/artifact_002";
+    const fetcher = async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "initialize") return Response.json({ id: body.id, result: { protocolVersion: "2025-06-18" } });
+      const action = body.params.arguments.action;
+      let data: unknown = task;
+      if (action.endsWith(".list")) data = { rows: [task] };
+      if (action === "control_center.tasks.get") data = { ...task, results: [{ ref: artifactRef }] };
+      if (action === "artifact.access") {
+        return Response.json({
+          id: body.id,
+          result: {
+            structuredContent: {
+              projection: { schema_version: "eikona.artifact_access_grant.v1", access_kind: "public_url", url: publicURL },
+              attachments: [{ kind: "resource_link", uri: publicURL }],
+            },
+          },
+        });
+      }
+      return Response.json({ id: body.id, result: { structuredContent: { result: { data } } } });
+    };
+    const reader = new TaskConnections({ ...cfg, connections: [{ ...c, allow_content: true }], providers: { eikona: { owner: "eikona", endpoint: "https://eikona-mcp.gateway.invalid/mcp", credential_ref: ref, enabled: true } } }, fetcher as typeof fetch);
+    const key = (await reader.list(scope, "history")).rows[0].task_key!;
+    expect((await reader.artifact(key, scope, artifactRef)).url.href).toBe(publicURL);
+  });
   it("only accepts configured safe endpoint types", () => {
     expect(connectionURL(c).pathname).toBe("/mcp");
     for (const endpoint of [
@@ -98,6 +188,18 @@ describe("task observation transport", () => {
     }, c);
     expect(projected.results[0].thumbnail).toMatchObject({ state: "ready", ref: "thumb-1" });
     expect(JSON.stringify(projected)).not.toContain("secret.example");
+  });
+  it("projects bounded owner failure diagnostics so failed means actionable failure, not just a color", () => {
+    const projected = safeTask({
+      ...row,
+      state: "failed",
+      native_state: "provider_failed",
+      error_code: "provider_timeout",
+      failure_reason: "Provider did not return an artifact before the owner deadline.",
+      private_payload: "secret sentinel",
+    }, c);
+    expect(projected).toMatchObject({ state: "failed", error_code: "provider_timeout", error_summary: "Provider did not return an artifact before the owner deadline." });
+    expect(JSON.stringify(projected)).not.toContain("secret sentinel");
   });
   it("preserves Scaena provider recovery without exposing owner payloads", () => {
     const scaena: TaskConnection = { ...c, id: "s", owner: "scaena", project: "p" };
@@ -880,4 +982,34 @@ describe('connection observation facts', () => {
     expect((await reader.list(scope, "active")).connections[0].state).toBe("needs_authorization");
     expect((await reader.observe(scope))[0].runtime).toMatchObject({ state: "needs_authorization", authorization: "denied", last_success_at: null, content: "not_requested" });
   });
+  it("relays only the audited prompt body bound to the task", async () => {
+    const captureRef = "h_" + "a".repeat(32);
+    const calls: string[] = [];
+    const reader = new TaskConnections({ ...cfg, connections: [{ ...c, allow_content: true }] }, (async (_url, init) => {
+      const b = JSON.parse(String(init?.body));
+      if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } });
+      const action = b.params.arguments.action;
+      calls.push(action);
+      if (action === "control_center.tasks.list")
+        return Response.json({ id: b.id, result: { structuredContent: { result: { data: { rows: [row] } } } } });
+      if (action === "control_center.tasks.prompt")
+        return Response.json({ id: b.id, result: { structuredContent: { result: { data: { schema_version: "eikona.prompt_capture_content.v1", state: "complete", text: "raw prompt", truncated: false, capture_ref: captureRef, task_ref: "run-1", receipt_ref: "req_1" } } } } });
+      return Response.json({ id: b.id, result: { structuredContent: { result: { data: row } } } });
+    }) as typeof fetch);
+    const key = (await reader.list(scope, "active")).rows[0].task_key!;
+    await expect(reader.promptContent(key, scope, captureRef, "review")).resolves.toEqual({ state: "complete", text: "raw prompt", truncated: false, capture_ref: captureRef, task_ref: "run-1", receipt_ref: "req_1" });
+    expect(calls).toContain("control_center.tasks.prompt");
+  });
+
+  it("refuses a prompt read when the connection explicitly opts out of content", async () => {
+    const captureRef = "h_" + "a".repeat(32);
+    const reader = new TaskConnections({ ...cfg, connections: [{ ...c, allow_content: false }] }, (async (_url, init) => {
+      const b = JSON.parse(String(init?.body));
+      if (b.method === "initialize") return Response.json({ id: b.id, result: { protocolVersion: "2025-06-18" } });
+      return Response.json({ id: b.id, result: { structuredContent: { result: { data: { rows: [row] } } } } });
+    }) as typeof fetch);
+    const key = (await reader.list(scope, "active")).rows[0].task_key!;
+    await expect(reader.promptContent(key, scope, captureRef, "review")).rejects.toThrow("content_not_authorized");
+  });
+
 });
