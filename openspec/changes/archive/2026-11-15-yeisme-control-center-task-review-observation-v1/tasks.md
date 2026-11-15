@@ -1,0 +1,8 @@
+- [x] 共享类型与清洗、待挑选规则、要问的任务键（`src/shared/task-review.ts`）。
+- [x] 读取器 `server/task-review.ts`；`task-connections.ts` 加动作，并让这个动作的拒绝不污染连接。
+- [x] `GET /task-reviews`；`GET /production` 用同一规则；剧集工作室读取后交给制作线。
+- [x] 画面站按 Eikona 的决定判断待挑选，卡片和站点详情显示「Eikona 审阅记录」。
+- [x] 任务详情显示只读的 Eikona 审阅记录（`src/components/TaskReviewSummary.tsx`）。
+- [x] 假 owner（`scripts/fixtures/task-review-world.ts`）、单测 `tests/task-review.test.ts`、合同集成与浏览器旅程各一项。
+- [x] 文档：`docs/current-status.md`、`docs/frontend-api-completion.md`。
+- 后续跟踪（外部 owner，不阻塞归档，2026-11-15）：Eikona 发布这个动作之后，用现有观察者凭据做一次真实只读复查。

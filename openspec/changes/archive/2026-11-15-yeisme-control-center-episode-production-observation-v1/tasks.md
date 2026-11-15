@@ -1,0 +1,9 @@
+- [x] 共享类型与清洗（`src/shared/episode-production.ts`）。
+- [x] 读取器 `server/episode-production.ts`；`task-connections.ts` 加动作并让这个操作的拒绝不污染连接。
+- [x] `GET /episode-production`；`/production` 单集范围接入；剧集工作室读取并交给制作线。
+- [x] 制作线：设定站、成片站事实与缺口、按绑定关联集；文案与界面（卡片、站点面板）。
+- [x] 假 owner：ep-01 完整、ep-02 部分、其余 `UNKNOWN_ACTION`；单测覆盖拒绝不污染连接。
+- [x] Scaena golden 复制到 `tests/fixtures/owner-golden/`，owner 仓存在时比对。
+- [x] 合同集成与浏览器旅程场景。合同集成 49/49；浏览器旅程中新增的「按集制作摘要」检查通过（共 100 项通过、3 项失败，失败项见 p5 NOTES，都不是本变更造成的）。
+- [x] 指南「流程」与状态文档（current-status、frontend-api-completion）按本地实现如实更新。
+- 后续跟踪（外部 owner，不阻塞归档，2026-11-15）：部署版 Scaena 提供该操作后，用现有观察者凭据做真实只读复核。
