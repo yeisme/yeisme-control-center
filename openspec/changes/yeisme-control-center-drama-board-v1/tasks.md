@@ -9,7 +9,7 @@
 - [x] 4.1 单元与路由测试：`tests/drama*.test.ts`、读取器、流程构建、队列规则。 | evidence: bun run test: 47 files 336 tests passed
 - [x] 4.2 合同集成与浏览器旅程：`/drama/*`、旅程中的做剧检查、降级场景、视觉矩阵。 | evidence: test:contract-integration 27/27; test:browser-journey 40/40 incl. new-tab hand-off (mutation-checked: old location.assign fallback navigates the app away) and valid row markup; test:ci:browser 4/4; collaboration journey passed; visual-matrix-drama2 43 shots 0 page errors; an earlier journey run failed only on net::ERR_NETWORK_CHANGED (environmental) and passed on rerun
 - [x] 5.1 真实只读复验：用已配置的合法 observer 读取剧集与流程，缺 Auctra 绑定记为覆盖缺口，不造样本、不付费。 | evidence: real-owner-read-2026-10-22T15-39-58-054Z: core owners ready; /drama/episodes 200 with universe bound=false needs_contract source_not_configured (coverage gap recorded, no sample invented); 45 real tasks carry no episode_ref; real queue has 0 flow items and 0 contract_gap items
-- [ ] 5.2 共享项目范围的 Auctra 绑定与迁移（单独变更，需要授权）。
+- 后续跟踪（单独变更，不属于本变更交付，2026-11-15）：共享项目范围的 Auctra 绑定与迁移（单独变更，需要授权）。
 
 ## 验证命令
 
@@ -25,4 +25,4 @@ bun run check:public-surface
 openspec validate yeisme-control-center-drama-board-v1 --strict --no-interactive
 ```
 - [x] 5.3 控制中心单独发布并回读（候选构建、组件验证、升级演练、HTTPS 健康与资源指纹）。 | evidence: control-release-2026-10-22T15-35-16-840Z: candidate intranet-candidate-2026-10-22T15-30-00-944Z, component proof release-component-2026-10-22T15-33-46-928Z, upgrade rehearsal on a VACUUM INTO copy (migrations 5->9, no row-count change, integrity ok, previous release boots on upgraded schema), restore-point backup, HTTPS health and asset fingerprints over trusted TLS, owner configuration unchanged
-- [ ] 5.4 配置 Auctra 收集绑定与服务端 owners.scaena 后复验真实剧集（需要凭据与授权，当前未配置）。
+- [ ] 5.4 配置 Auctra 收集绑定与服务端 owners.scaena 后复验真实剧集（需要凭据与授权，当前未配置）。 | 2026-11-15 部分复验（`real-owner-read-2026-11-15T13-47-04-816Z`）：Auctra 部分已就绪，剧集 universe 已绑定、coverage complete、8 行，`auctra:accepted` 8，collection 同步 24/24；Scaena 部分仍是 `scaena:needs_contract` 8，等 Scaena 部署按集制作摘要（提交 `9b78e4eb`，部署被阻塞：已提交的历史不能单独编译）。
