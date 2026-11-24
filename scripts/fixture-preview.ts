@@ -51,6 +51,10 @@ const lifecycle = process.env.FIXTURE_CREDENTIALS === "lifecycle";
 // FIXTURE_BACKGROUND=on: the server's background observation is on, but its cycle runs only when a check asks for it
 // (POST /__fixture/observe with the key printed at start), so what it writes appears at a moment the check chooses.
 const background = process.env.FIXTURE_BACKGROUND === "on";
+// FIXTURE_ACCOUNTS=manage: the account list also lives in a private configuration file (0600), the way a deployment keeps
+// it, so accounts can be created, given a new key, disabled and enabled from the web. Without it there is no file to write
+// to, and the accounts page says account management is unavailable.
+const manageAccounts = process.env.FIXTURE_ACCOUNTS === "manage";
 const observeKey = randomBytes(12).toString("base64url");
 // The loop's clock can be moved forward by a check (`?skew_days=`), to let a recorded expiry come closer without waiting.
 let skewMs = 0;
@@ -133,6 +137,12 @@ const config: ServerConfig = {
     ...(owner === "scaena" ? { project: "rain-reunion" } : {}),
   }])),
 };
+
+if (manageAccounts) {
+  const configFile = join(temp, "control-center.json");
+  await writeFile(configFile, JSON.stringify({ personal: config.personal }, null, 2) + "\n", { mode: 0o600 });
+  config.config_file = configFile;
+}
 
 const db = createMemoryDB();
 const runs = new RunStore(db);

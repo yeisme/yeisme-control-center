@@ -102,6 +102,12 @@ async function closeOpenMenus() {
       await target.keyboard.press("Escape").catch(() => undefined);
       await target.waitForTimeout(150).catch(() => undefined);
     }
+    // A failed check can leave a dialog open (the search palette, a sheet). The app routes by hash, so the next check's
+    // goto would not reload and would find it still on top; Escape closes it, and it is the same key a person would press.
+    for (let attempt = 0; attempt < 4 && await target.locator('[role="dialog"]').count().catch(() => 0); attempt += 1) {
+      await target.keyboard.press("Escape").catch(() => undefined);
+      await target.waitForTimeout(200).catch(() => undefined);
+    }
   }
 }
 
@@ -109,15 +115,23 @@ async function closeOpenMenus() {
 let runningCheck = "";
 const inCheck = (text: string) => `[${runningCheck.slice(0, 48)}] ${text}`;
 
+const selectedChecks = new Set(process.argv.slice(2));
 async function check(name: string, fn: () => Promise<void>) {
+  if (selectedChecks.size && ![...selectedChecks].some((selected) => name.startsWith(selected))) { results.push({ name, status: "skipped" }); return; }
   runningCheck = name;
+  // One line per check on stderr as it goes, so a run that stalls says where; the summary still comes at the end.
+  const started = Date.now();
+  process.stderr.write(`… ${name}\n`);
   try {
     await fn();
     results.push({ name, status: "passed" });
   } catch (error) {
     results.push({ name, status: "failed", detail: error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 1200) : String(error) });
+    const failedPage = browser?.contexts()[0]?.pages()[0];
+    await failedPage?.screenshot({ path: path.join(run, "artifacts", `failed-${results.length}.png`) }).catch(() => undefined);
     await closeOpenMenus();
   }
+  process.stderr.write(`  ${results.at(-1)?.status} in ${Math.round((Date.now() - started) / 1000)}s\n`);
 }
 
 async function login(page: Page) {
@@ -132,7 +146,7 @@ async function login(page: Page) {
       if (await page.locator('[data-page="home"]').count()) return;
       await page.getByLabel("用户名").fill("fixture-admin");
       await page.getByLabel("个人访问凭据").fill(password);
-      await page.getByRole("button", { name: /登录 Workspace/ }).click();
+      await page.getByRole("button", { name: /进入创作台/ }).click();
       await page.waitForSelector('[data-page="home"]', { timeout: 30_000 });
       return;
     } catch (error) {
@@ -268,7 +282,7 @@ try {
     if (!body.includes("需要处理") || !body.includes("服务状态")) throw new Error("home surface incomplete");
   });
   await check("page headers stay compact while retaining accessible names", async () => {
-    for (const route of ["projects", "drama", "tasks", "assets", "requests", "review", "services", "capabilities", "usage", "team", "reminders", "guide"]) {
+    for (const route of ["projects", "drama", "drama?studio=ep-01", "activity", "tasks", "assets", "requests", "review", "services", "capabilities", "usage", "team", "admin", "settings", "reminders", "guide"]) {
       await page.goto(`${ui}/#/${route}`, { waitUntil: "domcontentloaded" });
       await page.locator(`[data-page]`).first().waitFor();
       if (await page.locator("h1:not(.sr-only)").count()) throw new Error(`visible_page_title:${route}`);
@@ -327,7 +341,7 @@ try {
   });
   await check("services show five-dimension connection evidence", async () => {
     await page.goto(`${ui}/#/services`, { waitUntil: "domcontentloaded" });
-    await page.getByText("需要 owner 授权").first().waitFor();
+    await page.getByText("需要工具授权").first().waitFor();
     await page.getByRole("heading", { name: "服务目录" }).waitFor();
     await shot(page, "services");
   });
@@ -344,7 +358,7 @@ try {
     const card = page.locator('[data-connection="fx-anatomia"]');
     await card.waitFor({ timeout: 20_000 });
     await card.getByText("可读").first().waitFor({ timeout: 20_000 });
-    await page.locator('[data-connection="fx-anatomia-denied"]').getByText("需要 owner 授权").first().waitFor({ timeout: 20_000 });
+    await page.locator('[data-connection="fx-anatomia-denied"]').getByText("需要工具授权").first().waitFor({ timeout: 20_000 });
     await page.goto(`${ui}/#/`, { waitUntil: "domcontentloaded" });
     await page.getByRole("region", { name: "来源覆盖" }).getByText("Anatomia").waitFor({ timeout: 20_000 });
   });
@@ -368,11 +382,32 @@ try {
     await page.locator('[data-open-tool="gateway"]').getByText("1 个运行要处理").waitFor();
     await page.getByRole("region", { name: "来源覆盖" }).getByText("MCP Gateway").waitFor();
   });
-  await check("guide replaces AI creation, moves between chapters from its top bar and switches commands per tool and client", async () => {
+  await check("MCP Gateway and Agent monitor show redacted calls, presets, SSE status and detail recovery", async () => {
+    await page.goto(`${ui}/#/mcp-gateway`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="mcp-gateway"]').waitFor({ timeout: 20_000 });
+    await page.getByText("MCP 网关", { exact: true }).first().waitFor();
+    await page.getByText("Codex CLI", { exact: true }).waitFor();
+    const gatewayText = await page.locator('[data-page="mcp-gateway"]').innerText();
+    for (const leaked of ["fixture.invalid", "SONORA_FIXTURE_TOKEN", "backend-leak.example.test"]) if (gatewayText.includes(leaked)) throw new Error(`gateway_monitor_leak:${leaked}`);
+    await page.goto(`${ui}/#/agents`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="agents"]').waitFor({ timeout: 20_000 });
+    await page.getByText("msess_fx_1", { exact: true }).waitFor();
+    await page.locator('[data-page="agents"] [data-page-toolbar] .max-sm\\:hidden').getByText(/实时事件|事件流不可用，轮询中|轮询/).waitFor({ timeout: 20_000 });
+    await page.getByRole("button", { name: /inv_fx_1/ }).click();
+    await page.getByText(/恢复：query_original_operation/).waitFor({ timeout: 20_000 });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByText("Agent 监控", { exact: true }).first().waitFor();
+    await page.setViewportSize({ width: 1440, height: 900 });
+  });
+  await check("batch generation asks for a project outside one, the guide moves between chapters from its top bar and switches commands per tool and client", async () => {
+    // 批量生成 is a tab of 剧集 now; outside a project it offers projects instead of jumping to another entry.
     await page.goto(`${ui}/#/creation`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-creation-pick]").waitFor();
+    if (!page.url().includes("#/creation")) throw new Error(`creation_redirected:${page.url()}`);
+    await page.locator('[data-nav="creation"][aria-current="page"]').waitFor();
+    await page.goto(`${ui}/#/creation?owner=eikona`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-page="guide"]').waitFor();
-    if (!page.url().includes("#/guide")) throw new Error(`creation_not_redirected:${page.url()}`);
-    if (await page.locator('[data-nav="creation"]').count()) throw new Error("ai_creation_nav_still_listed");
+    if (!page.url().includes("#/guide")) throw new Error(`tool_link_not_redirected:${page.url()}`);
     await page.locator('[data-nav="guide"][aria-current="page"]').waitFor();
     // The chapter bar keeps its place in the hash route and the sidebar keeps 使用指南 current on every chapter.
     const chapters = page.getByRole("navigation", { name: "指南章节" });
@@ -400,6 +435,12 @@ try {
   await check("tool catalog lists latest owner tools read-only with inspector and guide link", async () => {
     await page.goto(`${ui}/#/capabilities`, { waitUntil: "domcontentloaded" });
     await page.getByText("最新上线").waitFor({ timeout: 20_000 });
+    const preflight = page.locator("[data-asset-preflight]");
+    await preflight.waitFor({ timeout: 20_000 });
+    await preflight.getByText("provider_calls=0 · durable_writes=0").waitFor();
+    await preflight.getByRole("radio", { name: "视频" }).click();
+    await preflight.getByText("意图：视频").waitFor();
+    await preflight.getByText("needs_contract", { exact: true }).waitFor();
     for (const name of ["概览", "模型", "渠道", "工具与动作", "动态"]) await page.getByRole("tab", { name: new RegExp(name) }).waitFor();
     await page.getByRole("tab", { name: /模型/ }).click();
     await page.getByRole("table", { name: "当前模型" }).waitFor();
@@ -456,9 +497,11 @@ try {
     const selectedParams = new URLSearchParams(selectedUrl.hash.split("?", 2)[1] || "");
     if (selectedUrl.hash.split("?", 1)[0] !== "#/projects") throw new Error("project_task_navigated_to_tasks");
     if (selectedParams.get("project") !== projectKey || selectedParams.get("tab") !== "tasks" || !selectedParams.get("task")) throw new Error("project_context_not_preserved");
+    // Docked, the panel is a card 12px in from the right edge (measured once it stopped sliding in).
+    await animationsDone(page);
     const box = await page.locator('[data-task-inspector="fixed"]').boundingBox();
     const viewportRight = await page.evaluate(() => window.innerWidth);
-    if (!box || Math.abs(box.x + box.width - viewportRight) > 1) throw new Error(`project_inspector_not_flush_right:${JSON.stringify({ box, viewportRight })}`);
+    if (!box || Math.abs(viewportRight - (box.x + box.width) - 12) > 1) throw new Error(`project_inspector_not_12px_in:${JSON.stringify({ box, viewportRight })}`);
     await page.getByRole("button", { name: "关闭详情" }).click();
     const closedParams = new URLSearchParams(new URL(page.url()).hash.split("?", 2)[1] || "");
     if (closedParams.get("project") !== projectKey || closedParams.get("tab") !== "tasks" || closedParams.has("task")) throw new Error("project_context_not_restored_after_close");
@@ -607,6 +650,7 @@ try {
     await page.getByLabel("列表密度").selectOption("compact");
     await page.getByRole("button", { name: "下一页" }).click();
     await page.getByText(/第 2 \/ \d+ 页/).waitFor();
+    if (hashParams(page).get("page") !== "2") throw new Error(`page_not_in_url:${page.url()}`);
     await page.getByText("已采集").first().waitFor();
     await page.locator('[data-task] img[alt]').first().waitFor({ timeout: 15_000 });
     const before = await page.getByText(/第 2 \/ \d+ 页/).first().innerText();
@@ -617,6 +661,111 @@ try {
     if (await page.getByText(/第 2 \/ \d+ 页/).first().innerText() !== before) throw new Error("page_reset_after_inspector");
     await page.getByRole("button", { name: "上一页" }).click();
     await page.getByText(/第 1 \/ \d+ 页/).waitFor();
+    if (hashParams(page).has("page")) throw new Error(`page_one_left_in_url:${page.url()}`);
+    // A reload keeps the page: it lives in the address, not in memory.
+    await page.getByRole("button", { name: "下一页" }).click();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByText(/第 2 \/ \d+ 页/).waitFor({ timeout: 20_000 });
+    // A new filter starts the list over.
+    await page.getByLabel("搜索任务").fill("站台");
+    await expect.poll(() => hashParams(page).get("q")).toBe("站台");
+    if (hashParams(page).has("page")) throw new Error("filter_kept_page");
+    // Leave the list as the next checks expect it: 20 per page, first page, no search.
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+  });
+  await check("a header sorts the whole list, says so with aria-sort, and keeps the sort in the address", async () => {
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+    const header = page.locator('th:has([data-sort-header="updated"])');
+    await page.locator('[data-sort-header="updated"]').click();
+    await expect(header).toHaveAttribute("aria-sort", "descending");
+    if (hashParams(page).get("sort") !== "updated:desc") throw new Error(`sort_not_in_url:${page.url()}`);
+    await page.locator('[data-sort-header="updated"]').click();
+    await expect(header).toHaveAttribute("aria-sort", "ascending");
+    await page.locator('[data-sort-header="updated"]').click();
+    await expect(header).toHaveAttribute("aria-sort", "none");
+    if (hashParams(page).has("sort")) throw new Error("third_click_kept_sort");
+  });
+  await check("on a phone a table restacks into labelled cards, sorts from a menu and stays accessible", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator("[data-task]").first().waitFor();
+      const card = await page.locator("[data-task]").first().evaluate((row) => {
+        const updated = row.querySelector('td[data-label="更新"]') as HTMLElement | null;
+        const head = row.closest("table")?.querySelector("thead") as HTMLElement | null;
+        return {
+          row: getComputedStyle(row).display,
+          updated: updated ? getComputedStyle(updated).display : "missing",
+          label: updated ? getComputedStyle(updated, "::before").content : "",
+          head: head ? Math.round(head.getBoundingClientRect().height) : -1,
+        };
+      });
+      if (card.row !== "flex" || card.updated === "none" || card.updated === "missing" || !card.label.includes("更新") || card.head > 1) throw new Error(`no_card_restack:${JSON.stringify(card)}`);
+      if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) throw new Error("cards_overflow");
+      await page.getByLabel("任务列表排序").selectOption("updated:desc");
+      await expect.poll(() => hashParams(page).get("sort")).toBe("updated:desc");
+      await expectAccessible(page, "tasks-cards-390");
+    } finally {
+      await page.setViewportSize({ width: 1440, height: 960 });
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    }
+  });
+  await check("task query: typed clauses become filters with counts, the scope says what was searched, and a saved view survives a reload", async () => {
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+    const bar = page.locator('[data-page="tasks"] [data-testid="filter-bar"]');
+    const search = bar.locator("[data-page-search]");
+    await search.fill("状态:失败 工具:eikona -雨");
+    await search.press("Enter");
+    await expect.poll(() => hashParams(page).get("state")).toBe("failed");
+    const after = hashParams(page);
+    if (after.get("owner") !== "eikona" || after.get("q") !== "-雨") throw new Error(`query_not_in_url:${page.url()}`);
+    if (await search.inputValue() !== "-雨") throw new Error(`query_box_kept_clauses:${await search.inputValue()}`);
+    await bar.locator('[data-filter-chip="state"]').waitFor();
+    await bar.locator('[data-filter-chip="owner"]').waitFor();
+    const drawer = await bar.locator('button[aria-label^="筛选"]').first().getAttribute("aria-label");
+    if (drawer !== "筛选，已选 2 项") throw new Error(`drawer_count:${drawer}`);
+    const labels = await page.locator("[data-task] [data-row-button]").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label") || ""));
+    if (!labels.length || labels.some((label) => label.includes("雨") || !label.includes("Eikona") || !label.includes("失败"))) throw new Error(`query_rows:${labels.join("|")}`);
+    await page.locator("[data-query-scope]").getByText(/在已读取的 \d+ 条里查询/).waitFor();
+    // Counts sit beside each option, worked out with every other filter applied.
+    await bar.getByRole("button", { name: /^状态/ }).click();
+    const failedOption = page.getByRole("dialog", { name: "状态" }).locator("label").filter({ has: page.getByText("失败", { exact: true }) });
+    if (!/^\d+ 条$/.test(await failedOption.locator("[aria-label$=' 条']").getAttribute("aria-label") || "")) throw new Error("facet_count_missing");
+    await page.keyboard.press("Escape");
+    // Backspace in an empty box takes off the last chip.
+    await search.fill("");
+    await search.press("Backspace");
+    await expect.poll(() => hashParams(page).has("owner") && hashParams(page).has("state") ? "both" : "one").toBe("one");
+    // Save what is left as a view; it is still there after a reload and reopens the same filters.
+    await bar.locator("[data-page-search]").fill("状态:失败 ");
+    await expect.poll(() => hashParams(page).get("state")).toBe("failed");
+    await page.getByRole("button", { name: "存为视图" }).click();
+    await page.getByLabel("视图名称").fill("失败的图");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.locator('[data-saved-view="失败的图"]').waitFor();
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-saved-view="失败的图"] button[aria-pressed]').click();
+    await expect.poll(() => hashParams(page).get("state")).toBe("failed");
+    await page.getByRole("button", { name: "视图「失败的图」的操作" }).click();
+    await page.getByRole("menuitem", { name: "删除视图" }).click();
+    await page.locator('[data-saved-view="失败的图"]').waitFor({ state: "detached" });
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+  });
+  await check("reminders: another group keeps the search and filters, and only the page starts over", async () => {
+    await page.goto(`${ui}/#/reminders?owner=eikona&q=%E5%A4%B1&page=2`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="reminders"]').waitFor();
+    await page.getByRole("tab", { name: /需要处理/ }).click();
+    await expect.poll(() => hashParams(page).get("group")).toBe("open");
+    const after = hashParams(page);
+    if (after.get("owner") !== "eikona" || after.get("q") !== "失" || after.has("page")) throw new Error(`group_switch_lost_filters:${page.url()}`);
+    // The next check starts on the task list's first page, where the pagination check left it.
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
   });
   await check("task detail events and result handle", async () => {
     await page.locator('[data-task="run-2398-review"] button').click();
@@ -625,9 +774,9 @@ try {
     await page.getByText("提示词采集").first().waitFor();
     await dialog.locator('[data-inspector-section="prompt"]').getByText("已采集").waitFor();
     const inspector = page.locator('[data-task-inspector="fixed"]');
-    await page.waitForTimeout(220);
+    await animationsDone(page);
     const box = await inspector.boundingBox();
-    if (!box || Math.round(box.x + box.width) !== 1440) throw new Error(`fixed_inspector_not_flush_right:${JSON.stringify(box)}`);
+    if (!box || Math.round(box.x + box.width) !== 1428) throw new Error(`fixed_inspector_not_12px_in:${JSON.stringify(box)}`);
     const body = dialog.locator('[data-task-inspector-body]');
     await page.evaluate(() => window.scrollTo(0, 120));
     const pageScrollBefore = await page.evaluate(() => Math.round(window.scrollY));
@@ -656,6 +805,55 @@ try {
     await page.locator('[data-task-inspector="floating"]').waitFor();
     await page.getByRole("button", { name: "关闭详情" }).click();
     await waitForNoDialogs(page);
+  });
+  await check("交给 Agent from the task inspector: the sheet is on top, copies the whole text without the Clipboard API, and a refused copy opens it by hand", async () => {
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-task="run-2398-review"] button').click();
+    const inspector = page.locator("[data-task-inspector]");
+    await inspector.waitFor();
+    // A LAN http address has no Clipboard API; record what the copy event carries instead of reading the system clipboard.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+      const copied: string[] = [];
+      (window as unknown as { __copied: string[] }).__copied = copied;
+      window.addEventListener("copy", (event) => { copied.push(event.clipboardData?.getData("text/plain") ?? ""); });
+    });
+    await inspector.getByRole("button", { name: "交给 Agent", exact: true }).click();
+    const sheet = page.getByRole("dialog").filter({ has: page.locator("[data-brief]") });
+    await sheet.waitFor();
+    for (const form of ["Claude Code", "Codex", "JSON"]) if (await sheet.getByRole("radio", { name: form }).count()) throw new Error(`handoff_offers_${form}`);
+    const copyButton = sheet.getByRole("button", { name: "复制给 Agent 的说明" });
+    await copyButton.waitFor();
+    await page.waitForTimeout(260);
+    const onTop = await copyButton.evaluate((button) => {
+      const box = button.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !!hit && button.contains(hit);
+    });
+    if (!onTop) throw new Error("handoff_sheet_covered_by_inspector");
+    const text = await sheet.locator("[data-brief-text]").textContent() || "";
+    if (!text.includes("\n") || !text.includes("结果会出现在 Yeisme Studio：")) throw new Error("brief_text_not_multiline");
+    if (/#\/|https?:\/\//.test(text)) throw new Error("brief_text_has_address");
+    await copyButton.click();
+    await sheet.getByRole("button", { name: "已复制" }).waitFor({ timeout: 5_000 });
+    const copied = await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied);
+    if (copied.length !== 1 || copied[0] !== text) throw new Error(`copied_text_differs:${copied.length}:${copied[0]?.length}/${text.length}`);
+    const focusInSheet = await page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]')?.querySelector("[data-brief]"));
+    if (!focusInSheet) throw new Error("copy_moved_focus_out_of_the_sheet");
+    // Refuse the legacy path too: the text opens selected in the manual box, line breaks and all.
+    await page.evaluate(() => { Object.defineProperty(document, "execCommand", { configurable: true, value: () => false }); });
+    await sheet.getByRole("button", { name: /^(复制给 Agent 的说明|已复制)$/ }).click();
+    const manual = page.getByLabel("手动复制给 Agent 的说明");
+    await expect(manual).toHaveValue(text);
+    const selected = await manual.evaluate((element) => { const area = element as HTMLTextAreaElement; return area.tagName === "TEXTAREA" && area.selectionStart === 0 && area.selectionEnd === area.value.length; });
+    if (!selected) throw new Error("manual_copy_not_a_selected_textarea");
+    await page.getByRole("button", { name: "完成", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await sheet.waitFor({ state: "detached" });
+    await page.getByRole("button", { name: "关闭详情" }).click();
+    await waitForNoDialogs(page);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="tasks"]').waitFor();
   });
   await check("asset cards open the large details workspace without reading media", async () => {
     await page.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
@@ -722,13 +920,107 @@ try {
       await page.locator('[data-page="assets"] [data-result]').first().getByRole("button", { name: /打开 .* 详情/ }).click();
       const inspector = page.locator('[data-asset-inspector="fixed"]');
       await inspector.waitFor();
+      // The card slides in by 12px; measure where it comes to rest.
+      await animationsDone(page);
       const inspectorBox = await inspector.boundingBox();
       const layoutRight = await page.evaluate(() => document.documentElement.clientWidth);
-      if (!inspectorBox || Math.round(inspectorBox.width) !== 520 || inspectorBox.x + inspectorBox.width < layoutRight - 16 || inspectorBox.x + inspectorBox.width > layoutRight) throw new Error(`wide_inspector_geometry:${JSON.stringify({ box: inspectorBox, layoutRight })}`);
+      if (!inspectorBox || Math.round(inspectorBox.width) !== 520 || Math.round(layoutRight - inspectorBox.x - inspectorBox.width) !== 12) throw new Error(`wide_inspector_geometry:${JSON.stringify({ box: inspectorBox, layoutRight })}`);
       const paddingRight = await page.locator('[data-page="assets"]').evaluate((element) => getComputedStyle(element).paddingRight);
       if (paddingRight !== "520px") throw new Error(`wide_content_reserve:${paddingRight}`);
     } finally {
       await page.setViewportSize(previous);
+    }
+  });
+  await check("the docked panel is a card 12px in; the keyboard narrows it and a reload keeps that; [ and ] step tasks in the same panel; the closing copy is inert", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-task="run-2398-review"] button').click();
+    let inspector = page.locator("[data-task-inspector]");
+    await inspector.waitFor();
+    // An earlier check may have left the task panel floating; this one is about the docked card.
+    if (await inspector.getAttribute("data-task-inspector") !== "fixed") await inspector.getByRole("button", { name: "固定任务侧栏" }).click();
+    inspector = page.locator('[data-task-inspector="fixed"]');
+    await inspector.waitFor();
+    await animationsDone(page);
+    const box = await inspector.boundingBox();
+    const right = await page.evaluate(() => document.documentElement.clientWidth);
+    if (!box || Math.round(right - box.x - box.width) !== 12 || Math.round(box.y) !== 72 || Math.round(await page.evaluate(() => innerHeight) - box.y - box.height) !== 12) throw new Error(`docked_card_geometry:${JSON.stringify({ box, right })}`);
+    const handle = inspector.getByRole("separator", { name: "调整任务详情的宽度" });
+    const before = Number(await handle.getAttribute("aria-valuenow"));
+    await handle.focus();
+    for (let step = 0; step < 3; step += 1) await page.keyboard.press("ArrowRight");
+    await expect(handle).toHaveAttribute("aria-valuenow", String(before - 48));
+    await expect.poll(async () => Math.round((await inspector.boundingBox())?.width || 0)).toBe(before - 48);
+    const reserve = await page.locator('[data-page="tasks"]').evaluate((element) => getComputedStyle(element).paddingRight);
+    if (reserve !== `${before - 48}px`) throw new Error(`page_reserve_did_not_follow:${reserve}`);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await inspector.waitFor({ timeout: 30_000 });
+    await expect.poll(async () => Math.round((await inspector.boundingBox())?.width || 0)).toBe(before - 48);
+    // ] and [ walk the list in the same panel element; the address follows.
+    const first = hashParams(page).get("task");
+    await page.evaluate(() => { (window as unknown as { panel?: Element | null }).panel = document.querySelector("[data-task-inspector]"); });
+    const forward = await inspector.getByRole("button", { name: "下一个任务" }).isEnabled();
+    await page.locator("main").click({ position: { x: 4, y: 4 } });
+    await page.keyboard.press(forward ? "]" : "[");
+    await expect.poll(() => hashParams(page).get("task")).not.toBe(first);
+    if (!await page.evaluate(() => (window as unknown as { panel?: Element | null }).panel === document.querySelector("[data-task-inspector]"))) throw new Error("stepping_replaced_the_panel");
+    await page.keyboard.press(forward ? "[" : "]");
+    await expect.poll(() => hashParams(page).get("task")).toBe(first);
+    // Enter on the handle goes back to the default width.
+    await handle.focus();
+    await page.keyboard.press("Enter");
+    await expect(handle).toHaveAttribute("aria-valuenow", String(before));
+    await inspector.getByRole("button", { name: "关闭详情" }).click();
+    await expect(page.locator("[data-task-inspector]")).toHaveCount(0);
+    const copy = await page.evaluate(() => {
+      const ghost = document.querySelector("[data-panel-ghost]");
+      return ghost ? { inert: ghost.hasAttribute("inert"), hidden: ghost.getAttribute("aria-hidden"), named: ghost.querySelectorAll("[role], [id], [aria-label], [tabindex], [href], [data-task-inspector-body]").length } : null;
+    });
+    if (copy && (!copy.inert || copy.hidden !== "true" || copy.named)) throw new Error(`closing_copy_not_quiet:${JSON.stringify(copy)}`);
+    await expect(page.locator("[data-panel-ghost]")).toHaveCount(0, { timeout: 2_000 });
+  });
+  await check("a drawer on a narrower screen closes from its scrim, and a phone sheet closes when dragged down by its top", async () => {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    try {
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator('[data-task="run-2398-review"] button').click();
+      const drawer = page.locator('[data-task-inspector][data-inspector-layout="drawer"]');
+      await drawer.waitFor();
+      if (await drawer.getAttribute("aria-modal") !== "true") throw new Error("drawer_not_modal");
+      await page.mouse.click(200, 520);
+      await expect(page.locator("[data-task-inspector]")).toHaveCount(0);
+      if (hashParams(page).get("task")) throw new Error("scrim_left_the_task_in_the_address");
+    } finally {
+      await page.setViewportSize({ width: 1440, height: 960 });
+    }
+    const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    try {
+      const phone = await touch.newPage();
+      await login(phone);
+      await phone.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await phone.locator('[data-task="run-2398-review"] button').click();
+      const sheet = phone.locator('[data-task-inspector][data-inspector-layout="sheet"]');
+      await sheet.waitFor();
+      await animationsDone(phone);
+      const grabber = await sheet.locator("[data-sheet-grabber]").boundingBox();
+      if (!grabber) throw new Error("sheet_has_no_grabber");
+      const cdp = await touch.newCDPSession(phone);
+      const x = Math.round(grabber.x + grabber.width / 2);
+      const y = Math.round(grabber.y + 4);
+      // A short pull settles back; a long one closes.
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      for (let step = 1; step <= 3; step += 1) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step * 10 }] }); await phone.waitForTimeout(40); }
+      await phone.waitForTimeout(200);
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await phone.waitForTimeout(400);
+      if (!await sheet.count()) throw new Error("short_pull_closed_the_sheet");
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      for (let step = 1; step <= 10; step += 1) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step * 30 }] }); await phone.waitForTimeout(16); }
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await expect(phone.locator("[data-task-inspector]")).toHaveCount(0);
+      await expect.poll(() => new URL(phone.url()).hash.includes("task=")).toBe(false);
+    } finally {
+      await touch.close();
     }
   });
   await check("wide rows: main columns stop at 560px, one long line never widens a table, list rows keep one rhythm", async () => {
@@ -772,6 +1064,58 @@ try {
       if (await assetsView.count()) await assetsView.getByRole("radio", { name: "大图网格" }).click().catch(() => {});
       await page.setViewportSize(previous);
     }
+  });
+  await check("the desktop navigation floats as a capsule: 12px in, 64px wide, the pill on the current entry, and a card that names an entry", async () => {
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+    const nav = page.getByRole("navigation", { name: "主导航" });
+    const box = await nav.boundingBox();
+    if (!box || Math.round(box.x) !== 12 || Math.round(box.y) !== 12 || Math.round(box.width) !== 64) throw new Error(`capsule_misplaced:${JSON.stringify(box)}`);
+    // The workspace keeps its column: the page starts right of the capsule, where it always did.
+    const main = await page.locator("main").boundingBox();
+    if (!main || Math.round(main.x) !== 88) throw new Error(`workspace_moved:${JSON.stringify(main)}`);
+    const pill = nav.locator(".slide-indicator");
+    const current = nav.locator('[data-nav-entry][aria-current="true"]');
+    await expect(current).toHaveAttribute("data-nav-entry", "activity");
+    // The pill slides from the entry the last page was in; it settles on the current one within its 220ms.
+    const offset = async () => { const [pillBox, currentBox] = [await pill.boundingBox(), await current.boundingBox()]; return pillBox && currentBox ? Math.round(Math.abs(pillBox.y - currentBox.y) + Math.abs(pillBox.height - currentBox.height)) : -1; };
+    await expect.poll(offset, { timeout: 3_000 }).toBe(0);
+    // A count is in the entry's name, starting with what the entry says. It is visually hidden text after the label, and
+    // Chrome joins the two with a space, which a reader does not voice.
+    const unread = await page.locator('[data-nav="reminders"]').getAttribute("data-badge");
+    if (unread) await expect(nav.locator('[data-nav-entry="activity"]')).toHaveAccessibleName(new RegExp(`^动态\\s?，(${unread}|99\\+) 项待处理$`));
+    // Pointing at an entry names it, with what is inside and its go-to keys.
+    await nav.locator('[data-nav-entry="works"]').hover();
+    const card = nav.locator('[data-nav-card="works"]');
+    await expect(card).toHaveCSS("opacity", "1");
+    await expect(card).toContainText("作品");
+    await expect(card.locator("kbd")).toHaveText(["G", "W"]);
+    // Going to another entry moves the pill there.
+    await nav.locator('[data-nav-entry="works"]').click();
+    await page.locator('[data-page="assets"]').waitFor();
+    await expect.poll(async () => Math.round((await pill.boundingBox())?.y ?? 0)).toBe(Math.round((await nav.locator('[data-nav-entry="works"]').boundingBox())?.y ?? -1));
+    await page.mouse.move(700, 500);
+  });
+  await check("the sidebar keeps seven entries, wiring and preferences at its foot, no theme button, and one account entry in the identity menu", async () => {
+    await page.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="home"]').waitFor();
+    const nav = page.getByRole("navigation", { name: "主导航" });
+    const entries = await nav.locator("[data-nav-entry]").evaluateAll((items) => items.map((item) => item.getAttribute("data-nav-entry")));
+    if (JSON.stringify(entries) !== JSON.stringify(["today", "projects", "create", "works", "activity", "connect", "settings"])) throw new Error(`nav_entries:${JSON.stringify(entries)}`);
+    // The setup pair sits at the bottom of the full-height rail.
+    const [navBox, settingsBox] = [await nav.boundingBox(), await nav.locator('[data-nav-entry="settings"]').boundingBox()];
+    if (!navBox || !settingsBox || navBox.y + navBox.height - (settingsBox.y + settingsBox.height) > 24) throw new Error(`setup_not_at_foot:${JSON.stringify({ navBox, settingsBox })}`);
+    if (await nav.getByRole("button", { name: /主题/ }).count()) throw new Error("theme_button_in_nav");
+    await page.getByRole("button", { name: /当前身份/ }).click();
+    const menu = page.getByRole("menu");
+    await menu.getByRole("group", { name: "主题" }).waitFor();
+    const items = (await menu.getByRole("menuitem").allInnerTexts()).map((text) => text.trim());
+    if (JSON.stringify(items) !== JSON.stringify(["我的账号", "退出登录"])) throw new Error(`identity_menu:${JSON.stringify(items)}`);
+    await page.keyboard.press("Escape");
+    await nav.locator('[data-nav-entry="connect"]').click();
+    await page.locator('[data-page="services"]').waitFor();
+    await page.keyboard.press("g"); await page.keyboard.press("p");
+    await page.locator('[data-page="shared-projects"]').waitFor();
   });
   await check("inspector docks on desktop and becomes a modal drawer on narrow screens", async () => {
     await page.setViewportSize({ width: 1440, height: 960 });
@@ -896,6 +1240,90 @@ try {
     await page.keyboard.press("Backspace");
     await page.waitForFunction(() => !new URLSearchParams(location.hash.split("?")[1] || "").get("q"), undefined, { timeout: 5_000 });
   });
+  await check("settings take effect at once and survive a reload: theme, motion and page size", async () => {
+    await page.goto(`${ui}/#/settings`, { waitUntil: "domcontentloaded" });
+    const appearance = page.locator('[data-settings-section="appearance"]');
+    await appearance.waitFor();
+    const pageSize = page.getByLabel("每页条数", { exact: true });
+    const before = await pageSize.inputValue();
+    try {
+      await appearance.getByRole("radiogroup", { name: "主题" }).getByRole("radio", { name: "深色" }).click();
+      await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
+      await appearance.getByRole("radiogroup", { name: "动效" }).getByRole("radio", { name: "减少" }).click();
+      await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
+      await pageSize.selectOption("80");
+      // The device's choices apply before the first frame of the next load; the page size follows the account.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      if (await page.evaluate(() => document.documentElement.dataset.motion) !== "reduced") throw new Error("motion_not_applied_before_render");
+      if (await page.evaluate(() => document.documentElement.dataset.theme) !== "dark") throw new Error("theme_not_applied_before_render");
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator("[data-task]").first().waitFor();
+      await expect(page.locator("[data-pager]").first().getByLabel("每页数量")).toHaveValue("80");
+    } finally {
+      await page.goto(`${ui}/#/settings`, { waitUntil: "domcontentloaded" });
+      await appearance.getByRole("radiogroup", { name: "主题" }).getByRole("radio", { name: "跟随系统" }).click();
+      await appearance.getByRole("radiogroup", { name: "动效" }).getByRole("radio", { name: "跟随系统" }).click();
+      await page.getByLabel("每页条数", { exact: true }).selectOption(before);
+      await page.waitForFunction(() => document.documentElement.dataset.motion === undefined);
+    }
+  });
+  await check("a shortcut can be rebound, a taken key is refused with the reason, and the default comes back", async () => {
+    await page.goto(`${ui}/#/settings?section=keys`, { waitUntil: "domcontentloaded" });
+    const row = page.locator('[data-keymap-row="page-search"]');
+    const keys = row.locator("[data-keymap-current] kbd");
+    try {
+      await row.getByRole("button", { name: "改键：聚焦当前页的搜索框" }).click();
+      await page.keyboard.press("s");
+      await expect(keys).toHaveText(["S"]);
+      // On a page, S now focuses its search box and the key never reaches the box; / does nothing.
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator("[data-task]").first().waitFor();
+      await blur();
+      await page.keyboard.press("/");
+      if (await page.evaluate(() => document.activeElement?.hasAttribute("data-page-search"))) throw new Error("old_binding_still_works");
+      await page.keyboard.press("s");
+      const field = page.locator("#main [data-page-search]").first();
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("");
+      // The reference shows the binding in use.
+      await blur();
+      await page.keyboard.press("?");
+      await page.locator("[data-shortcut-sheet]").getByText("聚焦当前页的搜索框", { exact: true }).waitFor();
+      await page.keyboard.press("Escape");
+      await page.locator("[data-shortcut-sheet]").waitFor({ state: "detached" });
+      // A key that is taken is refused with the reason, and the binding stays.
+      await page.goto(`${ui}/#/settings?section=keys`, { waitUntil: "domcontentloaded" });
+      await row.getByRole("button", { name: "改键：聚焦当前页的搜索框" }).click();
+      await page.keyboard.press("j");
+      await row.getByRole("alert").filter({ hasText: "已经用在：从页面上任何地方移到下一行" }).waitFor();
+      await expect(keys).toHaveText(["S"]);
+      await expectAccessible(page, "settings-keys", '[data-settings-section="keys"]');
+      await row.getByRole("button", { name: "恢复默认：聚焦当前页的搜索框" }).click();
+      await expect(keys).toHaveText(["/"]);
+    } finally {
+      const reset = page.getByRole("button", { name: "全部恢复默认" });
+      if (await reset.isEnabled().catch(() => false)) await reset.click();
+    }
+  });
+  await check("G then T goes to the runs page with a hint in between, and J reaches the first row from anywhere", async () => {
+    await page.goto(`${ui}/#/`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="home"]').waitFor();
+    await blur();
+    await page.keyboard.press("g");
+    await page.locator("[data-leader-hint]").getByText("运行").waitFor();
+    await page.keyboard.press("t");
+    await page.locator('[data-page="tasks"]').waitFor();
+    await expect(page.locator("[data-leader-hint]")).toHaveCount(0);
+    await page.locator("[data-task]").first().waitFor();
+    await blur();
+    await page.keyboard.press("j");
+    await expect(page.locator("#main [data-row-button]").first()).toBeFocused();
+    await page.keyboard.press("j");
+    await expect(page.locator("#main [data-row-button]").nth(1)).toBeFocused();
+    await page.keyboard.press("k");
+    await expect(page.locator("#main [data-row-button]").first()).toBeFocused();
+    await blur();
+  });
   await check("the command palette offers recent items and runs theme and shortcut actions", async () => {
     await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
     await page.locator("[data-task]").first().waitFor();
@@ -924,6 +1352,31 @@ try {
     } finally {
       // A palette left open would cover the page for every later check.
       if (await palette.count()) await palette.getByRole("button", { name: "关闭搜索" }).last().click();
+    }
+  });
+  await check("⌘K finds works with the match marked, narrows to one kind by prefix, and asks the server for older requests", async () => {
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-task]").first().waitFor();
+    const palette = page.getByRole("dialog", { name: "搜索" });
+    await page.keyboard.press("Control+k");
+    await palette.waitFor();
+    try {
+      await palette.getByRole("radio", { name: "作品", exact: true }).click();
+      await page.keyboard.type("定妆");
+      const first = palette.getByRole("option").first();
+      await expect(first).toContainText("定妆");
+      if (!await first.locator("mark").count()) throw new Error("palette_match_not_marked");
+      const groups = await palette.locator("[data-search-group]").evaluateAll((items) => [...new Set(items.map((item) => item.getAttribute("data-search-group")))]);
+      if (groups.some((group) => group !== "work")) throw new Error(`palette_scope_leaked:${groups.join(",")}`);
+      const before = requests.filter((request) => request.method === "GET" && request.path.endsWith("/requests")).length;
+      const input = palette.getByRole("combobox");
+      await input.fill("请求:雨夜");
+      await expect(palette.getByRole("radio", { name: "请求", exact: true })).toHaveAttribute("aria-checked", "true");
+      await expect.poll(() => requests.filter((request) => request.method === "GET" && request.path.endsWith("/requests")).length, { timeout: 5_000 }).toBeGreaterThan(before);
+      await expectAccessible(page, "command-search-scoped", '[role="dialog"][aria-label="搜索"]');
+    } finally {
+      if (await palette.count()) await palette.getByRole("button", { name: "关闭搜索" }).last().click();
+      await palette.waitFor({ state: "detached" });
     }
   });
   await check("arrow keys move through asset cards, requests and reminders", async () => {
@@ -1042,6 +1495,150 @@ try {
       await dock.waitFor({ state: "detached" });
     }
   });
+  await check("v22 audio: a played track draws its waveform in the dock, the card and the stage; the stage switches to spectrum and its marks seek", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/assets?kind=audio`, { waitUntil: "domcontentloaded" });
+    // A hash change keeps the tab, and with it the analyses of tracks earlier checks played; start from a fresh tab.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const dock = page.locator("[data-audio-dock]");
+    const card = page.locator('[data-page="assets"] [data-result]').filter({ hasText: "片尾环境音乐" }).first();
+    await card.waitFor();
+    // Before playing there is no waveform anywhere, only a bare rail: nothing is fetched or drawn ahead of the player.
+    if (await card.locator('[data-waveform="ready"]').count()) throw new Error("waveform_before_playing");
+    await card.hover();
+    await card.getByRole("button", { name: /^播放 片尾环境音乐/ }).click();
+    await dock.locator('[data-waveform="ready"]').waitFor({ timeout: 20_000 });
+    await dock.getByRole("slider", { name: "播放进度" }).waitFor();
+    await card.locator('[data-waveform="ready"] canvas').first().waitFor();
+    try {
+      await card.locator("[data-row-button]").click();
+      const stage = page.locator("[data-asset-inspector] [data-audio-stage]");
+      await stage.locator("[data-audio-facts]").waitFor({ timeout: 15_000 });
+      await expect(stage.locator("[data-audio-facts]")).toContainText("峰值");
+      if (/LUFS/.test(await stage.locator("[data-audio-facts]").innerText().then((text) => text.replace("不是响度（LUFS）", "")))) throw new Error("levels_called_loudness");
+      await stage.getByRole("button", { name: "频谱" }).click();
+      await expect(stage.locator('[data-wave-view="spectrum"]')).toHaveCount(1);
+      await expect(stage.getByRole("button", { name: "频谱" })).toHaveAttribute("aria-pressed", "true");
+      const marks = stage.locator("[data-audio-marks]");
+      await expect(marks.locator('[data-mark="silence"]')).toHaveCount(1);
+      await expect(marks.locator('[data-mark="clip"]')).toHaveCount(1);
+      await marks.locator('button[data-mark="clip"]').click();
+      await page.waitForFunction(() => { const audio = document.querySelector<HTMLAudioElement>("audio[data-audio-player]"); return !!audio && audio.currentTime > 0.5 && audio.currentTime < 1.6; }, undefined, { timeout: 5_000 });
+      await stage.getByRole("button", { name: "波形" }).click();
+      await expect(stage.locator('[data-wave-view="wave"]')).toHaveCount(1);
+    } finally {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await dock.getByRole("button", { name: "关闭播放器" }).click().catch(() => undefined);
+      await dock.waitFor({ state: "detached" }).catch(() => undefined);
+    }
+  });
+  await check("v22 audio: the sound station lists its audio as rows that play in the global player", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/drama?studio=ep-01&station=sound`, { waitUntil: "domcontentloaded" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const station = page.locator("[data-station-inspector]");
+    await station.waitFor({ timeout: 30_000 });
+    const rows = station.locator("[data-station-audio] [data-station-audio-row]");
+    await rows.first().waitFor({ timeout: 30_000 });
+    // Not played yet: the row says so rather than drawing a shape.
+    await expect(rows.first().locator("[data-waveform]")).toContainText("播放后显示波形");
+    const dock = page.locator("[data-audio-dock]");
+    try {
+      await rows.first().getByRole("button", { name: /^播放 / }).click();
+      await dock.waitFor();
+      await rows.first().locator('[data-waveform="ready"]').waitFor({ timeout: 20_000 });
+      const key = await rows.first().getAttribute("data-station-audio-row") || "";
+      if (await station.locator(`ul[aria-label$="的结果"] [data-viewer-origin="${key.replace(/["\\]/g, "\\$&")}"]`).count()) throw new Error("audio_also_listed_as_a_tile");
+    } finally {
+      await dock.getByRole("button", { name: "关闭播放器" }).click().catch(() => undefined);
+      await dock.waitFor({ state: "detached" }).catch(() => undefined);
+      await page.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    }
+  });
+  await check("v22 pane: stepping keeps the list row in view and the section being read; M maximizes and restores; the width shows while resizing", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    const first = page.locator("tr[data-task]").first();
+    await first.waitFor();
+    await first.locator("[data-row-button]").click();
+    const inspector = page.locator('[data-task-inspector][data-inspector-layout="docked"]');
+    await inspector.waitFor();
+    const inView = () => page.evaluate(() => {
+      const row = document.querySelector<HTMLElement>("tr[data-selected]");
+      if (!row) return "no_selected_row";
+      const rect = row.getBoundingClientRect();
+      const top = document.querySelector<HTMLElement>("[data-topbar], header")?.getBoundingClientRect().bottom ?? 0;
+      return rect.top >= top - 1 && rect.bottom <= window.innerHeight + 1 ? "visible" : `out:${Math.round(rect.top)}:${Math.round(rect.bottom)}:${window.innerHeight}`;
+    });
+    for (let step = 0; step < 16; step += 1) {
+      const before = hashParams(page).get("task");
+      await page.keyboard.press("]");
+      await expect.poll(() => hashParams(page).get("task")).not.toBe(before);
+    }
+    await expect.poll(inView, { timeout: 5_000 }).toBe("visible");
+    // Read a later section, step, and the next task opens at that section when it has one.
+    const outline = inspector.getByRole("navigation", { name: "详情区块" });
+    const buttons = outline.getByRole("button");
+    if (await buttons.count() >= 2) {
+      await buttons.nth(1).click();
+      const reading = await outline.locator('[aria-current="location"]').textContent();
+      const id = await page.evaluate(() => {
+        const body = document.querySelector<HTMLElement>("[data-task-inspector] [data-inspector-body]")!;
+        let current = "";
+        for (const section of body.querySelectorAll<HTMLElement>("[data-inspector-section]")) {
+          if (section.getBoundingClientRect().top - body.getBoundingClientRect().top > 32) break;
+          current = section.getAttribute("data-inspector-section") || "";
+        }
+        return current;
+      });
+      if (!id) throw new Error(`outline_did_not_reach_section:${reading}`);
+      const before = hashParams(page).get("task");
+      await page.keyboard.press("]");
+      await expect.poll(() => hashParams(page).get("task")).not.toBe(before);
+      await expect.poll(() => page.evaluate((wanted) => {
+        const body = document.querySelector<HTMLElement>("[data-task-inspector] [data-inspector-body]")!;
+        const target = body.querySelector<HTMLElement>(`[data-inspector-section="${wanted}"]`);
+        if (!target) return body.scrollTop === 0 ? "top" : `scrolled_without_section:${body.scrollTop}`;
+        const offset = target.getBoundingClientRect().top - body.getBoundingClientRect().top;
+        return Math.abs(offset) <= 24 ? "kept" : `offset:${Math.round(offset)}`;
+      }, id), { timeout: 5_000 }).toMatch(/^(kept|top)$/);
+    }
+    // M maximizes like the header button, and again restores; typing in a field never does.
+    await inspector.locator("[data-inspector-body]").click({ position: { x: 4, y: 4 } }).catch(() => undefined);
+    await page.keyboard.press("m");
+    await page.locator('[data-task-inspector-maximized="true"]').waitFor();
+    await page.keyboard.press("m");
+    await expect(page.locator('[data-task-inspector-maximized="true"]')).toHaveCount(0);
+    await inspector.waitFor();
+    // The resize handle shows the width while it is keyed, and Enter goes back to the default.
+    const handle = inspector.locator("[data-inspector-resize]");
+    await handle.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(handle.locator("[data-inspector-width-readout]")).toHaveText(/^\d+ px/);
+    await page.keyboard.press("Enter");
+    await expect(handle.locator("[data-inspector-width-readout]")).toHaveText(/默认/);
+    await page.getByRole("button", { name: "关闭详情" }).click();
+  });
+  await check("v22 audio: with reduced motion the bars stay still while sound plays", async () => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const dock = page.locator("[data-audio-dock]");
+    try {
+      await page.setViewportSize({ width: 1440, height: 960 });
+      await page.goto(`${ui}/#/assets?kind=audio`, { waitUntil: "domcontentloaded" });
+      const card = page.locator('[data-page="assets"] [data-result]').filter({ hasText: "片尾环境音乐" }).first();
+      await card.waitFor();
+      await card.hover();
+      await card.getByRole("button", { name: /^播放 片尾环境音乐/ }).click();
+      await dock.locator('[data-waveform="ready"]').waitFor({ timeout: 20_000 });
+      await page.waitForFunction(() => { const audio = document.querySelector<HTMLAudioElement>("audio[data-audio-player]"); return !!audio && !audio.paused && audio.currentTime > 0.2; }, undefined, { timeout: 10_000 });
+      const moving = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("[data-audio-dock] .audio-eq > i")].some((bar) => bar.style.getPropertyValue("--level") !== "" || bar.getAnimations().length > 0));
+      if (moving) throw new Error("bars_move_under_reduced_motion");
+    } finally {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await dock.getByRole("button", { name: "关闭播放器" }).click().catch(() => undefined);
+      await dock.waitFor({ state: "detached" }).catch(() => undefined);
+    }
+  });
   await check("the viewer strip jumps to any result and compares two images side by side", async () => {
     await page.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
     const card = page.locator('[aria-label="资源大图网格"] [data-result]').first();
@@ -1074,13 +1671,129 @@ try {
     await page.keyboard.press("Escape");
     await viewer.waitFor({ state: "detached" });
   });
+  await check("viewer v2: it grows from the card, I shows what is already known, F goes full screen, Esc folds the info first, and closing leaves an inert copy", async () => {
+    await page.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
+    const card = page.locator('[aria-label="资源大图网格"] [data-result]').first();
+    await card.waitFor();
+    await card.hover();
+    await card.getByRole("button", { name: /^预览 / }).click();
+    const viewer = page.locator("[data-media-viewer]");
+    await viewer.locator(".viewer-stage img[data-loaded]").waitFor({ timeout: 15_000 });
+    if (await viewer.locator(".viewer-stage").getAttribute("data-origin") !== "true") throw new Error("viewer_did_not_grow_from_the_card");
+    if (await viewer.locator(".viewer-stage img").count() !== 1) throw new Error("stage_holds_more_than_one_img");
+    await page.keyboard.press("i");
+    const info = viewer.locator("[data-viewer-info]");
+    await info.getByText("规格", { exact: true }).waitFor();
+    await info.getByText("任务引用", { exact: true }).waitFor();
+    await expectAccessible(page, "viewer-info", "[data-media-viewer]");
+    await page.keyboard.press("f");
+    await expect.poll(() => page.evaluate(() => document.fullscreenElement?.hasAttribute("data-media-viewer") === true)).toBe(true);
+    await page.keyboard.press("f");
+    await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(info).toHaveCount(0);
+    await expect(viewer).toHaveCount(1);
+    // Stepping quickly past items reads none of them: only the one the viewer stops on asks for a preview grant.
+    const grants: string[] = [];
+    const count = (request: import("@playwright/test").Request) => { if (request.method() === "POST" && /\/artifacts\/[^/]+\/access/.test(request.url()) && (request.postData() || "").includes('"preview"')) grants.push(request.url()); };
+    page.on("request", count);
+    try {
+      for (let step = 0; step < 3; step += 1) await page.keyboard.press("ArrowRight");
+      await expect(viewer.locator(".viewer-count")).toHaveText(/^4 \//);
+      await viewer.locator(".viewer-stage img[data-loaded], .viewer-stage video").first().waitFor({ timeout: 15_000 });
+      await page.waitForTimeout(400);
+      if (grants.length !== 1) throw new Error(`quick_steps_asked_for_${grants.length}_grants`);
+    } finally {
+      page.off("request", count);
+    }
+    await page.evaluate(() => {
+      const seen = window as unknown as { ghost?: string };
+      new MutationObserver((_, observer) => {
+        const ghost = document.querySelector("[data-panel-ghost]");
+        if (!ghost) return;
+        seen.ghost = `${ghost.hasAttribute("inert")}|${ghost.getAttribute("aria-hidden")}|${ghost.querySelectorAll("[role], [aria-label], [data-media-viewer], [data-loaded]").length}`;
+        observer.disconnect();
+      }).observe(document.body, { childList: true });
+    });
+    await page.keyboard.press("Escape");
+    await viewer.waitFor({ state: "detached" });
+    await expect.poll(() => page.evaluate(() => (window as unknown as { ghost?: string }).ghost)).toBe("true|true|0");
+    await expect(page.locator("[data-panel-ghost]")).toHaveCount(0, { timeout: 2_000 });
+  });
+  await check("viewer by touch: a swipe steps, a pinch zooms, a double tap fits again and a pull down closes", async () => {
+    const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    try {
+      const phone = await touch.newPage();
+      await login(phone);
+      await phone.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
+      const first = phone.locator('[data-page="assets"] [data-result]').first();
+      await first.waitFor();
+      await first.getByRole("button", { name: /^预览 / }).click();
+      const viewer = phone.locator("[data-media-viewer]");
+      await viewer.locator(".viewer-stage img[data-loaded]").waitFor({ timeout: 15_000 });
+      const overflow = await phone.evaluate(() => [...document.querySelectorAll(".viewer-bar button")].some((button) => button.getBoundingClientRect().right > innerWidth + 1));
+      if (overflow) throw new Error("viewer_buttons_off_a_phone_screen");
+      const foot = viewer.locator(".viewer-foot");
+      // The footer's text for a phone; the desktop hints in it are hidden.
+      await expect(foot).toContainText(/^1 \//, { useInnerText: true });
+      const cdp = await touch.newCDPSession(phone);
+      const centre = async () => { const box = (await viewer.locator(".viewer-zoom").boundingBox())!; return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }; };
+      const drag = async (from: { x: number; y: number }, step: { x: number; y: number }, steps: number) => {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [from] });
+        for (let index = 1; index <= steps; index += 1) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: from.x + step.x * index, y: from.y + step.y * index }] }); await phone.waitForTimeout(16); }
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      };
+      let point = await centre();
+      await drag({ x: point.x + 100, y: point.y }, { x: -25, y: 0 }, 8);
+      await expect(foot).toContainText(/^2 \//, { timeout: 15_000, useInnerText: true });
+      await viewer.locator(".viewer-stage img[data-loaded]").waitFor({ timeout: 15_000 });
+      point = await centre();
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: point.x - 20, y: point.y, id: 1 }, { x: point.x + 20, y: point.y, id: 2 }] });
+      for (let index = 1; index <= 6; index += 1) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: point.x - 20 - index * 15, y: point.y, id: 1 }, { x: point.x + 20 + index * 15, y: point.y, id: 2 }] }); await phone.waitForTimeout(16); }
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      const scale = () => viewer.locator(".viewer-image").evaluate((image) => Number(/scale\(([\d.]+)\)/.exec((image as HTMLElement).style.transform)?.[1] || 1));
+      await expect.poll(scale).toBeGreaterThan(1.5);
+      for (let tap = 0; tap < 2; tap += 1) { await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] }); await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }); await phone.waitForTimeout(120); }
+      await expect.poll(scale).toBe(1);
+      await drag({ x: point.x, y: point.y - 100 }, { x: 0, y: 25 }, 10);
+      await expect(viewer).toHaveCount(0);
+      await expect.poll(() => new URL(phone.url()).hash.includes("preview=")).toBe(false);
+    } finally {
+      await touch.close();
+    }
+  });
+  await check("gallery: the tile size slider changes the columns, 按比例 keeps every picture's shape in rows of one height, and both pass axe", async () => {
+    await page.goto(`${ui}/#/assets?kind=image&view=gallery`, { waitUntil: "domcontentloaded" });
+    const grid = page.locator('[aria-label="资源大图网格"]');
+    await grid.locator("[data-result]").first().waitFor();
+    const columns = () => grid.evaluate((list) => { const tops = [...list.querySelectorAll(":scope > li:not([aria-hidden])")].slice(0, 16).map((item) => Math.round(item.getBoundingClientRect().top)); return tops.filter((top) => top === tops[0]).length; });
+    const slider = page.getByLabel("缩略图大小");
+    const before = await columns();
+    try {
+      await slider.fill("160");
+      await expect.poll(columns).toBeGreaterThan(before);
+      await page.getByRole("radiogroup", { name: "排列方式" }).getByRole("radio", { name: "按比例" }).click();
+      await expect(page.locator('[data-gallery-layout="justified"]')).toHaveCount(1);
+      await animationsDone(page);
+      const rows = await grid.evaluate((list) => {
+        const posters = [...list.querySelectorAll(":scope > li:not([aria-hidden]) [data-viewer-origin]")].map((poster) => poster.getBoundingClientRect());
+        const first = posters.filter((box) => Math.round(box.top) === Math.round(posters[0]!.top));
+        return { heights: first.map((box) => Math.round(box.height)), widths: new Set(first.map((box) => Math.round(box.width))).size };
+      });
+      if (rows.heights.length < 2 || Math.max(...rows.heights) - Math.min(...rows.heights) > 4 || rows.widths < 2) throw new Error(`justified_row:${JSON.stringify(rows)}`);
+      await expectAccessible(page, "assets-justified");
+    } finally {
+      await page.getByRole("radiogroup", { name: "排列方式" }).getByRole("radio", { name: "网格" }).click().catch(() => undefined);
+      await slider.fill("240").catch(() => undefined);
+    }
+  });
   // The same pages and overlays are scanned in both themes.
   const desktopAxe = async (theme: Theme) => {
     const tag = themed(theme);
-    for (const route of ["", "projects", "drama", "guide", "tasks", "assets", "requests", "reminders", "review", "services", "capabilities", "usage", "team"]) {
+    for (const route of ["", "projects", "drama", "drama?studio=ep-01", "activity", "guide", "tasks", "assets", "requests", "reminders", "review", "services", "capabilities", "usage", "team", "admin", "admin?tab=audit", "settings"]) {
       await page.goto(`${ui}/#/${route}`, { waitUntil: "domcontentloaded" });
       await settled(page);
-      await expectAccessible(page, tag(route || "home"));
+      await expectAccessible(page, tag(route.replace(/[?=&/]/g, "-") || "home"));
     }
     // The viewer and the palette are modal; the docked task inspector is part of the page.
     await page.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
@@ -1127,7 +1840,7 @@ try {
     for (const [where, route, open, ready, scope] of [
       ["asset-inspector", "assets", () => page.locator('[data-page="assets"] [data-result]').first().getByRole("button", { name: /打开 .* 详情/ }).click(), "[data-asset-inspector]", undefined],
       ["request-detail", "requests", () => page.locator("[data-request]").first().click(), '[role="dialog"]', '[role="dialog"]'],
-      ["drama-inspector", "drama", () => page.locator('li[data-episode="ep-02"] button').first().click(), "[data-drama-inspector]", undefined],
+      ["drama-inspector", "drama", () => page.locator('li[data-episode="ep-02"] [data-episode-open]').click(), "[data-drama-inspector]", undefined],
       ["catalog-inspector", "capabilities", async () => {
         await page.getByRole("tab", { name: /模型/ }).click();
         await page.getByRole("table", { name: "当前模型" }).locator("[data-row-button]").first().click();
@@ -1181,10 +1894,10 @@ try {
     const tag = themed(theme);
     await page.setViewportSize({ width: 390, height: 844 });
     try {
-      for (const route of ["", "tasks", "assets", "requests", "reminders", "drama"]) {
+      for (const route of ["", "tasks", "assets", "requests", "reminders", "drama", "drama?studio=ep-01", "activity"]) {
         await page.goto(`${ui}/#/${route}`, { waitUntil: "domcontentloaded" });
         await settled(page);
-        await expectAccessible(page, tag(`phone-${route || "home"}`));
+        await expectAccessible(page, tag(`phone-${route.replace(/[?=&/]/g, "-") || "home"}`));
       }
       await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
       await page.locator("[data-task]").first().waitFor();
@@ -1196,9 +1909,26 @@ try {
       await expectAccessible(page, tag("phone-filter-drawer"), '[role="dialog"]');
       await page.keyboard.press("Escape");
       await waitForNoDialogs(page);
-      await page.getByRole("button", { name: "打开导航" }).click();
+      // Phones have no drawer menu: the five entries sit in a capsule floating 12px from the sides and 10px above the bottom
+      // edge (and the safe area), always on screen.
+      const mainNav = page.getByRole("navigation", { name: "主导航" });
+      await expect(mainNav).toBeVisible();
+      await expect(mainNav.locator("[data-nav-entry]:visible")).toHaveCount(4);
+      await expect(mainNav.locator("[data-nav-more]")).toBeVisible();
+      const bar = await mainNav.boundingBox();
+      if (!bar || Math.round(bar.y + bar.height) !== 834 || Math.round(bar.x) !== 12 || Math.round(bar.x + bar.width) !== 378) throw new Error(`phone_capsule_misplaced:${JSON.stringify(bar)}`);
       await expectAccessible(page, tag("phone-navigation"));
-      await page.keyboard.press("Escape");
+      // 「更多」 holds the other entries in a sheet; picking one goes there and marks 更多 current.
+      await mainNav.locator("[data-nav-more]").click();
+      const moreSheet = page.getByRole("dialog", { name: "更多" });
+      await expect(moreSheet.locator("[data-nav-more-entry]")).toHaveCount(3);
+      await expectAccessible(page, tag("phone-nav-more"), '[role="dialog"]');
+      await moreSheet.locator('[data-nav-more-entry="settings"]').click();
+      await page.locator('[data-page="settings"]').waitFor();
+      await waitForNoDialogs(page);
+      await expect(mainNav.locator("[data-nav-more]")).toHaveAttribute("aria-current", "true");
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator("[data-task]").first().waitFor();
       await page.locator("[data-attention-count]").click();
       await page.getByRole("dialog", { name: "通知" }).waitFor();
       await expectAccessible(page, tag("phone-notifications"), '[role="dialog"]');
@@ -1210,6 +1940,205 @@ try {
   };
   await check("accessibility on a phone: folded lines, drawers, navigation and notifications pass axe", () => phoneAxe("light"));
   await check("accessibility on a phone in the dark theme: folded lines, drawers, navigation and notifications pass axe", () => inDarkTheme(page, () => phoneAxe("dark")));
+  await check("episode studio: the rail opens a station here, [ ] walk the stations, a decision opens its task over the station, a result opens the viewer here, shot cards open by keyboard, and Back closes one layer at a time", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    try {
+      await page.goto(`${ui}/#/drama?studio=ep-01`, { waitUntil: "domcontentloaded" });
+      const studio = page.locator("[data-episode-studio]");
+      const rail = studio.getByRole("list", { name: "制作线" });
+      await rail.locator("[data-station-pick]").first().waitFor({ timeout: 30_000 });
+      // The rail is one tab stop; arrow keys move along it.
+      const picks = rail.locator("[data-station-pick]");
+      if (await picks.count() !== 7 || await rail.locator('[data-station-pick][tabindex="0"]').count() !== 1) throw new Error("rail_not_seven_buttons_with_one_tab_stop");
+      await rail.locator('[data-station-pick="frames"]').focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(rail.locator('[data-station-pick="motion"]')).toBeFocused();
+      await page.keyboard.press("Enter");
+      const station = page.locator("[data-station-inspector]");
+      await station.waitFor();
+      await expect(station.getByRole("heading", { name: "动态", level: 2 })).toBeVisible();
+      if (hashParams(page).get("station") !== "motion") throw new Error("rail_did_not_write_the_station");
+      if (await page.locator('[data-page="drama"]').count() !== 1) throw new Error("station_left_the_studio");
+      // ] and [ walk the stations in the same panel.
+      await page.keyboard.press("]");
+      await expect.poll(() => hashParams(page).get("station")).toBe("sound");
+      await page.keyboard.press("[");
+      await expect.poll(() => hashParams(page).get("station")).toBe("motion");
+      // A decision opens its task over the station; Back brings the station back.
+      const decision = station.locator("[data-decision]").first();
+      await decision.waitFor();
+      await decision.click();
+      const task = page.locator("[data-task-inspector]");
+      await task.waitFor();
+      if (!hashParams(page).get("task") || hashParams(page).get("station") !== "motion") throw new Error("decision_task_not_over_the_station");
+      await page.goBack();
+      await task.waitFor({ state: "detached", timeout: 10_000 });
+      await station.waitFor();
+      // A result opens in the viewer right here, and Escape returns to the station.
+      await station.getByRole("button", { name: /^预览 / }).first().click();
+      const viewer = page.locator("[data-media-viewer]");
+      await viewer.waitFor();
+      if (await page.locator('[data-page="drama"]').count() !== 1 || !hashParams(page).get("preview")) throw new Error("result_left_the_studio");
+      await page.keyboard.press("Escape");
+      await viewer.waitFor({ state: "detached" });
+      await station.waitFor();
+      await expectAccessible(page, "studio-station");
+      await page.goBack();
+      await station.waitFor({ state: "detached", timeout: 10_000 });
+      if (hashParams(page).get("studio") !== "ep-01") throw new Error("back_left_the_studio");
+      // Shot cards: arrow keys move between them, Enter opens the shot here, ] goes to the next shot.
+      const cards = studio.locator("[data-shot-board] [data-row-button]");
+      await cards.first().focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(cards.nth(1)).toBeFocused();
+      await page.keyboard.press("Enter");
+      const shot = page.locator("[data-shot-inspector]");
+      await shot.waitFor();
+      const first = hashParams(page).get("shot");
+      await page.keyboard.press("]");
+      await expect.poll(() => hashParams(page).get("shot")).not.toBe(first);
+      await expectAccessible(page, "studio-shot");
+      await page.keyboard.press("Escape");
+      await shot.waitFor({ state: "detached" });
+    } finally {
+      await page.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    }
+  });
+  await check("episode production: Scaena's summary counts the look station and names cut facts, delivery stays 待接通, an episode Scaena has no summary for keeps its gaps, and bound tasks say where the link came from", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/drama?studio=ep-01`, { waitUntil: "domcontentloaded" });
+    const look = page.locator('article[data-station="look"]');
+    await look.waitFor({ timeout: 30_000 });
+    await expect(look).toHaveAttribute("data-state", "observed", { timeout: 30_000 });
+    await expect(look.locator('[data-fact="references"]')).toContainText("12");
+    const cut = page.locator('article[data-station="cut"]');
+    for (const part of ["edit", "review", "assembly"]) await expect(cut.locator(`[data-fact="${part}"]`)).toBeVisible();
+    // The gap line names only what Scaena could not answer: delivery, not edit or review.
+    await expect(cut).toContainText(/待接通：[^。]*交付/);
+    if (/待接通：[^。]*(剪辑|审阅采用)/.test(await cut.innerText())) throw new Error("answered_parts_still_listed_as_gaps");
+    if (await cut.getByText("已完成闭环").count()) throw new Error("cut_claims_a_closed_loop");
+    // Sonora's task counts here only because Scaena recorded the Sonora episode for ep-01.
+    await expect(page.locator('article[data-station="sound"] [data-linked-by="scaena_binding"]')).toBeVisible();
+    await page.goto(`${ui}/#/drama?studio=ep-03`, { waitUntil: "domcontentloaded" });
+    const missing = page.locator('article[data-station="cut"]');
+    await missing.waitFor({ timeout: 30_000 });
+    await expect(missing).toContainText(/待接通：[^。]*剪辑[^。]*审阅采用[^。]*交付/, { timeout: 30_000 });
+    if (await missing.locator("[data-station-facts]").count()) throw new Error("unsupported_summary_rendered_facts");
+    if (await page.locator('article[data-station="look"]').getAttribute("data-state") === "observed") throw new Error("unsupported_summary_counted_look");
+    if (await page.locator("[data-linked-by]").count()) throw new Error("unbound_episode_linked_tasks");
+  });
+  await check("production time: the studio band sums the owners' timing with its coverage, keeps Scaena's episode total apart, opens a station's 耗时 section, the drama page lists episodes by time, and an episode without Scaena's total says 待接通", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/drama?studio=ep-01`, { waitUntil: "domcontentloaded" });
+    const band = page.locator("[data-time-band]");
+    await band.waitFor({ timeout: 30_000 });
+    await expect(band).toContainText(/\d+\/\d+ 带计时/);
+    await expect(band.locator('[data-owner-total="observed"]')).toContainText("Scaena 汇总");
+    // A run waiting for a person is still going, so the total ticks; the hero says so in one line.
+    if (!await band.locator("[data-time-live]").count()) throw new Error("live_total_not_ticking");
+    await expect(page.locator("[data-time-hero]")).toContainText("已计时");
+    for (const id of ["story", "look", "board"]) if (await band.locator(`[data-time-row="${id}"]`).count()) throw new Error(`untimed_station_drawn_${id}`);
+    await expect(band.locator("[data-time-untimed]")).toContainText("待接通");
+    const bar = band.locator('[data-time-row="motion"] [role="img"]');
+    if (!/执行 .+；\d+\/\d+ 个任务带计时/.test(await bar.getAttribute("aria-label") || "")) throw new Error("time_bar_without_words");
+    await band.getByRole("radio", { name: "表" }).click();
+    await expect(band.getByRole("table", { name: "各站耗时" })).toBeVisible();
+    await band.getByRole("radio", { name: "图" }).click();
+    await band.locator('[data-time-row="motion"] button').click();
+    const inspector = page.locator("[data-station-inspector]");
+    await expect(inspector.locator("[data-station-time-section]")).toBeVisible({ timeout: 15_000 });
+    await expect(inspector.getByRole("list", { name: "最慢的任务" }).locator("li")).not.toHaveCount(0);
+    await expectAccessible(page, "studio-time");
+    await page.keyboard.press("Escape");
+    await page.goto(`${ui}/#/drama?studio=ep-03`, { waitUntil: "domcontentloaded" });
+    await expect(page.locator('[data-time-band] [data-owner-total="missing"]')).toContainText("待接通", { timeout: 30_000 });
+    await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
+    const panel = page.locator("[data-time-panel]");
+    await panel.waitFor({ timeout: 30_000 });
+    await expect(panel).toContainText("已读任务范围内");
+    await expect(panel.locator('[data-time-row="unattributed"]')).toContainText("未标注剧集");
+    await panel.locator('[data-time-row] button').first().click();
+    await expect.poll(() => hashParams(page).get("studio"), { timeout: 15_000 }).toBeTruthy();
+  });
+  await check("task review: the frames station and the task detail show Eikona's own decision, read-only, and never a decision made here", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/drama?studio=ep-01`, { waitUntil: "domcontentloaded" });
+    const frames = page.locator('article[data-station="frames"]');
+    await frames.waitFor({ timeout: 30_000 });
+    // run-2398-review counts here through Scaena's binding; the fixture Eikona keeps both of its candidates undecided.
+    await expect(frames.locator("[data-owner-review]")).toHaveText("Eikona 审阅记录：1 个任务待挑选", { timeout: 30_000 });
+    await expect(frames.locator('[data-decision="pick_result"]')).toHaveCount(1);
+    await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-task="run-2398-review"] button').click();
+    const review = page.locator('[data-task-inspector] [data-task-review="observed"]');
+    await review.waitFor({ timeout: 30_000 });
+    await expect(review).toContainText("还没有决定");
+    await expect(review).toContainText("2 个");
+    await expect(review).toContainText("这里只读");
+    if (await review.getByRole("button").count()) throw new Error("review_summary_offers_an_action");
+    await page.keyboard.press("Escape");
+  });
+  await check("reduced motion: the panel, its closing copy, the viewer and the station ring only fade, within 120 ms, or just switch", async () => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    try {
+      // Every animation that starts on these surfaces is recorded as it starts: how long, and whether anything moves.
+      const watch = () => page.evaluate(() => {
+        const seen: { what: string; duration: number; moves: boolean }[] = [];
+        (window as unknown as { motion: typeof seen }).motion = seen;
+        const surfaces = "[data-task-inspector], [data-panel-ghost], .viewer-stage, .viewer-backdrop, .viewer-ambient";
+        new MutationObserver((records) => {
+          for (const record of records) for (const node of record.addedNodes) {
+            if (!(node instanceof Element)) continue;
+            for (const target of [node, ...node.querySelectorAll(surfaces)].filter((element) => element.matches(surfaces))) {
+              for (const animation of target.getAnimations()) {
+                const effect = animation.effect as KeyframeEffect;
+                const frames = effect.getKeyframes();
+                const shapes = new Set(frames.map((frame) => String(frame.transform ?? "none")));
+                seen.push({ what: target.matches("[data-panel-ghost]") ? "copy" : target.matches("[data-task-inspector]") ? "panel" : target.classList[0] || "?", duration: Number(effect.getComputedTiming().duration), moves: shapes.size > 1 });
+              }
+            }
+          }
+        }).observe(document.body, { childList: true, subtree: true });
+      });
+      const seen = () => page.evaluate(() => (window as unknown as { motion: { what: string; duration: number; moves: boolean }[] }).motion);
+      await page.goto(`${ui}/#/tasks`, { waitUntil: "domcontentloaded" });
+      await page.locator('[data-task="run-2398-review"] button').waitFor();
+      await watch();
+      await page.locator('[data-task="run-2398-review"] button').click();
+      const panel = page.locator("[data-task-inspector]");
+      await panel.waitFor();
+      await panel.getByRole("button", { name: "关闭详情" }).click();
+      await expect(page.locator("[data-panel-ghost]")).toHaveCount(0, { timeout: 2_000 });
+      const recorded = await seen();
+      await page.goto(`${ui}/#/assets?kind=image`, { waitUntil: "domcontentloaded" });
+      const card = page.locator('[aria-label="资源大图网格"] [data-result]').first();
+      await card.waitFor();
+      await watch();
+      await card.hover();
+      await card.getByRole("button", { name: /^预览 / }).click();
+      const viewer = page.locator("[data-media-viewer]");
+      await viewer.locator(".viewer-stage img[data-loaded]").waitFor({ timeout: 15_000 });
+      await page.keyboard.press("Escape");
+      await viewer.waitFor({ state: "detached" });
+      await expect(page.locator("[data-panel-ghost]")).toHaveCount(0, { timeout: 2_000 });
+      recorded.push(...await seen());
+      const kinds = new Set(recorded.map((entry) => entry.what));
+      for (const kind of ["panel", "copy", "viewer-stage", "viewer-backdrop"]) if (!kinds.has(kind)) throw new Error(`reduced_motion_not_seen:${kind}:${JSON.stringify(recorded)}`);
+      const loud = recorded.filter((entry) => entry.moves || entry.duration > 120);
+      if (loud.length) throw new Error(`reduced_motion_moves_or_lingers:${JSON.stringify(loud)}`);
+      // The station ring is shown at once rather than faded.
+      await page.goto(`${ui}/#/drama?studio=ep-01`, { waitUntil: "domcontentloaded" });
+      await page.locator('[data-station-pick="frames"]').click();
+      await page.locator("#station-card-frames[data-flash]").waitFor();
+      // Reduced motion still lets a 0.01 ms transition start; read once it has run.
+      await page.waitForTimeout(100);
+      const ring = await page.locator("#station-card-frames").evaluate((element) => { const style = getComputedStyle(element, "::after"); return { name: style.animationName, opacity: style.opacity }; });
+      if (ring.name !== "none" || ring.opacity !== "1") throw new Error(`station_ring_animated:${JSON.stringify(ring)}`);
+    } finally {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await page.goto(`${ui}/#/home`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    }
+  });
   await check("history: Back closes the topmost overlay, a closed overlay leaves no extra Back step, and the nested viewer returns focus to its opener", async () => {
     try {
       // Each surface is entered from home: Back with the overlay open must close it and stay on the page; after closing it
@@ -1227,7 +2156,9 @@ try {
         ["asset-viewer", "assets?kind=image", async () => { const card = page.locator('[aria-label="资源大图网格"] [data-result]').first(); await card.hover(); await card.getByRole("button", { name: /^预览 / }).click(); }, "[data-media-viewer]"],
         ["request-detail", "requests", () => page.locator("[data-request]").first().click(), '[role="dialog"]'],
         ["catalog-inspector", "capabilities", async () => { await page.getByRole("tab", { name: /模型/ }).click(); await page.getByRole("table", { name: "当前模型" }).locator("[data-row-button]").first().click(); }, "[data-catalog-inspector]"],
-        ["drama-inspector", "drama", () => page.locator('li[data-episode="ep-02"] button').first().click(), "[data-drama-inspector]"],
+        ["drama-inspector", "drama", () => page.locator('li[data-episode="ep-02"] [data-episode-open]').click(), "[data-drama-inspector]"],
+        ["studio-station", "drama?studio=ep-01", () => page.locator('[data-station-pick="frames"]').click(), "[data-station-inspector]"],
+        ["studio-shot", "drama?studio=ep-01", () => page.locator("[data-shot-board] [data-row-button]").first().click(), "[data-shot-inspector]"],
         ["work-item", "", () => page.locator("[data-work-queue-count] button").first().click(), "[data-inspector-body]"],
       ];
       for (const [name, route, open, overlay] of surfaces) {
@@ -1296,7 +2227,8 @@ try {
     const before = requests.length;
     await dialog.getByRole("button", { name: "重新读取原任务" }).click();
     await page.getByText(/已重新读取原任务|原任务状态已更新/).waitFor();
-    const issued = requests.slice(before).filter((request) => request.method !== "GET");
+    // The reminders' background sync posts on its own timer and may land in this window; it is not part of the re-read.
+    const issued = requests.slice(before).filter((request) => request.method !== "GET" && !request.path.endsWith("/notifications/sync"));
     if (issued.length) throw new Error("re-read issued a non-GET request: " + issued.map((request) => request.path).join(","));
     await page.keyboard.press("Escape");
   });
@@ -1315,7 +2247,7 @@ try {
   await check("requests keep batch and summary separate with per-source coverage", async () => {
     await page.goto(`${ui}/#/requests`, { waitUntil: "domcontentloaded" });
     await page.getByText("全范围汇总").waitFor();
-    await page.getByText(/当前批次 \d+ 条/).waitFor();
+    await page.getByText(/显示 1–\d+ \/ \d+ 条已读取请求/).waitFor();
     await page.getByText("Sonora").first().waitFor();
     await shot(page, "requests");
   });
@@ -1332,15 +2264,41 @@ try {
     await read.click();
     await dialog.getByText("实际生效的业务输入").waitFor();
     await page.keyboard.press("Escape");
-    await page.goto(`${ui}/#/team`, { waitUntil: "domcontentloaded" });
-    await page.getByRole("tab", { name: "审计" }).click();
-    await page.getByText("读取请求正文").first().waitFor();
-    await page.getByText("申请结果句柄").first().waitFor();
+    // The audit log moved to 成员与管理; its old address opens the same tab.
+    await page.goto(`${ui}/#/audit`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("tab", { name: "审计", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("row").filter({ hasText: "读取请求正文" }).first().waitFor();
+    await page.getByRole("row").filter({ hasText: "申请结果句柄" }).first().waitFor();
   });
   await check("personal organization directory rejects service credential fallback", async () => {
-    await page.getByRole("tab", { name: "成员" }).click();
+    await page.goto(`${ui}/#/admin?tab=members`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("tab", { name: "工具成员", exact: true })).toHaveAttribute("aria-selected", "true");
     await page.getByText(/所有成员来源都不可读/).waitFor();
     await expect(page.getByText("林舟", { exact: true })).toHaveCount(0);
+  });
+  await check("the audit log filters by outcome and keeps the filter in the address", async () => {
+    await page.goto(`${ui}/#/admin?tab=audit`, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-page="admin"] tbody tr').first().waitFor();
+    await page.getByLabel("结果", { exact: true }).selectOption("denied");
+    await expect.poll(() => new URL(page.url()).hash).toContain("audit-outcome=denied");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByLabel("结果", { exact: true })).toHaveValue("denied");
+    await expect(page.locator('[data-page="admin"] tbody tr').filter({ hasText: "成功" })).toHaveCount(0);
+  });
+  await check("this fixture has no file to write accounts to, and the accounts tab says so instead of offering to create one", async () => {
+    await page.goto(`${ui}/#/admin`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("tab", { name: "账号", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByText(/服务端没有可写的配置文件/).waitFor();
+    await expect(page.getByRole("button", { name: "新建账号" })).toBeDisabled();
+    await page.locator("[data-legacy-owner]").getByText("用命令行管理").waitFor();
+    // The team page is the signed-in person's own account now; the owner's key is the command line's.
+    await page.goto(`${ui}/#/team`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-own-key]").getByText(/只能用命令行管理/).waitFor();
+    await expect(page.getByRole("button", { name: "重置我的访问 Key" })).toBeDisabled();
+    // The old team tab links land on their new tab.
+    await page.goto(`${ui}/#/team?tab=collaboration`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("tab", { name: "组织与团队", exact: true })).toHaveAttribute("aria-selected", "true");
+    expect(new URL(page.url()).hash).toContain("/admin?tab=organizations");
   });
   await check("usage keeps unknown cost unknown and currencies separate", async () => {
     await page.goto(`${ui}/#/usage`, { waitUntil: "domcontentloaded" });
@@ -1427,7 +2385,8 @@ try {
   await check("closing the inspector returns focus to the episode row and Escape closes it", async () => {
     await page.goto(`${ui}/#/drama`, { waitUntil: "domcontentloaded" });
     await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
-    const row = page.locator('li[data-episode="ep-02"] button');
+    // The card also carries 进入制作线; its title is the button that opens the quick look.
+    const row = page.locator('li[data-episode="ep-02"] [data-episode-open]');
     await row.click();
     await page.locator("[data-drama-inspector]").waitFor();
     await page.keyboard.press("Escape");
@@ -1442,7 +2401,7 @@ try {
       await page.locator("li[data-episode]").first().waitFor({ timeout: 20_000 });
       const widths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
       if (widths.scroll > widths.inner) throw new Error(`overflow:${widths.scroll}>${widths.inner}`);
-      await page.locator('li[data-episode="ep-02"] button').click();
+      await page.locator('li[data-episode="ep-02"] [data-episode-open]').click();
       await page.getByRole("dialog", { name: "剧集详情" }).waitFor();
       await shot(page, "drama-phone-inspector");
     } finally {
@@ -1618,6 +2577,8 @@ try {
         // A cold document under the dev server compiles every module again; on a busy machine that alone can pass 30s.
         await probe.locator('[data-page="home"]').waitFor({ timeout: 60_000 });
         await expect.poll(() => aborted, { timeout: 15_000 }).toBeGreaterThan(0);
+        // Usage is a tab under 连接; the entry opens its first tab, then the usage tab loads the failing chunk.
+        await probe.locator('[data-nav-entry="connect"]').click();
         await probe.locator('[data-nav="usage"]').click();
         if (mode === "once") {
           await probe.locator('[data-page="usage"]').waitFor({ timeout: 30_000 });
@@ -1643,12 +2604,12 @@ try {
       await page.getByRole("menuitem", { name: "退出登录" }).click();
       const notice = page.getByRole("status").filter({ hasText: "退出登录没有成功，会话仍然有效" });
       await notice.waitFor({ timeout: 10_000 });
-      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_without_the_server");
+      if (await page.getByText("回到你的创作台").count()) throw new Error("signed_out_without_the_server");
       await page.getByRole("button", { name: /当前身份/ }).waitFor();
       // Retrying while the server still refuses ends the same way: still signed in, with a new message to try again.
       await notice.getByRole("button", { name: "重试" }).click();
       await page.getByRole("status").filter({ hasText: "退出登录没有成功，会话仍然有效" }).waitFor({ timeout: 10_000 });
-      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_by_a_failed_retry");
+      if (await page.getByText("回到你的创作台").count()) throw new Error("signed_out_by_a_failed_retry");
     } finally {
       await context.unroute(logoutRoute);
       // The browser reports a refused request to the console a moment after the response; keep expecting it until it has.
@@ -1681,7 +2642,7 @@ try {
       if (sessionReads() === before) throw new Error("session_not_read_again");
       // Still the same signed-in workspace, and the refusal was not reported as a failed sign-out or as a lack of permission.
       await page.getByRole("button", { name: /当前身份/ }).waitFor();
-      if (await page.getByText("进入团队工作空间").count()) throw new Error("signed_out_by_a_stale_token");
+      if (await page.getByText("回到你的创作台").count()) throw new Error("signed_out_by_a_stale_token");
       if (await page.getByText("退出登录没有成功").count()) throw new Error("stale_token_reported_as_failed_sign_out");
       if (await page.getByText("当前身份无权访问").count()) throw new Error("stale_token_reported_as_forbidden");
     } finally {
@@ -1727,7 +2688,7 @@ try {
   await check("logout clears the workspace", async () => {
     await page.getByRole("button", { name: /当前身份/ }).click();
     await page.getByRole("menuitem", { name: "退出登录" }).click();
-    await page.getByText("进入团队工作空间").waitFor();
+    await page.getByText("回到你的创作台").waitFor();
     if (await page.evaluate(() => Object.keys(sessionStorage).some((key) => key.startsWith("yeisme.recent.v1:")))) throw new Error("recent_items_survived_logout");
   });
   await check("no provider submit, cancel or unexpected mutation", async () => {
@@ -1791,7 +2752,7 @@ try {
     await degradedPage.locator("li[data-episode]").first().waitFor({ timeout: 30_000 });
     const text = await degradedPage.locator("main").innerText();
     if (!text.includes("读取失败")) throw new Error("read_failure_not_shown");
-    if (text.includes("已推进到制作拆解")) throw new Error("outage_reported_as_progress");
+    if (text.includes("前期走完了")) throw new Error("outage_reported_as_progress");
     if (await degradedPage.locator("li[data-episode] ol li[data-state='accepted']").count()) throw new Error("accepted_state_invented_during_outage");
     await shot(degradedPage, "degraded-drama");
     if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
@@ -1811,7 +2772,7 @@ try {
           const main = document.getElementById("main")!;
           return {
             stacks: [...main.querySelectorAll(".notice-stack")].filter(shown).map((element) => Math.round(element.getBoundingClientRect().height)),
-            causes: [...main.querySelectorAll("[data-notice]")].filter((element) => shown(element) && /个连接暂不可读|数据可能已过期/.test(element.textContent || "")).length,
+            causes: [...main.querySelectorAll("[data-notice]")].filter((element) => shown(element) && /个连接暂不可读|数据有点旧/.test(element.textContent || "")).length,
           };
         });
         const where = `${route || "home"}@${width}`;
@@ -1837,11 +2798,12 @@ try {
     await degradedPage.locator("[data-source-status]").click();
     const popover = degradedPage.getByRole("dialog").filter({ hasText: "任务连接" });
     // Two connections are refused in this scope (an old Eikona project and an Anatomia key without observer scope).
-    await popover.getByText("需要 owner 授权").first().waitFor();
+    await popover.getByText("需要工具授权").first().waitFor();
     await shot(degradedPage, "degraded-source-status");
     await popover.getByRole("button", { name: "查看服务与连接" }).click();
     await degradedPage.locator('[data-page="services"]').waitFor({ timeout: 15_000 });
-    if (await popover.count()) throw new Error("source_popover_left_open_after_navigation");
+    // It closes with the navigation and fades out in 160ms.
+    await expect(popover).toHaveCount(0, { timeout: 2_000 }).catch(() => { throw new Error("source_popover_left_open_after_navigation"); });
     if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
   });
   const degradedAxe = async (theme: Theme) => {
@@ -1888,13 +2850,13 @@ try {
     try {
       // Both task lanes must fail; the history lane is served from cache for up to 30 s, and backoff spaces cycles.
       await expect(status).toHaveAttribute("data-source-status", "stale", { timeout: 90_000 });
-      await degradedPage.locator(".notice-stack [data-notice]", { hasText: "数据可能已过期" }).waitFor();
+      await degradedPage.locator(".notice-stack [data-notice]", { hasText: "数据有点旧" }).waitFor();
       if (await results.count() !== before) throw new Error(`stale_batch_dropped:${before}->${await results.count()}`);
       await shot(degradedPage, "degraded-stale-assets");
     } finally {
       await degradedPage.unroute(blocked);
     }
-    await degradedPage.locator(".notice-stack [data-notice]", { hasText: "数据可能已过期" }).getByRole("button", { name: "重新读取" }).click();
+    await degradedPage.locator(".notice-stack [data-notice]", { hasText: "数据有点旧" }).getByRole("button", { name: "重新读取" }).click();
     await expect(status).toHaveAttribute("data-source-status", "partial", { timeout: 30_000 });
     if (await results.count() !== before) throw new Error("batch_changed_after_recovery");
     if (degradedErrors.length) throw new Error(degradedErrors.join(" | "));
@@ -2028,54 +2990,68 @@ try {
     // In view, a minute passes and nothing is shown.
     await aMinute();
     if ((await shownNotices()).length) throw new Error("notified_while_in_view");
-    // Out of view, the server's background observation writes a burst of new reminders.
-    const before = new Set((await listed()).map((row) => row.id));
-    await hidePage(true);
-    const cycle = await observeNow();
-    if (cycle.opened < 5) throw new Error(`expected_a_burst:${cycle.opened}`);
-    await aMinute();
-    await deliveryPage.waitForFunction(() => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > 0, undefined, { timeout: 15_000 });
-    await deliveryPage.waitForTimeout(500);
-    const fresh = unreadNow(await listed()).filter((row) => !before.has(row.id));
-    const shown = await shownNotices();
-    const individual = shown.filter((notice) => notice.tag !== "reminders-summary");
-    const summary = shown.filter((notice) => notice.tag === "reminders-summary");
-    // At most three of them, one each; the rest of the burst is one summary that says how many.
-    if (individual.length !== Math.min(3, fresh.length) || new Set(individual.map((notice) => notice.tag)).size !== individual.length) throw new Error(`individual:${individual.length} of ${fresh.length}`);
-    if (fresh.length > 3 ? summary.length !== 1 || !summary[0].body.startsWith(`另有 ${fresh.length - 3} 条新提醒`) : summary.length !== 0) throw new Error(`summary:${JSON.stringify(summary)}`);
-    for (const notice of individual) if (!fresh.some((row) => row.id === notice.tag)) throw new Error(`not_a_new_reminder:${notice.tag}`);
-    // Names and counts only: no reminder's own title, no task text.
-    for (const notice of shown) for (const row of fresh) if (row.title && (notice.body.includes(row.title) || notice.title.includes(row.title))) throw new Error(`title_in_notification:${row.title}`);
-    if (!shown.every((notice) => notice.title === "控制中心提醒" && /共 \d+ 条未读/.test(notice.body))) throw new Error(`notification_shape:${JSON.stringify(shown)}`);
-    // Another minute, or two, shows nothing again.
-    await aMinute();
-    await aMinute();
-    if ((await shownNotices()).length !== shown.length) throw new Error("notified_twice");
-    // One new reminder gives exactly one notification, with the reminder's own tag. DriveBridge's token comes within a day of running out.
-    const known = new Set((await listed()).map((row) => row.id));
-    const next = await observeNow(2.5);
-    if (next.opened !== 1) throw new Error(`expected_one_new_reminder:${next.opened}`);
-    await aMinute();
-    await deliveryPage.waitForFunction((count) => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > count, shown.length, { timeout: 15_000 });
-    const added = (await shownNotices()).slice(shown.length);
-    const newest = (await listed()).filter((row) => !known.has(row.id));
-    if (added.length !== 1 || newest.length !== 1 || added[0].tag !== newest[0].id || !added[0].body.startsWith("DriveBridge · 凭据")) throw new Error(`one_notification:${JSON.stringify(added)} for ${JSON.stringify(newest.map((row) => row.title))}`);
-    await aMinute();
-    if ((await shownNotices()).length !== shown.length + 1) throw new Error("new_reminder_notified_twice");
-    // What arrives while the page is in view is seen there: it does not notify later, when the page is hidden again.
-    await hidePage(false);
-    const seen = await observeNow(2);
-    if (seen.opened !== 1) throw new Error(`expected_one_more_reminder:${seen.opened}`);
-    const arrived = (await listed()).find((row) => row.state === "unread" && !row.recovered_at && /已过期/.test(row.title));
-    if (!arrived) throw new Error("expected_the_expired_reminder");
-    // The page has seen it once it is in the baseline the page keeps; a read still on its way would otherwise land after the page was hidden.
-    await untilBaseline(arrived.id, true);
-    await hidePage(true);
-    await aMinute();
-    await aMinute();
-    const late = (await shownNotices()).slice(shown.length + 1);
-    if (late.length) throw new Error(`notified_for_what_was_in_view:${JSON.stringify(late)}`);
-    await hidePage(false);
+    try {
+      // Out of view, the server's background observation writes a burst of new reminders.
+      const before = new Set((await listed()).map((row) => row.id));
+      await hidePage(true);
+      const cycle = await observeNow();
+      if (cycle.opened < 5) throw new Error(`expected_a_burst:${cycle.opened}`);
+      await aMinute();
+      await deliveryPage.waitForFunction(() => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > 0, undefined, { timeout: 15_000 });
+      await deliveryPage.waitForTimeout(500);
+      const fresh = unreadNow(await listed()).filter((row) => !before.has(row.id));
+      const shown = await shownNotices();
+      const individual = shown.filter((notice) => notice.tag !== "reminders-summary");
+      const summary = shown.filter((notice) => notice.tag === "reminders-summary");
+      // At most three of them, one each; the rest of the burst is one summary that says how many.
+      if (individual.length !== Math.min(3, fresh.length) || new Set(individual.map((notice) => notice.tag)).size !== individual.length) throw new Error(`individual:${individual.length} of ${fresh.length}`);
+      if (fresh.length > 3 ? summary.length !== 1 || !summary[0].body.startsWith(`另有 ${fresh.length - 3} 条新提醒`) : summary.length !== 0) throw new Error(`summary:${JSON.stringify(summary)}`);
+      for (const notice of individual) if (!fresh.some((row) => row.id === notice.tag)) throw new Error(`not_a_new_reminder:${notice.tag}`);
+      // Names and counts only: no reminder's own title, no task text.
+      for (const notice of shown) for (const row of fresh) if (row.title && (notice.body.includes(row.title) || notice.title.includes(row.title))) throw new Error(`title_in_notification:${row.title}`);
+      if (!shown.every((notice) => notice.title === "控制中心提醒" && /共 \d+ 条未读/.test(notice.body))) throw new Error(`notification_shape:${JSON.stringify(shown)}`);
+      // Another minute, or two, shows nothing again.
+      await aMinute();
+      await aMinute();
+      if ((await shownNotices()).length !== shown.length) throw new Error("notified_twice");
+      // Drain the rest of the initial 10-connection fixture pass and settle the 2h task-liveness reminders while
+      // visible (0.1 days keeps DriveBridge in 7d), so `observeNow(2.4)` (2.5 days total) isolates the 1-day expiry.
+      await hidePage(false);
+      for (let step = 0; step < 3; step += 1) {
+        const extra = await observeNow();
+        if (extra.opened === 0) break;
+      }
+      await observeNow(0.1);
+      for (const row of unreadNow(await listed())) await untilBaseline(row.id, true);
+      await hidePage(true);
+      // One new reminder gives exactly one notification, with the reminder's own tag. DriveBridge's token comes within a day of running out.
+      const known = new Set((await listed()).map((row) => row.id));
+      const shownBeforeExpiry = (await shownNotices()).length;
+      const next = await observeNow(2.4);
+      if (next.opened !== 1) throw new Error(`expected_one_new_reminder:${next.opened}`);
+      await aMinute();
+      await deliveryPage.waitForFunction((count) => (window as unknown as { __notify: { shown: unknown[] } }).__notify.shown.length > count, shownBeforeExpiry, { timeout: 15_000 });
+      const added = (await shownNotices()).slice(shownBeforeExpiry);
+      const newest = (await listed()).filter((row) => !known.has(row.id));
+      if (added.length !== 1 || newest.length !== 1 || added[0].tag !== newest[0].id || !added[0].body.startsWith("DriveBridge · 凭据")) throw new Error(`one_notification:${JSON.stringify(added)} for ${JSON.stringify(newest.map((row) => row.title))}`);
+      await aMinute();
+      if ((await shownNotices()).length !== shownBeforeExpiry + 1) throw new Error("new_reminder_notified_twice");
+      // What arrives while the page is in view is seen there: it does not notify later, when the page is hidden again.
+      await hidePage(false);
+      const seen = await observeNow(2);
+      if (seen.opened !== 1) throw new Error(`expected_one_more_reminder:${seen.opened}`);
+      const arrived = (await listed()).find((row) => row.state === "unread" && !row.recovered_at && /已过期/.test(row.title));
+      if (!arrived) throw new Error("expected_the_expired_reminder");
+      // The page has seen it once it is in the baseline the page keeps; a read still on its way would otherwise land after the page was hidden.
+      await untilBaseline(arrived.id, true);
+      await hidePage(true);
+      await aMinute();
+      await aMinute();
+      const late = (await shownNotices()).slice(shownBeforeExpiry + 1);
+      if (late.length) throw new Error(`notified_for_what_was_in_view:${JSON.stringify(late)}`);
+    } finally {
+      await hidePage(false);
+    }
     if (deliveryErrors.length) throw new Error(deliveryErrors.join(" | "));
   });
   await check("reminders: a snoozed reminder leaves the count and comes back, an archived one is reopened, and they say where they came from", async () => {

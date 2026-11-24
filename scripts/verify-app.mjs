@@ -51,7 +51,7 @@ async function check(name, fn) {
 async function waitForShell() {
   try {
     // The boot splash in index.html also says "Yeisme"; the shell only counts once React has dismissed it.
-    await page.waitForFunction(() => !document.getElementById("boot-splash") && /Yeisme|进入团队工作空间/.test(document.body?.innerText || ""), undefined, { timeout: 20_000 });
+    await page.waitForFunction(() => !document.getElementById("boot-splash") && /Yeisme|回到你的创作台/.test(document.body?.innerText || ""), undefined, { timeout: 20_000 });
   } catch {
     const body = (await page.locator("body").innerText({ timeout: 2000 }).catch(() => "")).trim().slice(0, 160);
     throw new Error(`shell_not_rendered: body=${JSON.stringify(body)} page_errors=${errors.length}`);
@@ -66,7 +66,7 @@ try {
   await check("formal root shell", async () => {
     await waitForShell();
     const body = await page.locator("body").innerText();
-    assert.ok(body.includes("Yeisme") || body.includes("进入团队工作空间"), `shell text missing: ${JSON.stringify(body.slice(0, 120))}`);
+    assert.ok(body.includes("Yeisme") || body.includes("回到你的创作台"), `shell text missing: ${JSON.stringify(body.slice(0, 120))}`);
     assert.equal(body.includes("演示模式"), false);
     assert.equal(body.includes(legacyPathToken), false);
   });

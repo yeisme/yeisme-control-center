@@ -21,10 +21,10 @@ try {
   page.on("request", (request) => requests.push({ method: request.method(), url: request.url() }));
   await page.goto(base + "/", { waitUntil: "networkidle" });
   const loginSurface = await page.locator("body").innerText();
-  results.push({ name: "login_surface", status: loginSurface.includes("进入团队工作空间") && loginSurface.includes("个人访问凭据") ? "passed" : "failed" });
+  results.push({ name: "login_surface", status: loginSurface.includes("回到你的创作台") && loginSurface.includes("个人访问凭据") ? "passed" : "failed" });
   await page.getByLabel("用户名").fill(username);
   await page.getByLabel("个人访问凭据").fill(password);
-  await page.getByRole("button", { name: /登录 Workspace/ }).click();
+  await page.getByRole("button", { name: /进入创作台/ }).click();
   await page.waitForSelector('[data-page="home"]');
   const overview = await page.locator("body").innerText();
   results.push({ name: "authenticated_overview", status: overview.includes("需要处理") && overview.includes("服务状态") && overview.includes("真实只读") ? "passed" : "failed" });

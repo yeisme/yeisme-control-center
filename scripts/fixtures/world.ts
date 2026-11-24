@@ -1,3 +1,4 @@
+import { markAudio } from "./audio-world";
 import { deflateSync } from "node:zlib";
 
 export type Scenario = "rich" | "degraded" | "empty";
@@ -90,6 +91,49 @@ export interface TaskSpec {
   recovery?: Record<string, unknown>;
   coverage?: "complete" | "partial";
   actor?: string;
+  /** The owner's `yeisme.process_timing.v1` record, in minutes ago and minutes long; Scaena runs only, as live. */
+  timing?: TimingSpec;
+}
+
+export interface TimingSpec {
+  status: string;
+  startedMinutes: number;
+  endedMinutes?: number;
+  wall: number;
+  active?: number;
+  queue?: number;
+  blocked?: number;
+  human?: number;
+  retries?: number;
+  parent?: string;
+  heartbeatMinutes?: number;
+}
+
+const ms = (value: number | undefined) => Math.round((value ?? 0) * 60_000);
+
+/** Shaped like Scaena's `runTiming()`: owner field names, durations in ms, no events or digests a page would need. */
+function timingRecord(spec: TaskSpec, timing: TimingSpec) {
+  return {
+    schema_version: "yeisme.process_timing.v1",
+    run_ref: spec.ref,
+    ...(timing.parent ? { parent_run_ref: timing.parent } : {}),
+    owner: spec.owner,
+    project_ref: spec.project,
+    phase: "run",
+    operation: spec.family,
+    status: timing.status,
+    started_at: minutes(timing.startedMinutes),
+    ended_at: timing.endedMinutes === undefined ? null : minutes(timing.endedMinutes),
+    wall_duration_ms: ms(timing.wall),
+    active_duration_ms: ms(timing.active),
+    queue_duration_ms: ms(timing.queue),
+    blocked_duration_ms: ms(timing.blocked),
+    human_wait_duration_ms: ms(timing.human),
+    heartbeat_at: minutes(timing.heartbeatMinutes ?? timing.endedMinutes ?? 0),
+    stall_after_ms: 120_000,
+    retry_count: timing.retries ?? 0,
+    evidence_ref: `evidence:${spec.ref}`,
+  };
 }
 
 /**
@@ -150,6 +194,7 @@ export function taskRow(spec: TaskSpec) {
     process: { schema_version: "yeisme.process_observation.v1", state: ["queued", "running", "pending"].includes(spec.state) ? "active" : spec.state === "failed" ? "blocked" : "complete", freshness: "fresh", coverage: spec.coverage || "complete", observed_at: minutes(spec.updatedMinutes), task_ref: spec.ref, prompt_capture: promptCapture, checkpoints, resume_cursor: `${spec.ref}-resume`, gap: false },
     prompt_capture: promptCapture,
     ...(spec.recovery ? { provider_recovery: spec.recovery } : {}),
+    ...(spec.timing ? { timing: timingRecord(spec, spec.timing) } : {}),
   };
 }
 
@@ -214,8 +259,11 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
   }
 
   const sonora = tasks["fx-sonora"];
-  sonora.push({ owner: "sonora", connection: "fx-sonora", project: "rain-reunion", family: "voice-render-job", ref: "sonora://voice-render-job/vr-88", title: "第 03 场 · 对白合成", state: "running", stage: "running", createdMinutes: 6, updatedMinutes: 1, progress: { kind: "count", completed: 7, total: 12 } });
+  sonora.push({ owner: "sonora", connection: "fx-sonora", project: "rain-reunion", family: "voice-render-job", ref: "sonora://voice-render-job/vr-88", title: "第 03 场 · 对白合成", state: "running", stage: "running", createdMinutes: 6, updatedMinutes: 1, progress: { kind: "count", completed: 7, total: 12 }, episode: "sonora://episodes/rain-01" });
   sonora.push({ owner: "sonora", connection: "fx-sonora", project: "rain-reunion", family: "music-job", ref: "sonora://music-job/mj-21", title: "片尾环境音乐 · 长版", state: "partial", stage: "completed", createdMinutes: 140, updatedMinutes: 120, coverage: "partial", results: [audio("ending-loop", "片尾环境音乐.wav", 2, 330)] });
+  markAudio(media, "ending-loop", 2, 330);
+  // Sonora names the episode on this take too, so the sound station of ep-01 has a result to list and play.
+  sonora.at(-1)!.episode = "sonora://episodes/rain-01";
   audioTitles.forEach((title, index) => sonora.push({
     owner: "sonora", connection: "fx-sonora", project: "rain-reunion", family: index % 2 ? "music-job" : "voice-render-job", ref: `sonora://job/hist-${index}`,
     title, state: index === 4 ? "failed" : "succeeded", stage: index === 4 ? "failed" : "completed", createdMinutes: 200 + index * 95, updatedMinutes: 190 + index * 95,
@@ -227,15 +275,20 @@ export function buildWorld(scenario: Scenario, videoBytes: Buffer | null): World
   const scaena = tasks["fx-scaena"];
   scaena.push({
     owner: "scaena", connection: "fx-scaena", project: "rain-reunion", family: "delegation", ref: "deleg-0412", title: "旧车站 · 重逢镜头视频", state: "unknown", stage: "unknown", createdMinutes: 46, updatedMinutes: 40, episode: "ep-01",
+    // The owner stopped hearing from the provider: frozen at what it wrote, never grown.
+    timing: { status: "stalled", startedMinutes: 45, wall: 5, heartbeatMinutes: 40 },
     recovery: { state: "submission_unknown", native_state: "connection_lost_after_submit", submission_ref: "vt_9f31c2a7", binding_id: "seedance-720p-16x9", error_code: null, blocker: "提交后连接中断，owner 无法确认 Provider 是否已受理", safe_to_resubmit: false, review_status: null, export_status: null },
   });
   scaena.push({
     owner: "scaena", connection: "fx-scaena", project: "rain-reunion", family: "delegation", ref: "deleg-0409", title: "雨巷 · 推镜头", state: "waiting_review", stage: "waiting_review", createdMinutes: 300, updatedMinutes: 260, episode: "ep-01",
+    // Generated, now waiting for a person to pick: the wait keeps growing as human-wait time.
+    timing: { status: "waiting_for_human", startedMinutes: 299, wall: 39, active: 31, queue: 8 },
     results: videoBytes ? [(() => { media.set("alley-push", { mime: "video/mp4", bytes: videoBytes }); return { ref: "asset:alley-push", name: "雨巷推镜头.mp4", mime: "video/mp4", bytes: videoBytes.length, width: 320, height: 180, duration_ms: 2000, state: "candidate", media: "alley-push" }; })()] : [{ ref: "asset:alley-push", name: "雨巷推镜头.mp4", mime: "video/mp4", bytes: 0, width: 320, height: 180, duration_ms: 2000, state: "candidate", media: "missing" }],
     recovery: { state: "generated", native_state: "succeeded", submission_ref: "vt_7a01bb3e", binding_id: "seedance-720p-16x9", safe_to_resubmit: false, review_status: "pending_review", export_status: "not_exported" },
   });
   scaena.push({
     owner: "scaena", connection: "fx-scaena", project: "rain-reunion", family: "video-task", ref: "vt-0398", title: "天台 · 黄昏延时", state: "failed", stage: "failed", createdMinutes: 720, updatedMinutes: 700, episode: "ep-02",
+    timing: { status: "failed", startedMinutes: 719, endedMinutes: 700, wall: 19, active: 12, queue: 4, blocked: 3, retries: 1 },
     recovery: { state: "rejected_no_generation", native_state: "InvalidApiKey", submission_ref: "vt_5521aa0c", binding_id: "seedance-1080p-9x16", error_code: "InvalidApiKey", blocker: "Provider 凭据无效，未产生生成", safe_to_resubmit: false },
   });
 
@@ -296,6 +349,7 @@ export function buildRequests(scenario: Scenario, tenant: string, project: strin
     eikona: ["生成：旧车站氛围参考", "生成：林晚定妆照", "变体：雨巷远景", "放大：海报主视觉"],
     sonora: ["合成：第 01 场对白", "生成：片尾环境音乐", "合成：开场旁白"],
     scaena: ["委托：重逢镜头视频", "委托：雨巷推镜头", "对账：天台延时"],
+    anatomia: ["分析：镜头结构", "问答：素材检查"],
   };
   let n = 0;
   for (const owner of owners) {

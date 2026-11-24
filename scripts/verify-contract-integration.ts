@@ -451,6 +451,23 @@ try {
     for (const leaked of ["/fixture/", "permission denied", "files.fixture.invalid", "eikona.fixture.invalid", "sonora.fixture.invalid", "SONORA_FIXTURE_TOKEN", "backend-leak.example.test", "upstream 502", openToolToken, "credential_ref", owners.origin]) assert.equal(body.includes(leaked), false, leaked);
   });
 
+  await check("Gateway personal monitor routes return redacted sessions, calls, presets and SSE", async () => {
+    const monitor = await call(`/api/control-center/v1/gateway/monitor?scope=${scopeIds[0]}`);
+    assert.equal(monitor.response.status, 200);
+    assert.equal(monitor.json.schema_version, "yeisme.gateway_monitor.v1");
+    assert.equal(monitor.json.sessions[0].session_ref, "msess_fx_1");
+    assert.equal(monitor.json.calls[0].call_ref, "inv_fx_1");
+    assert.equal(JSON.stringify(monitor.json).includes(openToolToken), false);
+    const detail = await call(`/api/control-center/v1/gateway/calls/inv_fx_1?scope=${scopeIds[0]}`);
+    assert.equal(detail.response.status, 200);
+    assert.equal(detail.json.recovery, "query_original_operation");
+    const presets = await call(`/api/control-center/v1/gateway/client-presets?scope=${scopeIds[0]}`);
+    assert.equal(presets.response.status, 200);
+    const stream = await app(new Request(origin + `/api/control-center/v1/gateway/events?scope=${scopeIds[0]}`, { headers: { Origin: origin, Cookie: cookie, Accept: "text/event-stream" } }));
+    assert.equal(stream.status, 200);
+    assert.equal(stream.headers.get("content-type"), "text/event-stream");
+  });
+
   await check("open tools: the work queue raises failed runs and reports both tools as sources", async () => {
     const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}&kind=operation_failure`);
     assert.deepEqual(json.items.map((item: { owner: string; title: string }) => `${item.owner}:${item.title}`).sort(), ["drivebridge:DriveBridge 上传失败", "drivebridge:DriveBridge 导出失败", "gateway:MCP Gateway 工具调用失败"]);
@@ -642,6 +659,76 @@ try {
     assert.equal(named.json.rail.find((node: { stage: string }) => node.stage === "production_breakdown").state, "in_progress");
   });
 
+  await check("production line: an episode as seven stations from the same reads as the board, structure only", async () => {
+    const { response, json } = await call(`/api/control-center/v1/production?scope=${scopeIds[0]}&episode_ref=ep-01`);
+    assert.equal(response.status, 200);
+    assert.equal(json.schema_version, "yeisme.production_line.v1");
+    assert.equal(json.epoch, epoch);
+    assert.deepEqual(json.stations.map((item: { station: string }) => item.station), ["story", "look", "board", "frames", "motion", "sound", "cut"]);
+    const station = (id: string) => json.stations.find((item: { station: string }) => item.station === id);
+    // This scope has no Scaena task connection, so its production summary is unread: owner contracts stay missing, never empty or done.
+    assert.equal(station("look").state, "needs_contract");
+    assert.deepEqual(station("cut").gaps.filter((gap: { state: string }) => gap.state === "needs_contract").map((gap: { part: string }) => gap.part).filter((part: string) => part !== "episode_link").sort(), ["delivery", "edit", "review_adoption"]);
+    assert.notEqual(station("cut").state, "observed");
+    // Story and board are the episode's own rail, stage by stage.
+    const detail = await call(`/api/control-center/v1/drama/episode?scope=${scopeIds[0]}&episode_ref=ep-01`);
+    const rail = (stage: string) => detail.json.rail.find((node: { stage: string }) => node.stage === stage).state;
+    for (const id of ["story", "board"]) for (const stage of station(id).stages) assert.equal(stage.state, rail(stage.stage), `${id}/${stage.stage}`);
+    assert.equal(station("board").shots.total, detail.json.outline.shot_count);
+    const body = JSON.stringify(json);
+    for (const forbidden of ["action_summary", "content_ref", "representation_ref", "media_type", "allowed_actions", "Authorization", "Bearer", serviceToken, delegationToken, observerToken]) assert.equal(body.includes(forbidden), false, forbidden);
+    // An agent polling the same line within the cache window costs the owners nothing.
+    const before = owners.hits();
+    assert.equal((await call(`/api/control-center/v1/production?scope=${scopeIds[0]}&episode_ref=ep-01`)).response.status, 200);
+    assert.deepEqual(owners.hits(), before);
+    const project = await call(`/api/control-center/v1/production?scope=${scopeIds[0]}`);
+    assert.equal(project.response.status, 200);
+    assert.equal(project.json.range.kind, "project");
+    assert.equal(project.json.stations.length, 7);
+    // A viewer reads the same line; it is read-only.
+    const login = await app(new Request(origin + "/api/control-center/v1/auth/personal", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify({ username: "contract-viewer", password }) }));
+    const viewerCookie = "yeisme_session=" + login.headers.getSetCookie().map((entry) => entry.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const viewer = await app(new Request(origin + `/api/control-center/v1/production?scope=${scopeIds[0]}&episode_ref=ep-01`, { headers: { Origin: origin, Cookie: viewerCookie } }));
+    assert.equal(viewer.status, 200);
+    assert.deepEqual((await viewer.json()).stations.map((item: { station: string; state: string }) => `${item.station}:${item.state}`), json.stations.map((item: { station: string; state: string }) => `${item.station}:${item.state}`));
+    assert.equal((await call(`/api/control-center/v1/production?scope=${scopeIds[0]}&episode_ref=${encodeURIComponent("a\nb")}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/production?scope=forged`)).response.status, 404);
+    assert.equal((await call(`/api/control-center/v1/production?scope=${scopeIds[0]}`, "POST", {})).response.status, 405);
+  });
+
+  await check("episode production: with no Scaena task connection the summary reads as unconnected, carries no key, and refuses bad references", async () => {
+    const read = await call(`/api/control-center/v1/episode-production?scope=${scopeIds[0]}&episode_ref=ep-01`);
+    assert.equal(read.response.status, 200);
+    assert.deepEqual({ state: read.json.state, reason: read.json.reason }, { state: "unconnected", reason: "no_task_connection" });
+    const body = JSON.stringify(read.json);
+    for (const forbidden of ["Authorization", "Bearer", "credential_ref"]) assert.equal(body.includes(forbidden), false, forbidden);
+    assert.equal((await call(`/api/control-center/v1/episode-production?scope=${scopeIds[0]}&episode_ref=${encodeURIComponent(" ep-01")}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/episode-production?scope=forged&episode_ref=ep-01`)).response.status >= 400, true);
+    assert.equal((await call(`/api/control-center/v1/episode-production?scope=${scopeIds[0]}&episode_ref=ep-01`, "GET", undefined, false)).response.status, 401);
+  });
+
+  await check("task review: Eikona's own decision and counts are read per task through its observer connection, without reviewer or key, and bad keys are refused", async () => {
+    assert.ok(taskKey);
+    const finished = history.json.rows.find((row: { locator: { owner: string; task_ref: string }; state: string; results: unknown[] }) => row.locator.owner === "eikona" && row.state === "succeeded" && row.results.length > 0);
+    assert.ok(finished?.task_key);
+    const read = await call(`/api/control-center/v1/task-reviews?scope=${scopeIds[0]}&task_key=${encodeURIComponent(taskKey!)}&task_key=${encodeURIComponent(finished.task_key)}`);
+    assert.equal(read.response.status, 200);
+    assert.equal(read.json.epoch, epoch);
+    assert.deepEqual(
+      { state: read.json.reviews[taskKey!].state, decision: read.json.reviews[taskKey!].review?.owner_decision, pending: read.json.reviews[taskKey!].review?.pending_count },
+      { state: "observed", decision: "pending", pending: 2 },
+    );
+    assert.equal(read.json.reviews[finished.task_key].review?.owner_decision, "accepted");
+    const body = JSON.stringify(read.json);
+    for (const forbidden of ["Authorization", "Bearer", "credential_ref", "decided_by", "reason\":\"private"]) assert.equal(body.includes(forbidden), false, forbidden);
+    const many = Array.from({ length: 11 }, (_, i) => `task_key=${encodeURIComponent(taskKey! + i)}`).join("&");
+    assert.equal((await call(`/api/control-center/v1/task-reviews?scope=${scopeIds[0]}&${many}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/task-reviews?scope=${scopeIds[0]}`)).response.status, 400);
+    assert.equal((await call(`/api/control-center/v1/task-reviews?scope=${scopeIds[0]}&task_key=forged.key`)).response.status, 404);
+    assert.equal((await call(`/api/control-center/v1/task-reviews?scope=forged&task_key=${encodeURIComponent(taskKey!)}`)).response.status >= 400, true);
+    assert.equal((await call(`/api/control-center/v1/task-reviews?scope=${scopeIds[0]}&task_key=${encodeURIComponent(taskKey!)}`, "GET", undefined, false)).response.status, 401);
+  });
+
   await check("work queue reads flows only for known episodes and reports real attention", async () => {
     const { json } = await call(`/api/control-center/v1/work-queue?scope=${scopeIds[0]}`);
     const flow = json.items.filter((item: { workflow_stage?: string }) => item.workflow_stage).map((item: { workflow_stage: string; kind: string }) => `${item.workflow_stage}:${item.kind}`).sort();
@@ -829,6 +916,56 @@ try {
     const { json: tasks } = await call(`/api/control-center/v1/tasks?mode=history&scope=${scopeIds[0]}`);
     assert.ok(!tasks.rows.some((t: { locator: { project: string } }) => t.locator.project === "rain-bts"), "disconnected project still read");
     assert.ok(tasks.rows.some((t: { locator: { project: string } }) => t.locator.project === "rain-reunion"), "template connection stopped reading");
+  });
+  await check("accounts from the web: create, reset and disable write only the 0600 file, end the account's sessions at once, keep keys out of the file and the audit, and refuse a missing token or another origin", async () => {
+    // Account management writes the configuration file; this run gets one that holds only its personal block, as a deployment's would.
+    const configFile = join(temp, "control-center.json");
+    await writeFile(configFile, JSON.stringify({ personal: config.personal }, null, 2) + "\n", { mode: 0o600 });
+    config.config_file = configFile;
+    const base = "/api/control-center/v1";
+    const draft = { username: "contract-editor", name: "Contract Editor", role: "viewer", scope_ids: [scopeIds[0]] };
+    const raw = (pathname: string, headers: Record<string, string>, body?: unknown) => app(new Request(origin + pathname, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body ?? {}) }));
+    assert.equal((await raw(base + "/admin/personal-users", { Origin: origin, Cookie: cookie }, draft)).status, 403, "no CSRF token");
+    assert.equal((await raw(base + "/admin/personal-users", { Origin: "http://other.example", Cookie: cookie, "X-CSRF-Token": csrf }, draft)).status, 403, "another origin");
+    const listed = await call(base + "/admin/personal-users");
+    assert.equal(listed.json.management.enabled, true);
+    assert.ok(listed.json.scopes.every((scope: { id: string }) => scopeIds.includes(scope.id)), "assignable scopes come from the configuration");
+    const created = await call(base + "/admin/personal-users", "POST", draft);
+    assert.equal(created.response.status, 201);
+    assert.match(created.response.headers.get("cache-control") || "", /no-store/);
+    const first = created.json.access_key as string;
+    assert.match(first, /^yk_live_/);
+    const text = await fs.readFile(configFile, "utf8");
+    assert.ok(!text.includes(first), "key in the configuration file");
+    const entry = (JSON.parse(text).personal.users as { username: string; key_hash_ref: string }[]).find((user) => user.username === draft.username)!;
+    assert.equal((await fs.stat(configFile)).mode & 0o777, 0o600);
+    assert.equal((await fs.stat(entry.key_hash_ref)).mode & 0o777, 0o600);
+    assert.ok(!(await fs.readFile(entry.key_hash_ref, "utf8")).includes(first), "key in the digest file");
+    const signIn = (secret: string) => raw(base + "/auth/personal", { Origin: origin }, { username: draft.username, password: secret });
+    const sessionOf = async (response: Response) => "yeisme_session=" + response.headers.getSetCookie().map((value) => value.match(/^yeisme_session=([^;]+)/)?.[1]).find(Boolean);
+    const editor = await sessionOf(await signIn(first));
+    const sessionStatus = async (who: string) => (await app(new Request(origin + base + "/session", { headers: { Origin: origin, Cookie: who } }))).status;
+    assert.equal(await sessionStatus(editor), 200);
+    const rotated = await call(base + `/admin/personal-users/${draft.username}/rotate`, "POST", {});
+    assert.equal(rotated.response.status, 200);
+    assert.match(rotated.response.headers.get("cache-control") || "", /no-store/);
+    const second = rotated.json.access_key as string;
+    assert.equal(await sessionStatus(editor), 401, "the old session survived a reset");
+    assert.equal((await signIn(first)).status, 401, "the old key still signs in");
+    const again = await sessionOf(await signIn(second));
+    assert.equal(await sessionStatus(again), 200);
+    const revoked = await call(base + `/admin/personal-users/${draft.username}/revoke`, "POST", {});
+    assert.equal(revoked.response.status, 200);
+    assert.equal(await sessionStatus(again), 401, "a disabled account kept its session");
+    assert.equal((await signIn(second)).status, 401, "a disabled account signs in");
+    // Every step is in the audit trail, and no key is.
+    const { json: trail } = await call(base + "/audit?limit=100");
+    const actions = (trail.rows as { action: string; target_ref?: string }[]).filter((row) => row.target_ref === draft.username).map((row) => row.action);
+    for (const action of ["admin.user_created", "admin.user_rotated", "admin.user_revoked"]) assert.ok(actions.includes(action), action);
+    assert.ok(![first, second].some((key) => JSON.stringify(trail).includes(key)), "a key in the audit trail");
+    // The configuration's own owner is the command line's to change.
+    const owner = await call(base + `/admin/personal-users/${username}/rotate`, "POST", {});
+    assert.deepEqual([owner.response.status, owner.json?.error], [409, "legacy_owner_managed_by_cli"]);
   });
 } finally {
   owners.stop();

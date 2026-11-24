@@ -42,10 +42,12 @@ try {
   configSource.port = port;
   // Never open the live database: the candidate gets a fresh one beside the isolated config. Migrating real data is
   // rehearsed separately on a copy, and happens for real only when the release is activated.
-  delete configSource.database;
+  configSource.database = { path: join(isolated, "release-check.sqlite") };
   // The copy still names the real owner credentials, so the candidate must not read any owner on its own: observation is off
   // here as well as by YEISME_CONTROL_BACKGROUND=off below.
-  configSource.observation = { ...configSource.observation, enabled: false };
+  configSource.observation = { enabled: false };
+  configSource.read_only = true;
+  configSource.providers = {};
   // A throwaway viewer for the read-back, in this copy only: its key exists in memory and as a digest in the temp directory
   // that is removed at the end. The live configuration is read, never written.
   if (!configSource.personal || !Array.isArray(configSource.personal.scope_ids) || !configSource.personal.scope_ids.length) throw new Error("candidate_probe_account_unavailable");

@@ -11,6 +11,20 @@ export function trackedChanges(porcelain: string): string[] {
   return porcelain.split("\n").filter((line) => line.trim() && !line.startsWith("??") && !line.startsWith("!!"));
 }
 
+export interface ReviewedSourceEntry {
+  path: string;
+  state: "tracked" | "untracked";
+  sha256: string;
+}
+
+/** A reviewed release input may include untracked source, but never private or generated material. */
+export function reviewedSourceEntries(porcelain: string, digests: Record<string, string>): ReviewedSourceEntry[] {
+  const entries = porcelain.split("\n").filter((line) => line.trim()).map((line) => ({ state: line.startsWith("??") ? "untracked" as const : "tracked" as const, path: line.slice(3).trim() }));
+  const denied = /^(?:temp|dist|node_modules|drizzle|design-proposals|docs|openspec|\.pi(?:-bg)?)\/|\.sqlite|config\.json|\.key$|credential|secret/i;
+  if (entries.some((entry) => !entry.path || entry.path.includes("..") || denied.test(entry.path) || !digests[entry.path])) throw new Error("reviewed_source_invalid");
+  return entries.map((entry) => ({ ...entry, sha256: digests[entry.path] })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export class DirtyTreeError extends Error {
   constructor(readonly changed: string[]) {
     super("dirty_working_tree");

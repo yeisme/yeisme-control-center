@@ -1,9 +1,11 @@
-import { mkdir, readFile, writeFile, cp, access, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, cp, access, readdir, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { servedEntries, unservedPaths } from '../server/static';
-import { DirtyTreeError, readReleaseSource, releaseTreeState, type TreeState } from './release-source';
+import { DirtyTreeError, readReleaseSource, releaseTreeState, reviewedSourceEntries, type TreeState } from './release-source';
 
 // Prepare only. This command cannot alter units, configuration, credentials or running owners.
 if (process.argv.length !== 2) throw Error('Usage: bun scripts/prepare-intranet-release.ts');
@@ -17,7 +19,8 @@ let source: { source_commit: string; porcelain: string } = { source_commit: 'unk
 let sourceError = false;
 try { source = readReleaseSource(root); } catch { sourceError = true; }
 let tree: TreeState = { dirty: false, changed_files: 0, dirty_allowed: false };
-const sourceFacts = () => ({ source_commit: source.source_commit, dirty: tree.dirty, dirty_allowed: tree.dirty_allowed, changed_files: tree.changed_files });
+let reviewedSource: unknown[] = [];
+const sourceFacts = () => ({ source_commit: source.source_commit, dirty: tree.dirty, dirty_allowed: tree.dirty_allowed, changed_files: tree.changed_files, reviewed_source: reviewedSource });
 const writeEnv = () => writeFile(join(run, 'env.json'), JSON.stringify({ layer: 'build', production_changed: false, credentials_created: false, CGO_ENABLED: '0', race: false, ...sourceFacts() }));
 await mkdir(join(run, 'artifacts/control-center/dist'), { recursive: true, mode: 0o700 });
 await writeFile(join(run, 'command.txt'), 'bun scripts/prepare-intranet-release.ts\n');
@@ -95,6 +98,17 @@ try {
     }
   }
   await fingerprint(join(run, 'artifacts/control-center'), 'control-center');
+  const porcelain = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root, encoding: 'utf8' });
+  const excluded = /^(?:temp|dist|node_modules|drizzle|design-proposals|docs|openspec|\.pi(?:-bg)?)\/|\.sqlite|config\.json|\.key$|credential|secret/i;
+  const selected = porcelain.split('\n').filter((line) => line.trim() && !excluded.test(line.slice(3).trim()));
+  const reviewed: Record<string, string> = {};
+  for (const line of selected) {
+    const file = line.slice(3).trim();
+    if (!file || !existsSync(join(root, file))) continue;
+    const fileStat = await stat(join(root, file));
+    if (fileStat.isFile()) reviewed[file] = createHash('sha256').update(await readFile(join(root, file))).digest('hex');
+  }
+  reviewedSource = reviewedSourceEntries(`${selected.join('\n')}\n`, reviewed);
 } catch (error) {
   failed = true;
   process.exitCode = 1;

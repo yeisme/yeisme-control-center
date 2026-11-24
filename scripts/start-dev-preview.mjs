@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { isolateReadConfig, isolatedReadEnvironment } from "./isolated-read-config.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const source = process.env.YEISME_PREVIEW_SOURCE_CONFIG || join(
@@ -30,11 +31,9 @@ const passwordRef = join(tempDir, "password");
 const configRef = join(tempDir, "config.json");
 const hash = await import("../server/password.ts").then(({ hashPassword }) => hashPassword(password));
 await writeFile(passwordRef, hash + "\n", { mode: 0o600 });
+if (bind !== "127.0.0.1" || uiHost !== "127.0.0.1") throw new Error("preview bind must be loopback");
 const config = {
-  ...sourceConfig,
-  origin,
-  bind,
-  port,
+  ...isolateReadConfig(sourceConfig, { directory: tempDir, configPath: configRef, sourcePath: source, origin, port }),
   personal: {
     ...sourceConfig.personal,
     username,
@@ -49,7 +48,7 @@ const children = [];
 function start(command, args, env = {}, stdio = "inherit") {
   const child = spawn(command, args, {
     cwd: root,
-    env: { ...process.env, ...env },
+    env: { ...isolatedReadEnvironment(process.env, configRef, port), ...env },
     stdio,
   });
   children.push(child);
@@ -72,7 +71,7 @@ async function stop() {
   stopping = true;
   for (const child of children.reverse()) child.kill("SIGTERM");
   await new Promise((resolve) => setTimeout(resolve, 500));
-  for (const child of children) if (!child.killed) child.kill("SIGKILL");
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   await rm(tempDir, { recursive: true, force: true });
 }
 process.once("SIGINT", async () => { await stop(); process.exit(130); });
@@ -86,6 +85,15 @@ try {
     YEISME_CONTROL_BIND: bind,
     YEISME_CONTROL_ORIGIN: origin,
     YEISME_CONTROL_PORT: String(port),
+  }, ["ignore", "pipe", "pipe"]);
+  const ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("preview_api_start_timeout")), 30_000);
+    server.stdout.on("data", (chunk) => {
+      if (String(chunk).includes("listening")) { clearTimeout(timer); resolve(); }
+    });
+    server.stderr.on("data", () => {});
+    server.once("error", () => { clearTimeout(timer); reject(new Error("preview_api_start_failed")); });
+    server.once("exit", () => { clearTimeout(timer); reject(new Error("preview_api_exited")); });
   });
   server.once("exit", async (code, signal) => {
     if (!stopping) {
@@ -94,19 +102,19 @@ try {
       process.exitCode = code || 1;
     }
   });
-  const vite = start("bun", ["node_modules/vite/bin/vite.js", "--host", uiHost, "--port", String(uiPort)], {
+  const vite = start("bun", ["node_modules/vite/bin/vite.js", "--host", uiHost, "--port", String(uiPort), "--strictPort"], {
     V18_API_ORIGIN: origin,
   }, ["ignore", "ignore", "pipe"]);
   vite.stderr?.on("data", (chunk) => process.stderr.write(chunk));
   await Promise.all([
-    waitFor(`${origin}/api/control-center/v1/health`),
+    ready.then(() => waitFor(`${origin}/api/control-center/v1/health`)),
     waitFor(`http://${uiHost === "0.0.0.0" ? "127.0.0.1" : uiHost}:${uiPort}/`),
   ]);
   console.log(`Preview UI: http://127.0.0.1:${uiPort}/`);
   console.log(`Preview API: ${origin}`);
   console.log(`Preview login username: ${username}`);
-  console.log(`Preview login password (temporary): ${password}`);
-  console.log("Preview uses current configured owner connections in read-only mode; Provider submit remains a separate gate.");
+  console.log("Preview password is not logged; supply YEISME_PREVIEW_PASSWORD to use browser verification.");
+  console.log("Preview uses a disposable database, no background observation, and enforced read-only owner access.");
   await new Promise(() => {});
 } finally {
   await stop();

@@ -3,6 +3,8 @@ import { buildRequests, buildWorld, png, taskRow, type RequestRow, type Scenario
 import { eikonaChannels, eikonaModels, eikonaRuntimeCapabilities, providerTools, scaenaGuide, sonoraDiscovery } from "./provider-catalog";
 import { buildDramaWorld, type DramaReply } from "./drama-world";
 import { fakeOpenTool } from "./fake-open-tools";
+import { episodeProductionPage } from "./episode-production-world";
+import { taskReviewObservation } from "./task-review-world";
 
 export const observerToken = "fixture-observer-token";
 export const providerToken = "fixture-provider-token";
@@ -143,7 +145,12 @@ export function startFakeOwners(options: FakeOwnerOptions) {
       if (options.scenario === "degraded" && connection === "fx-eikona" && args.mode === "history" && args.cursor === "page-50") return reply({ rows: "malformed" });
       return reply(listTasks(connection, String(args.mode || "active"), args.cursor ? String(args.cursor) : undefined, limit));
     }
+    if (action === "control_center.production.episodes" && owner === "scaena") {
+      const page = episodeProductionPage(requested || world.tasks[connection]?.[0]?.project || "", String(args.episode || ""));
+      if (page) return reply(page);
+    }
     const spec = args.task_ref ? lookup(connection, String(args.task_ref)) : undefined;
+    if (action === "control_center.tasks.review" && owner === "eikona") { const review = taskReviewObservation(connection, spec, args.task_family); if (review) return reply(review); }
     if (action === "control_center.tasks.get") return spec ? reply(taskRow(spec)) : json({ jsonrpc: "2.0", id: body.id, result: { isError: true, structuredContent: { error: { code: "TASK_NOT_FOUND" } } } });
     if (action === "control_center.tasks.events") {
       if (!spec) return reply({ events: [], gap: true });

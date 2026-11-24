@@ -31,17 +31,32 @@ try {
   page.on("request", (r) => { if (/\/artifacts\/[^/]+\/access/.test(r.url()) && /"purpose":"(preview|download)"/.test(r.postData() || "")) fullMediaRequests++; });
   const check = async (name: string, body: () => Promise<void>) => { await body(); results.push({ name, status: "passed" }); };
   await page.goto(ui, { waitUntil: "networkidle" });
-  await page.getByLabel("用户名").fill("fixture-admin"); await page.getByLabel("个人访问凭据").fill(password); await page.getByRole("button", { name: "登录 Workspace" }).click();
+  await page.getByLabel("用户名").fill("fixture-admin"); await page.getByLabel("个人访问凭据").fill(password); await page.getByRole("button", { name: "进入创作台" }).click();
   await page.locator('[data-page="home"]').waitFor();
   const save = async () => { const dialog = page.getByRole("dialog"); await dialog.getByRole("button", { name: "预览变更", exact: true }).click(); await dialog.getByRole("button", { name: "确认保存", exact: true }).click(); await expect(dialog).toHaveCount(0); };
-  await check("create organization and owner-bound shared project through preview/confirm", async () => {
+  await check("a first project is created from the wizard with its organization, then bound from its connections tab", async () => {
     await page.goto(ui + "/#/projects?shared=1");
-    await page.getByRole("button", { name: "创建组织", exact: true }).first().click();
-    await page.getByRole("dialog").getByLabel(/^名称/).fill("协作验收组织"); await save();
-    await page.getByRole("button", { name: "创建项目", exact: true }).click();
-    await page.getByRole("dialog").getByLabel(/^名称/).fill("共享影像项目");
+    await page.locator("[data-new-project]").first().click();
+    const wizard = page.getByRole("dialog", { name: "新建项目" });
+    await wizard.getByLabel("项目名称").fill("共享影像项目");
+    await wizard.getByRole("button", { name: "下一步", exact: true }).click();
+    // Without an organization the wizard says it will make two things, then makes both on one confirmation.
+    await expect(wizard.locator("[data-wizard-preview]")).toContainText("将创建 2 项");
+    await wizard.getByRole("button", { name: "创建项目", exact: true }).click();
+    await expect(wizard).toHaveCount(0);
+    await page.getByRole("heading", { name: "共享影像项目", exact: true }).waitFor();
+    await expect(page.getByRole("tab", { name: "连接", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.locator("[data-project-bindings]").getByRole("button", { name: "关联工具项目", exact: true }).first().click();
     await page.getByRole("dialog").getByRole("checkbox", { name: "Eikona rain-reunion（Fixture · 雨夜重逢）", exact: true }).check();
-    await save(); await page.getByRole("heading", { name: "共享影像项目", exact: true }).waitFor();
+    await save();
+    await page.locator('[data-binding*="rain-reunion"]').waitFor();
+    // The overview counts what the project made, by kind; the image count opens the assets tab on images.
+    await page.getByRole("tab", { name: "概览", exact: true }).click();
+    const imageCount = page.locator('[data-kind-count="image"] [data-count]');
+    await expect(imageCount).not.toHaveAttribute("data-count", /^(—|0)$/, { timeout: 20000 });
+    await page.locator('[data-kind-count="image"]').click();
+    await expect(page.getByRole("tab", { name: "资产", exact: true })).toHaveAttribute("aria-selected", "true");
+    if (new URL(page.url()).hash.includes("kind=image") === false) throw Error("the image count did not filter the assets tab");
     await page.getByRole("button", { name: /^查看成果 / }).first().waitFor();
   });
   await check("folder creation, entering, empty state and breadcrumb return", async () => {
@@ -62,12 +77,14 @@ try {
     await viewer.getByRole("button", { name: "放大", exact: true }).click();
     // A failed read of the next item keeps the viewer on the current one and announces why inside the dialog.
     const title = viewer.getByRole("heading").first(); const shown = await title.textContent();
+    // Fixture result names repeat, so the next item may share the title; the position counter is what tells them apart.
+    const count = viewer.locator(".viewer-count"); const at = await count.textContent();
     await page.route("**/projects/*/items/*/task", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "owner_unavailable", message: "owner unavailable" } }) }), { times: 1 });
     await viewer.getByRole("button", { name: "下一项", exact: true }).click();
     await expect(viewer.getByRole("status").filter({ hasText: "没能打开这一项" })).toBeVisible();
-    await expect(title).toHaveText(shown!);
+    await expect(title).toHaveText(shown!); await expect(count).toHaveText(at!);
     await viewer.getByRole("button", { name: "下一项", exact: true }).click();
-    await expect(title).not.toHaveText(shown!); await expect(viewer.getByText("没能打开这一项")).toHaveCount(0);
+    await expect(count).not.toHaveText(at!); await expect(viewer.locator(".viewer-media[data-pending]")).toHaveCount(0); await expect(viewer.getByText("没能打开这一项")).toHaveCount(0);
     // The viewer stacks over the detail sheet: Escape closes the viewer first, then the sheet.
     await page.keyboard.press("Escape"); await viewer.waitFor({ state: "detached" });
     await expect(page.getByRole("dialog")).toHaveCount(1);
@@ -79,6 +96,22 @@ try {
     await page.getByRole("dialog").getByLabel(/^名称/).fill("共享影像项目 · 更新"); await save();
     await page.getByRole("heading", { name: "共享影像项目 · 更新", exact: true }).waitFor();
     if (!page.url().includes(projectID!)) throw Error("rename changed stable id");
+    const restored = await context.newPage();
+    await restored.goto(`${ui}/#/drama?sharedProject=${encodeURIComponent(projectID!)}`, { waitUntil: "domcontentloaded" });
+    await restored.locator("[data-page='drama']").waitFor();
+    if (!restored.url().includes(`sharedProject=${encodeURIComponent(projectID!)}`)) throw Error("shared project deep link lost");
+    if (await restored.getByText("正在恢复共享项目上下文").count()) throw Error("shared project context did not settle");
+    await restored.close();
+    const denied = await context.newPage();
+    const leakedReads: string[] = [];
+    denied.on("request", (req) => { if (/\/api\/control-center\/v1\/(drama\/episodes|auctra\/|creative-flow)/.test(req.url())) leakedReads.push(req.url()); });
+    await denied.goto(`${ui}/#/drama?sharedProject=project_unauthorized`, { waitUntil: "domcontentloaded" });
+    await denied.locator('[data-page="drama"][data-shared-project-denied="true"]').waitFor({ timeout: 30_000 }).catch(async (err) => {
+      const body = await denied.locator("body").innerText().catch(() => "");
+      throw new Error(`${err.message} | url=${denied.url()} | body=${body.slice(0, 200)}`);
+    });
+    if (leakedReads.length) throw Error(`unauthorized sharedProject triggered fallback reads: ${leakedReads.join(",")}`);
+    await denied.close();
     await page.getByLabel("搜索成果名称", { exact: true }).fill("不存在的成果"); await page.waitForTimeout(400);
     await page.reload(); await expect(page.getByLabel("搜索成果名称", { exact: true })).toHaveValue("不存在的成果");
     await page.getByRole("button", { name: "重置", exact: true }).click();
@@ -194,7 +227,7 @@ try {
     if (!await reminder.count()) await page.getByRole("button", { name: "加载更多", exact: true }).click();
     await reminder.first().click();
     await expect(page.getByLabel("打开的批次").locator("[data-batch]")).toContainText("第 01 批");
-    await page.goto(`${ui}/#/projects?shared=1&sharedProject=${projectID}`);
+    await page.goto(`${ui}/#/projects?shared=1&sharedProject=${projectID}&tab=assets`);
     await page.getByRole("heading", { name: "共享影像项目 · 更新", exact: true }).waitFor();
   });
   await check("responsive directory sheets and light/dark themes have no horizontal overflow", async () => {
@@ -209,6 +242,20 @@ try {
         await page.screenshot({ path: path.join(run, "artifacts", `${width}-${theme}.png`) });
       }
     }
+  });
+  await check("the connections tab shows a placeholder-only command and unbinds a tool project through preview/confirm", async () => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${ui}/#/projects?shared=1&sharedProject=${projectID}&tab=connections`);
+    const command = await page.locator("[data-connect-command]").innerText();
+    if (!command.includes("<owner-host>") || /\d+\.\d+\.\d+\.\d+|localhost/.test(command)) throw Error("connect command is not placeholder-only");
+    await expect(page.locator("[data-project-agent-access]")).toContainText("yeisme-project:");
+    const bound = page.locator("[data-project-bindings] [data-binding]");
+    await expect(bound).toHaveCount(1);
+    await bound.first().getByRole("button", { name: /^关联操作：/ }).click();
+    await page.getByRole("menuitem", { name: "解除关联" }).click();
+    await page.getByRole("button", { name: "确认解除", exact: true }).click();
+    await expect(bound).toHaveCount(0);
+    await page.getByText("还没有关联工具项目").waitFor();
   });
   if (errors.length) throw Error("browser runtime errors: " + errors.join(" | "));
   await fs.writeFile(path.join(run, "artifacts", "diagnostics.json"), JSON.stringify({ runtime_errors: errors, failed_responses: network, full_media_requests: fullMediaRequests, real_owner_calls: false, provider_calls: false }, null, 2));

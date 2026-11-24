@@ -307,7 +307,7 @@ try {
   });
   await page.goto(origin + "/#/tasks");
   await page.getByLabel("个人访问密码").fill(password);
-  await page.getByRole("button", { name: "登录个人工作区" }).click();
+  await page.getByRole("button", { name: "进入创作台" }).click();
   await expect(
     page.getByRole("button", { name: "刷新观察", exact: true }),
   ).toBeVisible({ timeout: 10000 });
@@ -618,7 +618,7 @@ try {
     throw new Error("restart_retained_session");
   await page.reload();
   await page.getByLabel("个人访问密码").fill(password);
-  await page.getByRole("button", { name: "登录个人工作区" }).click();
+  await page.getByRole("button", { name: "进入创作台" }).click();
   await expect(
     page.getByRole("button", { name: "刷新观察", exact: true }),
   ).toBeVisible({ timeout: 10000 });

@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { createServer as createNetServer } from "node:net";
 import { hashPassword } from "../server/password";
+import { randomBytes } from "node:crypto";
+import { isolateReadConfig, isolatedReadEnvironment } from "./isolated-read-config.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 // A staged copy can be checked before it replaces the live config: YEISME_OWNER_READ_CONFIG=<copy>.
@@ -13,7 +15,7 @@ const evidence = resolve(root, "temp/integration-test-runs", id);
 const privateDir = await mkdtemp("/tmp/yeisme-real-owner-read-");
 const port = await findFreePort(Number(process.env.YEISME_OWNER_READ_PORT || 0));
 const base = `http://127.0.0.1:${port}`;
-const password = "real-owner-read-local-only";
+const password = randomBytes(24).toString("base64url");
 const passwordRef = join(privateDir, "password");
 const configRef = join(privateDir, "config.json");
 let child: ReturnType<typeof spawn> | undefined;
@@ -40,7 +42,7 @@ await writeFile(join(evidence, "command.txt"), "bun run test:owner-live-read\n")
 await writeFile(join(evidence, "env.json"), JSON.stringify({
   origin: base,
   port,
-  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "auctra.collection.sync", "drama.episodes", "work-queue", "open-tools"],
+  owner_reads: ["capabilities", "tool-catalog", "tasks.list", "tasks.get", "tasks.events", "auctra.collection.sync", "auctra.collection", "drama.episodes", "creative-flow", "work-queue", "open-tools"],
   real_owner_reads: true,
   provider_calls: false,
   mutations: false,
@@ -70,7 +72,9 @@ async function request(path: string, init: RequestInit = {}) {
 }
 
 try {
-  const config = JSON.parse(await readFile(sourcePath, "utf8"));
+  const config = isolateReadConfig(JSON.parse(await readFile(sourcePath, "utf8")), {
+    directory: privateDir, configPath: configRef, sourcePath, origin: base, port,
+  });
   await writeFile(passwordRef, (await hashPassword(password)) + "\n", { mode: 0o600 });
   config.origin = base;
   config.bind = "127.0.0.1";
@@ -87,7 +91,7 @@ try {
   const output = { value: "" };
   child = spawn("bun", ["server/index.ts"], {
     cwd: root,
-    env: { ...process.env, YEISME_CONTROL_CONFIG: configRef, YEISME_CONTROL_BIND: "127.0.0.1", YEISME_CONTROL_PORT: String(port) },
+    env: isolatedReadEnvironment(process.env, configRef, port),
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.on("data", (chunk) => { output.value += String(chunk); });
@@ -218,8 +222,31 @@ try {
     const result = sync.body?.result || sync.body || {};
     collectionSync = { status: sync.response.status, error: sync.body?.error || null, coverage: result.coverage ?? null, complete: result.complete ?? null, pages: result.pages ?? null, counts: result.counts ?? null, blocker: result.blocker ?? null };
   }
-  // Episode board and attention queue are read-only. Record counts, states and coverage only: never refs, titles or bodies.
+  // Collection read, creative-flow and work-queue are read-only projections. Record counts, states and coverage only: never refs, titles or bodies.
+  const collectionPage = await request(`/api/control-center/v1/auctra/collection?scope=${encodeURIComponent(scope)}&limit=50`, { headers: authHeaders });
+  if (collectionPage.response.status !== 200 && ![404, 405].includes(collectionPage.response.status))
+    throw new Error(`auctra_collection_read_failed:${collectionPage.response.status}`);
+  const collectionRead = collectionPage.response.status === 200 ? {
+    status: 200,
+    coverage: collectionPage.body?.coverage ?? null,
+    freshness: collectionPage.body?.freshness ?? null,
+    returned: Array.isArray(collectionPage.body?.rows) ? collectionPage.body.rows.length : 0,
+    total: collectionPage.body?.total ?? null,
+  } : { status: collectionPage.response.status, route_unavailable: true };
   const taskEpisodeRefs =[...new Set([...activeRows, ...historyRows].map((row: any) => row?.episode_ref).filter((ref: unknown): ref is string => typeof ref === "string" && ref.length > 0 && ref.length <= 512 && ref === ref.trim() && !/[\x00-\x1f\x7f]/.test(ref)))].slice(0, 12);
+  const firstCollectionRef = Array.isArray(collectionPage.body?.rows)
+    ? collectionPage.body.rows.find((row: any) =>
+        (typeof row?.episode_ref === "string" && row.episode_ref.length > 0) ||
+        ((row?.kind === "script" || row?.record_kind === "text_unit") && typeof row?.unit_ref === "string" && row.unit_ref.length > 0),
+      )
+    : undefined;
+  const firstEpisodeRef = firstCollectionRef?.episode_ref || firstCollectionRef?.unit_ref;
+  const flowTargetRef = taskEpisodeRefs[0] || firstEpisodeRef;
+  const flowParams = new URLSearchParams({ scope });
+  if (flowTargetRef) flowParams.set("episode_ref", flowTargetRef);
+  const creativeFlowRead = await request(`/api/control-center/v1/creative-flow?${flowParams}`, { headers: authHeaders });
+  if (creativeFlowRead.response.status !== 200 && ![400, 404, 405].includes(creativeFlowRead.response.status))
+    throw new Error(`creative_flow_read_failed:${creativeFlowRead.response.status}`);
   const dramaParams = new URLSearchParams({ scope });
   for (const ref of taskEpisodeRefs) dramaParams.append("episode_ref", ref);
   // After a sync, read every listed episode's stages instead of deferring them, so the rail shows real owner states.
@@ -228,6 +255,16 @@ try {
   const queueRead = await request(`/api/control-center/v1/work-queue?scope=${encodeURIComponent(scope)}`, { headers: authHeaders });
   if (queueRead.response.status !== 200) throw new Error(`work_queue_read_failed:${queueRead.response.status}`);
   const tally = (values: string[]) => values.reduce<Record<string, number>>((acc, value) => ({ ...acc, [value]: (acc[value] || 0) + 1 }), {});
+  const creativeFlow = creativeFlowRead.response.status === 200 ? {
+    status: 200,
+    rail_states: tally((creativeFlowRead.body?.rail || []).map((node: any) => `${node.owner}:${node.state}`)),
+    source_coverage: tally((creativeFlowRead.body?.source_coverage || []).map((source: any) => `${source.owner}:${source.state}`)),
+  } : { status: creativeFlowRead.response.status, error: creativeFlowRead.body?.error || null };
+  const workQueue = {
+    status: 200,
+    total: Array.isArray(queueRead.body?.items) ? queueRead.body.items.length : 0,
+    kinds: tally((queueRead.body?.items || []).map((item: any) => String(item.kind || "unknown"))),
+  };
   const dramaRows: any[] = Array.isArray(dramaList.body?.rows) ? dramaList.body.rows : [];
   const dramaBoard = dramaList.response.status === 200 ? {
     status: 200,
@@ -278,11 +315,16 @@ try {
     layer: "system",
     real_owner_reads: true,
     provider_calls: false,
-    mutations: false,
+    owner_business_writes: false,
+    local_disposable_writes: ["session", "audit", "collection_index"],
+    owner_audit_side_effects: "possible",
     owners: ownerRows,
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
     collection_sync: collectionSync,
+    auctra_collection: collectionRead,
+    creative_flow: creativeFlow,
+    work_queue: workQueue,
     drama_board: dramaBoard,
     open_tools: openTools,
     credentials,
@@ -300,6 +342,9 @@ try {
     provider_discovery: providerStates,
     tool_catalog: toolCatalog,
     collection_sync: collectionSync,
+    auctra_collection: collectionRead,
+    creative_flow: creativeFlow,
+    work_queue: workQueue,
     drama_board: dramaBoard,
     open_tools: openTools,
     credentials,

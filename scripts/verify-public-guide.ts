@@ -64,6 +64,7 @@ async function axe(page: Page) {
 /** Chapters in top-bar order, with headings that only that chapter shows. */
 const chapters = [
   { id: "start", label: "开始", texts: ["从一条体检命令开始", "先搜索，再执行", "公开页面"] },
+  { id: "flow", label: "流程", texts: ["从一张图，到一集漫剧", "人决定，Agent 跑腿", "Agent 自己读进度"] },
   { id: "tools", label: "工具", texts: ["每个工具管好一件事", "把文件、笔记和代码也交给 Agent"] },
   { id: "cases", label: "案例", texts: ["同一个场景，从关键帧做到配乐", "看 Agent 怎么找工具"] },
   { id: "connect", label: "接入", texts: ["把服务接进 Claude Code 和 Codex", "让控制中心看到工具里的任务"] },

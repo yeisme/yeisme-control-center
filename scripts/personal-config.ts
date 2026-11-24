@@ -11,6 +11,9 @@ import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "../server/password";
 import { secret } from "../server/auth";
+import { defaultDatabasePath, migrateDatabase, openDatabase } from "../server/db/client";
+import { InviteStore } from "../server/db/invite-store";
+import { SessionStore } from "../server/db/session-store";
 import { ConfigBusyError, ConfigChangedError, ConfigLockInvalidError, canonicalConfigPath, fileIdentity, ownerProblem, writeConfigIfUnchanged } from "../server/config-lock";
 import { enabledUsers, isEnabledFlag } from "../server/personal-users";
 import { connectionURL, endpointURL } from "../server/task-connections";
@@ -23,10 +26,14 @@ import { isNeverExpires, neverExpires, parseRfc3339 } from "../src/shared/creden
 import type { ServerConfig, TaskConnection, ProviderOwner, ObservationConfig } from "../server/contracts";
 const [command, first, ...rest] = process.argv.slice(2);
 const userActions = ["add", "list", "revoke", "rotate", "enable"];
+const inviteActions = ["create", "list", "revoke"];
 // `user <config-file> add …` is the form every command uses; `user add <config-file> …` is accepted as well.
-const [file, ...args] = command === "user" && userActions.includes(first) && rest.length ? [rest[0], first, ...rest.slice(1)] : [first, ...rest];
+const [file, ...args] =
+  ((command === "user" && userActions.includes(first)) || (command === "invite" && inviteActions.includes(first))) && rest.length
+    ? [rest[0], first, ...rest.slice(1)]
+    : [first, ...rest];
 const usage =
-  "Usage: bun scripts/personal-config.ts init|account|password|user|connect|auctra|provider|open-tool|credential|studio|cancel|content|disable|observe|status <config-file> [arguments]\n" +
+  "Usage: bun scripts/personal-config.ts init|account|password|user|invite|connect|owner|auctra|provider|open-tool|credential|studio|cancel|content|disable|observe|status <config-file> [arguments]\n" +
   "Credential expiry: connect, open-tool, provider and auctra take [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], recorded next to the credential reference (for auctra the dates apply to both keys); never marks a credential that does not expire.\n" +
   "auctra also takes --private-http, like connect and open-tool: plain http to a private IPv4 address is accepted for its origin.\n" +
   "  credential <config-file> list | expiry <slot> <RFC3339|never|none> | replace <slot> <file> [--expires-at|--expires-in] [--issued-at]";
@@ -37,6 +44,7 @@ if (
     "account",
     "password",
     "user",
+    "invite",
     "connect",
     "auctra",
     "provider",
@@ -46,6 +54,7 @@ if (
     "cancel",
     "disable",
     "content",
+    "owner",
     "observe",
     "status",
   ].includes(command)
@@ -487,7 +496,7 @@ if (command === "init") {
       !credential_ref
     )
       throw Error(
-        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--content] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]",
+        "connect requires <id> <eikona|sonora|scaena|anatomia> <endpoint> <owner-project> <credential-file> [--private-http] [--no-content] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>]",
       );
     const c: TaskConnection = {
       id,
@@ -501,7 +510,7 @@ if (command === "init") {
       enabled: true,
       allow_private_http: flags.includes("--private-http"),
       allow_cancel: false,
-      allow_content: flags.includes("--content"),
+      allow_content: !flags.includes("--no-content"),
       ...datesFor(dates),
     };
     connectionURL(c);
@@ -535,6 +544,38 @@ if (command === "init") {
       : `No credential expiry recorded; add one with: credential <config-file> expiry connection:${id} <RFC3339> (or never, if the credential does not expire).`);
     if (c.owner !== "anatomia" && pinned && pinned !== project && !flags.includes("--default"))
       console.log(`Kept ${c.owner} default project ${pinned}; pass --default to make ${project} the default.`);
+  } else if (command === "owner") {
+    // The delegated-read REST target for one task owner (request visibility and the prompt library). `connect`
+    // registers the MCP connection and the scope binding; `owner` adds the origin the aggregation layer reads with.
+    const { rest: ownerArgs, dates } = takeDates(args);
+    const [verb, owner, origin, credential_ref, ...flags] = ownerArgs;
+    const ownerNames = ["eikona", "sonora", "scaena"];
+    if (verb === "remove") {
+      if (!owner || !ownerNames.includes(owner) || ownerArgs.length !== 2)
+        throw Error("owner remove requires <eikona|sonora|scaena>");
+      const owners = { ...(config.owners || {}) };
+      delete (owners as Record<string, unknown>)[owner];
+      config.owners = owners as ServerConfig["owners"];
+      await save(config);
+      console.log(`Removed the ${owner} delegated-read target; restart the control center to reload.`);
+    } else {
+      const privateHttp = flags.includes("--private-http");
+      if (verb !== "add" || !owner || !ownerNames.includes(owner) || !origin || !credential_ref || flags.some((flag) => flag !== "--private-http"))
+        throw Error("owner requires add <eikona|sonora|scaena> <https-origin|loopback-origin> <key-file> [--private-http] [--expires-at <RFC3339|never> | --expires-in <N>d|<N>h] [--issued-at <RFC3339>], or remove <eikona|sonora|scaena>");
+      const ownerOrigin = originFor(origin, privateHttp);
+      const keyFile = credentialFile(credential_ref, "The owner key file");
+      const previous = config.owners?.[owner as "eikona"];
+      const kept = datesToKeep(dates, previous, !!previous?.credential_ref && resolve(previous.credential_ref) === keyFile);
+      config.owners = { ...config.owners, [owner]: { origin: ownerOrigin, audience: owner, credential_ref: keyFile, ...datesFor(kept), ...(privateHttp ? { allow_private_http: true } : {}) } };
+      await save(config);
+      const scope = config.principals.flatMap((p) => p.scopes).find((s) => s.id === "personal");
+      if (scope && !scope.owners[owner as "eikona"])
+        console.log(`No ${owner} scope binding yet; run connect for ${owner} first, or delegated reads have no project.`);
+      console.log(`Saved the ${owner} delegated-read target; no network call or permission change was made. Restart the control center to reload.`);
+      console.log(dates.expires
+        ? isNeverExpires(dates.expires) ? `Recorded that the key never expires for owner:${owner}.` : `Recorded key expiry ${dates.expires} for owner:${owner}.`
+        : `No key expiry recorded; add one with: credential <config-file> expiry owner:${owner} <RFC3339|never>.`);
+    }
   } else if (command === "auctra") {
     // Auctra refuses collection.* to every key but a service-collector one, and refuses everything else to that key, so the
     // stage read (creative.flow.read) needs a second, service-consumer key. One file is accepted for a single-token deployment.
@@ -720,7 +761,7 @@ if (command === "init") {
     console.log(
       "Connection disabled; restart the local control-center process to reload configuration.",
     );
-  } else
+  } else if (command === "status") {
     console.log(
       JSON.stringify(
         {
@@ -770,4 +811,60 @@ if (command === "init") {
         2,
       ),
     );
+  } else if (command === "invite") {
+    const action = args[0];
+    if (config.auth_mode !== "personal" || !config.personal || !inviteActions.includes(action || "")) {
+      throw Error("invite requires create|list|revoke in personal mode.");
+    }
+    requireOwner();
+    const dbFile = config.database?.path || defaultDatabasePath(resolve(file));
+    const db = openDatabase(dbFile);
+    migrateDatabase(db);
+    const invites = new InviteStore(db);
+    if (action === "list") {
+      const targetUser = args[1];
+      console.log(JSON.stringify({ invites: invites.list(targetUser) }, null, 2));
+    } else if (action === "create") {
+      const ttlOpt = takeOption(args.slice(1), "--ttl");
+      const labelOpt = takeOption(ttlOpt.rest, "--label");
+      const keyFileOpt = takeOption(labelOpt.rest, "--key-file");
+      if (keyFileOpt.rest.some((arg) => arg.startsWith("--")) || keyFileOpt.rest.length !== 1) {
+        throw Error("invite create requires <username> [--ttl <Nh|Nd>] [--label <text>] [--key-file <new file>].");
+      }
+      const targetUser = keyFileOpt.rest[0]!;
+      const validUser =
+        enabledUsers(config.personal.users).some((u) => u.username === targetUser) ||
+        (config.personal.username !== undefined && config.personal.username === targetUser);
+      if (!validUser) throw Error("Enabled personal user not found: " + targetUser);
+      let ttlMs = 7 * 86_400_000;
+      if (ttlOpt.value) {
+        const match = /^([1-9]\d{0,2})([hd])$/.exec(ttlOpt.value);
+        if (!match) throw Error("--ttl takes <N>h or <N>d, e.g. 24h or 7d.");
+        ttlMs = Number(match[1]) * (match[2] === "d" ? 86_400_000 : 3_600_000);
+      }
+      const issued = invites.issue({
+        username: targetUser,
+        label: labelOpt.value || "CLI invite",
+        createdBy: config.personal.username || "cli-operator",
+        ttlMs,
+      });
+      const inviteUrl = `${config.origin.replace(/\/+$/, "")}/?token=${encodeURIComponent(issued.token)}`;
+      if (keyFileOpt.value) {
+        const saved = writeKeyFile(keyFileOpt.value, inviteUrl);
+        console.log(JSON.stringify({ invite: issued.invite, url_file: saved }, null, 2));
+      } else {
+        console.log(JSON.stringify({ invite: issued.invite, invite_token: issued.token, invite_url: inviteUrl }, null, 2));
+      }
+    } else if (action === "revoke") {
+      const id = args[1];
+      if (!id || args.length !== 2) throw Error("invite revoke requires <invite-id>.");
+      const revoked = invites.revoke(id);
+      if (!revoked) throw Error("Invite not found: " + id);
+      const sessions = new SessionStore(db);
+      for (const s of sessions.values()) {
+        if (s.personal && s.invite_id === id) sessions.delete(s.id);
+      }
+      console.log(JSON.stringify({ invite: revoked, sessions_ended: true }, null, 2));
+    }
+  }
 }

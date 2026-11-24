@@ -27,7 +27,11 @@ function run(command, args, env = {}) {
 }
 try {
   if (!existsSync("dist/index.html")) throw new Error("Build the client before browser verification.");
-  start(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", String(uiPort), "--strictPort"], { V18_API_ORIGIN: `http://127.0.0.1:${livePort}` });
+  const liveOrigin = `http://127.0.0.1:${livePort}`;
+  // Keep the Vite proxy's Host/Origin headers aligned with the ephemeral live
+  // server port. Without this, the server correctly rejects the proxy as a
+  // misdirected request (421) whenever CI uses a non-default port.
+  start(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", String(uiPort), "--strictPort"], { V18_API_ORIGIN: liveOrigin, V18_CONTROL_ORIGIN: liveOrigin });
   start("bun", ["server/index.ts"], { YEISME_CONTROL_ORIGIN: `http://127.0.0.1:${livePort}`, YEISME_CONTROL_BIND: "127.0.0.1", YEISME_CONTROL_PORT: String(livePort) });
   await Promise.all([waitFor(`http://127.0.0.1:${uiPort}/`), waitFor(`http://127.0.0.1:${livePort}/api/control-center/v1/health`)]);
   await run("bun", ["run", "test:app"], { APP_URL: `http://127.0.0.1:${uiPort}/` });
