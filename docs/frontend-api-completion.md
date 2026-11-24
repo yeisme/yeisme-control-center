@@ -84,12 +84,16 @@ GET /projects/{project}/generation-batches/{batch}
 - `verify-collaboration-journey` 两项：服务端分页、筛选进地址、失效游标回到最新、跨范围直达非首页批次、提醒回链；
 - `verify-contract-integration` 两项：两个 Eikona 项目的批次各自在所属项目观察；停用成员在翻页中途返回 404。
 
-## A2：参考 binding 目录与授权预览（拟议，P1，split-owner）
+## A2：参考 binding 目录与授权预览（本地 fail-closed 路由已实现，owner 合同 pending，P1，split-owner）
 
 ```text
 GET  /projects/{project}/reference-bindings?owner=eikona|scaena&kind=image|video&q=&cursor=&limit=
 POST /projects/{project}/reference-bindings/{binding}/access
 ```
+
+2026-11-05：控制中心已实现上述路由的输入校验、scope/epoch 隔离和统一响应形状。当前 Eikona/Scaena 尚未提供可验证的 binding 目录与预览授权合同，因此目录返回 `coverage=unknown`、`availability=needs_contract`、空 `rows` 和按 owner/project 的来源缺口；访问请求在 CSRF、purpose、revision、digest 校验后返回 `needs_contract`，不会请求 owner、读取原文件或伪造短期句柄。`tests/reference-bindings.test.ts` 覆盖跨 scope、非法查询、缺合同和无 owner 调用场景。以下 owner 字段和成功访问行为仍属于待发布合同，不能作为真实素材或部署能力。
+
+2026-11-07：制作线的设定站改读 Scaena 按集制作摘要里的 `references` 一节（整个项目的参考库总数与停用数，本地实现，见 `yeisme-control-center-episode-production-observation-v1`）。这只是计数，不是 binding 目录；上面的目录与预览授权仍返回 `needs_contract`。
 
 该目录只投影 owner 已存在的不可变 binding。控制中心不上传本机路径、不从任意 URL 下载、不把 `ProjectBinding`（项目连接）当成素材 binding。owner 尚未提供可用目录时返回带 `coverage=unknown`、`availability=needs_contract`、安全 reason 的空目录；这是未知来源，不是“没有素材”。
 
@@ -133,6 +137,10 @@ POST /projects/{project}/reference-bindings/{binding}/access
 - 工作队列 Inspector 和其他状态标签用同一个短词“待补齐接口”（`needsContractLabel`，`src/shared/read-model/labels.ts`），解释缺口的长句不动；“未接入”只留给服务目录里控制中心没有合同的条目；
 - 服务目录把 `not_integrated` 的条目折叠在一个默认收起的“未接入”分组里，不逐行写状态。
 
+2026-11-07：审阅与交付的**读取**部分可见：成片站从 Scaena 按集制作摘要显示审阅记录次数、严重问题数、剪辑会话和合成预览（本地实现，部署版 Scaena 尚无该操作）。交付因 Scaena 交付包没有集字段，仍显示「交付状态待接通」。审阅决定与交付写入不变，仍为 `needs_contract`，只做交接。
+
+2026-11-07：Eikona 运行的审阅**读取**可见：画面站和任务详情经观察者动作 `control_center.tasks.review` 显示 Eikona 自己记录的决定与计数（本地实现，见 `yeisme-control-center-task-review-observation-v1`；部署版 Eikona 尚无该动作，显示「审阅状态待接通」）。从控制中心做审阅决定仍为 `needs_contract`。
+
 本轮不在控制中心实现任何领域写入。下表写明每项由谁负责，以及 owner 发布什么之后才能做适配。
 
 ### 领域写入
@@ -154,7 +162,6 @@ POST /projects/{project}/reference-bindings/{binding}/access
 | Capsa | `backend-server/capsa` | 只读摘要待适配；不解密用户内容。 |
 | Manju | `backend-server/manju` | 当前部署及公开观测合同待核验。 |
 | Template Registry | `backend-server/template-registry` | 版本目录投影待 typed adapter。 |
-| Quaestor | `cli/quaestor` | 远程管理合同未确认。 |
 | Digital Human / OpenTalking | `agent/digital-human` | 现行 OpenTalking 与旧目录描述不同；须按当前公开合同接入。 |
 | Open Design | `OpenDesign MCP` | 设计读取已用于本次交接，浏览器用户接入未配置。 |
 | SoloCut | `OpenDesign / solocut-agent-editor` | 当前仅确认设计原型，不是已部署业务应用。 |
