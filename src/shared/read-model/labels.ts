@@ -79,8 +79,18 @@ export const catalogCoverageTone: Record<CatalogCoverageState, Tone> = {
 };
 
 export const freshnessLabels: Record<CatalogFreshness, string> = { fresh: "最新观察", stale: "数据已过期", unknown: "未观察" };
-export const channelStatusLabels: Record<ChannelStatus, string> = { ready: "就绪", blocked: "阻塞", unknown: "未观察" };
-export const channelStatusTone: Record<ChannelStatus, Tone> = { ready: "success", blocked: "warning", unknown: "neutral" };
+export const channelStatusLabels: Record<ChannelStatus, string> = { ready: "就绪", configured: "已配置凭据", blocked: "阻塞", unknown: "未观察" };
+export const channelStatusTone: Record<ChannelStatus, Tone> = { ready: "success", configured: "info", blocked: "warning", unknown: "neutral" };
+
+/** The owner's own readiness words (Eikona `readiness`); "ready" says nothing about being the latest snapshot. */
+export const modelReadinessLabels: Record<string, string> = {
+  ready: "就绪（未声明是否最新）",
+  configured: "已配置",
+  supported: "支持（未配置）",
+  partial: "部分就绪",
+  blocked: "不可用",
+  unknown: "未知",
+};
 export const entryKindLabels: Record<CatalogEntryKind, string> = { server: "服务", tool: "工具", action: "动作", model: "模型", channel: "渠道" };
 export const changeLabels = { added: "新增", changed: "已变更", removed: "已移除" } as const;
 export const changeTone: Record<keyof typeof changeLabels, Tone> = { added: "success", changed: "info", removed: "neutral" };
@@ -173,4 +183,53 @@ export const capabilityLabels: Record<string, string> = {
 export function labelFrom(map: Record<string, string>, value: string | null | undefined, fallback = "未提供") {
   if (!value) return fallback;
   return map[value] || value;
+}
+
+const taskFamilyLabels: Record<string, string> = {
+  run: "生成运行",
+  image: "图像任务",
+  delegation: "委托任务",
+  "video-task": "视频任务",
+  "voice-render-job": "配音合成",
+  "music-job": "音乐生成",
+  "audio-job": "音频任务",
+  "local-job": "本地任务",
+  // Anatomia: a shot breakdown of a video, and a question asked about one. Not Scaena's production breakdown.
+  decompose: "拉片分析",
+  understand: "视频问答",
+};
+
+const humanize = (value: string) => value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim();
+
+export function taskFamilyLabel(family: string | null | undefined) {
+  return family ? taskFamilyLabels[family] || humanize(family) : "类型未提供";
+}
+
+const mediaWords: Record<string, string> = { image: "图像", video: "视频", audio: "音频", text: "文本" };
+/** Names a tool writes when it has none of its own: they say nothing about the work, so the page names it instead. */
+const placeholderName = /^(?:owner\s+)?(?:result|output|artifact|file|未命名结果)(?:\s*#?\d+)?$/i;
+
+export function isPlaceholderName(name: string | null | undefined) {
+  const value = (name || "").trim();
+  return !value || placeholderName.test(value);
+}
+
+const pad = (value: number) => String(value).padStart(2, "0");
+function shortTime(value: string | null | undefined) {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}` : "";
+}
+
+/**
+ * A result's own name, or — when the tool gave a placeholder such as 「Owner result」 — the kind of work and when it was
+ * made: 「音乐生成 · 11-08 14:20」. The tool's name stays as it is; only what the page shows changes.
+ */
+export function resultDisplayName({ name, family, kind, title, at }: { name: string | null | undefined; family?: string | null; kind?: string | null; title?: string | null; at?: string | null }) {
+  if (!isPlaceholderName(name)) return name!.trim();
+  const work = family && taskFamilyLabels[family] ? taskFamilyLabels[family]
+    : title && !isPlaceholderName(title) ? title.trim()
+    : family ? humanize(family)
+    : kind && mediaWords[kind] ? `${mediaWords[kind]}结果` : "未命名结果";
+  const time = shortTime(at);
+  return time ? `${work} · ${time}` : work;
 }

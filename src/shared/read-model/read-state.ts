@@ -26,7 +26,7 @@ export const readStatusLabels: Record<ReadStatus, string> = {
   loading: "读取中",
   ready: "已读取",
   empty: "暂无记录",
-  stale: "数据可能已过期",
+  stale: "数据有点旧",
   forbidden: "无读取权限",
   unavailable: "来源不可用",
   unknown: "尚未确认",

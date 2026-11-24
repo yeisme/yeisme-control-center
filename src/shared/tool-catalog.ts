@@ -14,7 +14,7 @@ export type CatalogEntryKind = "server" | "tool" | "action" | "model" | "channel
 export type ModelSnapshotStatus = "latest_ready" | "latest_unverified" | "unavailable" | "historical" | "drifted" | "unknown_cost" | "unknown";
 export type RiskTier = "read_only" | "remote_query" | "mutation" | "paid_external" | "human_gate" | "unknown";
 export type ActionAvailability = "available" | "blocked" | "unavailable" | "planned" | "unknown";
-export type ChannelStatus = "ready" | "blocked" | "unknown";
+export type ChannelStatus = "ready" | "configured" | "blocked" | "unknown";
 
 export const ownerModelStatuses: readonly ModelSnapshotStatus[] = ["latest_ready", "latest_unverified", "unavailable", "historical", "drifted", "unknown_cost"];
 
@@ -114,7 +114,8 @@ export interface CatalogModel {
   pricing: CatalogPricing | null;
   readiness: string | null;
   status: ModelSnapshotStatus;
-  status_source: "owner" | "undeclared";
+  /** `owner_readiness`: the owner declared no status, but its own readiness said blocked; never inferred as latest. */
+  status_source: "owner" | "owner_readiness" | "undeclared";
   observed_at: string | null;
   expires_at: string | null;
   digest: string | null;

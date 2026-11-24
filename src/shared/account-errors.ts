@@ -1,0 +1,26 @@
+/** Why the server refused, in words a person can act on. */
+export const accountErrorText: Record<string, string> = {
+  last_admin_required: "至少要留一个有效的管理员。先让另一个账号当管理员，再改这个。",
+  cannot_revoke_self: "不能停用你自己正在用的账号。",
+  legacy_owner_managed_by_cli: "这是配置文件里的主账号，只能用命令行管理。",
+  user_exists: "这个用户名已经有了。",
+  owner_username_required: "配置里的主账号还没有用户名，新建账号后它就登录不了了。先在服务器上用命令行给它起个用户名（personal-config account <配置文件> <用户名> admin），再来新建。",
+  user_duplicate: "这个用户名在配置里出现了不止一次，先用命令行修正，再启用。",
+  web_account_management_disabled: "网页账号管理已在配置里关闭（personal.web_accounts.manage）。",
+  user_management_unavailable: "服务端没有可写的配置文件，账号只能用命令行管理。",
+  user_changed: "这个账号刚被改过（可能是命令行），已经重新读取，请再改一次。",
+  scope_not_found: "选的范围不存在了，请重新选。",
+  invalid_user: "用户名只能用字母、数字、点、横线和下划线，显示名不能为空。",
+  config_busy: "配置文件正被另一个操作占用，过一会儿再试。",
+  config_lock_invalid: "配置文件旁的锁文件不对，需要在服务器上处理。",
+  control_center_admin_required: "只有管理员能管账号。",
+  csrf_denied: "登录状态变了，刷新页面后再试。",
+  invalid_credentials: "现在的 Key 不对，再看一下。",
+  personal_connection_required: "组织身份登录的账号由你的组织管理，这里不能重置。",
+  personal_login_unavailable: "当前服务没有开启个人登录。",
+  user_not_found: "这个账号已经不在配置里了，刷新列表看看。",
+  user_disabled: "这个账号处于停用状态，请先启用账号再生成邀请链接。",
+  invite_not_found: "没有找到这条邀请记录，可能已被删除，刷新看看。",
+  invalid_invite_ttl: "邀请有效期需要在 5 分钟到 30 天之间。",
+};
+export const accountError = (code: string) => accountErrorText[code] || `没有完成（错误码 ${code}）。`;

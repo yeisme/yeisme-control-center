@@ -7,25 +7,36 @@ export async function readTaskPages(
   read: (cursors?: Record<string, string>) => Promise<TaskPage>,
   maxPages = 100,
 ): Promise<TaskPage> {
-  const { truncated, ...page } = await collectTaskPages(read, maxPages);
+  const { truncated, remaining: _remaining, pages: _pages, ...page } = await collectTaskPages(read, maxPages);
   if (truncated) throw Error(truncated);
   return page;
 }
 
+export type BoundedTaskPage = TaskPage & {
+  truncated: "task_page_limit" | "task_cursor_repeated" | null;
+  /** Where the next page would start when the page cap stopped the read; empty when the source was read to its end. */
+  remaining: Record<string, string>;
+  /** Pages actually read. */
+  pages: number;
+};
+
 // Same aggregation, but a page cap or repeated cursor returns the rows read so
 // far and names the reason, so a bounded batch is never shown as the full set.
+// `start` continues from cursors an earlier bounded read left (reading deeper).
 export async function readTaskPagesBounded(
   read: (cursors?: Record<string, string>) => Promise<TaskPage>,
   maxPages: number,
-): Promise<TaskPage & { truncated: "task_page_limit" | "task_cursor_repeated" | null }> {
-  return collectTaskPages(read, maxPages);
+  start?: Record<string, string>,
+): Promise<BoundedTaskPage> {
+  return collectTaskPages(read, maxPages, start);
 }
 
 async function collectTaskPages(
   read: (cursors?: Record<string, string>) => Promise<TaskPage>,
   maxPages: number,
-): Promise<TaskPage & { truncated: "task_page_limit" | "task_cursor_repeated" | null }> {
-  const first = await read(),
+  start?: Record<string, string>,
+): Promise<BoundedTaskPage> {
+  const first = await read(start),
     rows = new Map(first.rows.map((t) => [t.task_key!, t])),
     connections = new Map(first.connections.map((c) => [c.id, c]));
   let cursors = first.next_cursors,
@@ -33,7 +44,8 @@ async function collectTaskPages(
     truncated: "task_page_limit" | "task_cursor_repeated" | null = null;
   const seen = new Set<string>();
   while (Object.keys(cursors).length) {
-    if (pages++ >= maxPages) { truncated = "task_page_limit"; break; }
+    if (pages >= maxPages) { truncated = "task_page_limit"; break; }
+    pages += 1;
     const key = JSON.stringify(Object.entries(cursors).sort());
     if (seen.has(key)) { truncated = "task_cursor_repeated"; break; }
     seen.add(key);
@@ -55,6 +67,8 @@ async function collectTaskPages(
     connections: [...connections.values()],
     next_cursors: {},
     truncated,
+    remaining: truncated === "task_page_limit" ? cursors : {},
+    pages,
   };
 }
 export function mergeConnectionObservations(

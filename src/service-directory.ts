@@ -82,7 +82,6 @@ export const serviceDefinitions: readonly ServiceDefinition[] = [
   { id: "capsa", name: "Capsa", kind: "service", owner_path: "backend-server/capsa", purpose: "设备、同步积压与冲突摘要", integration: "not_integrated", gap: "只读摘要待适配；不解密用户内容。" },
   { id: "manju", name: "Manju", kind: "service", owner_path: "backend-server/manju", purpose: "项目知识与证据检索", integration: "not_integrated", gap: "当前部署及公开观测合同待核验。" },
   { id: "template-registry", name: "Template Registry", kind: "service", owner_path: "backend-server/template-registry", purpose: "模板版本、依赖与安装事实", integration: "not_integrated", gap: "版本目录投影待 typed adapter。" },
-  { id: "quaestor", name: "Quaestor", kind: "local_tool", owner_path: "cli/quaestor", purpose: "研究项目、论点与实验记录", integration: "not_integrated", gap: "远程管理合同未确认。" },
   { id: "digital-human", name: "Digital Human / OpenTalking", kind: "service", owner_path: "agent/digital-human", purpose: "数字人会话、声音与运行时", integration: "not_integrated", gap: "现行 OpenTalking 与旧目录描述不同；须按当前公开合同接入。" },
   { id: "opendesign", name: "Open Design", kind: "service", owner_path: "OpenDesign MCP", purpose: "设计项目、运行与产物交接", integration: "not_integrated", gap: "设计读取已用于本次交接，浏览器用户接入未配置。" },
   { id: "solocut", name: "SoloCut", kind: "design", owner_path: "OpenDesign / solocut-agent-editor", purpose: "剪辑工作台设计", integration: "not_integrated", gap: "当前仅确认设计原型，不是已部署业务应用。" },

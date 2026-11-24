@@ -14,7 +14,7 @@ export type SourceStatusKind = "loading" | "ready" | "partial" | "stale" | "down
 export interface SourceGap {
   id: string;
   label: string;
-  /** Readable reason, such as 来源不可用 or 需要 owner 授权. */
+  /** Readable reason, such as 来源不可用 or 需要工具授权. */
   reason: string;
 }
 
@@ -58,8 +58,8 @@ export function sourceStatus(input: SourceInput): SourceStatus {
   const count = `${readable}/${total} 连接可读`;
   const base = { readable, total, gaps, lanes, observedAt: input.observedAt };
   if (input.status === "loading") return { ...base, kind: "loading", tone: "neutral", label: "读取连接…" };
-  if (input.status === "stale" && input.readFailed) return { ...base, kind: "stale", tone: "warning", label: "数据可能已过期" };
-  if (input.error === "personal_connection_required" || (total === 0 && !downStatuses.includes(input.status))) return { ...base, kind: "none", tone: "neutral", label: "无任务连接" };
+  if (input.status === "stale" && input.readFailed) return { ...base, kind: "stale", tone: "warning", label: "数据有点旧" };
+  if (input.error === "personal_connection_required" || (total === 0 && !downStatuses.includes(input.status))) return { ...base, kind: "none", tone: "neutral", label: "暂无连接" };
   if (downStatuses.includes(input.status)) return { ...base, kind: "down", tone: "danger", label: total ? count : "任务来源不可读" };
   if (failed.length) return { ...base, kind: "partial", tone: "warning", label: `${failed.join("、")}暂不可读` };
   if (gaps.length || lanes.length) return { ...base, kind: "partial", tone: readable === 0 ? "danger" : "warning", label: count };
@@ -77,7 +77,7 @@ export interface SourceLine {
  * lists. Pages show nothing when the sources are down: their empty state already explains that.
  */
 export function sourceLine(status: SourceStatus, noun: string, now = Date.now()): SourceLine | null {
-  if (status.kind === "stale") return { text: `数据可能已过期：最近一次读取失败，显示的是${cjkSpaced(status.observedAt ? formatRelative(status.observedAt, now) : "较早")}的结果。`, retry: true };
+  if (status.kind === "stale") return { text: `数据有点旧：最近一次读取失败，显示的是${cjkSpaced(status.observedAt ? formatRelative(status.observedAt, now) : "较早")}的结果。`, retry: true };
   if (status.kind !== "partial") return null;
   if (status.lanes.length) return { text: `${status.lanes.join("、")}暂不可读，${noun}可能不完整。`, retry: true };
   return { text: `${status.gaps.length} 个连接暂不可读，${noun}可能不完整：${status.gaps.map((gap) => gap.label).join("、")}`, retry: false };

@@ -11,7 +11,7 @@ export type DramaEpisodeOrigin = "collection" | "requested";
 export type DramaReadState = "read" | "cached" | "deferred" | "failed";
 export type DramaRailState = CreativeFlowState | "not_started";
 
-/** Structure only: headings and camera facts. Script text, prompts, candidate bodies and media never enter this projection. */
+/** Structure only: headings, camera facts and two status flags. Script text, prompts, candidate bodies and media never enter this projection. */
 export interface StoryboardOutlineShot {
   shot_ref: string;
   order: number;
@@ -19,6 +19,10 @@ export interface StoryboardOutlineShot {
   camera_angle?: string;
   camera_movement?: string;
   duration_ms?: number;
+  /** Scaena says the shot is ready for generation. Copied as a flag only. */
+  generation_ready?: boolean;
+  /** Whether the breakdown binds a keyframe to this shot. Only the state; the binding itself never leaves the server. */
+  frame_state?: "ready" | "pending";
 }
 
 export interface StoryboardOutlineScene {

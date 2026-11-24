@@ -1,4 +1,6 @@
 import type { ProcessObservation, PromptCaptureObservation, ProcessProgress } from "./observation-contract";
+import { compileTaskFilters } from "./shared/task-query";
+import type { TaskFreshness, TaskFreshnessReason } from "./shared/task-freshness";
 
 export const taskOwners = ["eikona", "sonora", "scaena", "anatomia"] as const;
 export type TaskOwner = (typeof taskOwners)[number];
@@ -32,6 +34,16 @@ export interface TaskArtifact {
     reason?: string;
   };
 }
+/** Explicit, audited original-prompt read bound to one task. */
+export interface TaskPromptContent {
+  state: "complete" | "not_recorded";
+  text?: string;
+  truncated?: boolean;
+  capture_ref?: string;
+  task_ref?: string;
+  receipt_ref?: string;
+}
+
 export interface TaskSnapshot {
   schema_version: "yeisme.task_observation.v1";
   locator: TaskLocator;
@@ -40,17 +52,33 @@ export interface TaskSnapshot {
   title: string;
   state: string;
   native_state: string;
+  /** Owner-provided bounded failure diagnostics; never raw provider payload. */
+  error_code?: string;
+  error_summary?: string;
   stage: string;
   revision: string;
   created_at: string;
   updated_at: string | null;
   observed_at: string;
+  /** Local liveness projection; never replaces the owner's state. */
+  control_center_freshness?: TaskFreshness;
+  control_center_freshness_reason?: TaskFreshnessReason;
   started_at: string | null;
   progress: TaskProgress;
   source: string;
   actor: string | null;
+  /** Typed only when the owner mapped a verified credential or run identity. Free text in `actor` never sets this. */
+  actor_type?: "human" | "agent" | "service" | "unknown";
+  /** Trusted correlation refs. Joins to a gateway call only by exact `gateway_call_ref`, never by time. */
+  origin_refs?: {
+    gateway_call_ref?: string;
+    mcp_session_ref?: string;
+    run_identity_purpose?: string;
+  };
   parent_ref: string | null;
   episode_ref?: string;
+  /** The owner's own episode resource (for example `sonora://…`); not the Auctra/Scaena episode, so never matched against one directly. */
+  owner_episode_ref?: string;
   work_url?: string;
   results: TaskArtifact[];
   allowed_actions: {
@@ -62,6 +90,37 @@ export interface TaskSnapshot {
   provider_recovery?: TaskProviderRecovery;
   process?: ProcessObservation;
   prompt_capture?: PromptCaptureObservation;
+  /** The owner's own `yeisme.process_timing.v1` record for this run. Absent when the owner sent none; never derived here. */
+  timing?: ProcessTiming;
+}
+
+export const processTimingStatuses = [
+  "created", "queued", "running", "stalled", "paused", "blocked", "waiting_for_human",
+  "reconciling", "completed", "failed", "timed_out", "cancelled", "expired",
+] as const;
+export type ProcessTimingStatus = (typeof processTimingStatuses)[number];
+
+/**
+ * What the control center keeps of an owner's timing record: identity, status, times and the five durations, under the
+ * owner's field names. A duration the owner did not send as a non-negative integer is `null`, not zero. Events, digests
+ * and evidence refs are not carried.
+ */
+export interface ProcessTiming {
+  run_ref: string;
+  parent_run_ref?: string;
+  phase: string;
+  operation: string;
+  status: ProcessTimingStatus;
+  started_at: string;
+  ended_at: string | null;
+  wall_duration_ms: number | null;
+  active_duration_ms: number | null;
+  queue_duration_ms: number | null;
+  blocked_duration_ms: number | null;
+  human_wait_duration_ms: number | null;
+  heartbeat_at: string | null;
+  stall_after_ms: number | null;
+  retry_count: number | null;
 }
 export interface TaskEvent {
   id: string;
@@ -176,63 +235,31 @@ export function taskNeedsAttention(task: Pick<TaskSnapshot, "state">) {
   ].includes(task.state);
 }
 export interface TaskFilters {
+  /** The search box: words, quoted phrases, `-` exclusions and any `键:值` clause still typed there. */
   text: string;
   connection: string;
   owner: string;
   project: string;
   state: string;
   family: string;
+  /** Media kind (`kind` in the address): image, video, audio or text. */
   modality: string;
   results: string;
   prompt: string;
   from: string;
   through: string;
+  /** Episode refs, comma-separated (`episode`). */
+  episode?: string;
+  /** Updated within a window (`upd`): 24h, 7d, 今天, 本周 or a date range. */
+  updated?: string;
 }
 
-export function promptCaptureForTask(task: Pick<TaskSnapshot, "prompt_capture" | "process">): PromptCaptureObservation | undefined {
-  return task.prompt_capture || task.process?.prompt_capture || task.process?.checkpoints?.find((checkpoint) => checkpoint.prompt_capture)?.prompt_capture;
-}
-// Filters operate only on the bounded, authorized observation batch. Missing
-// timestamps cannot satisfy an explicit UTC creation-date range.
-export function filterTasks(tasks: TaskSnapshot[], filters: TaskFilters) {
-  const needle = filters.text.trim().toLocaleLowerCase();
-  const includes = (selected: string, value: string | undefined) => !selected || selected.split(",").includes(value || "");
-  return tasks.filter((task) => {
-    if (!includes(filters.connection, task.connection_id))
-      return false;
-    if (!includes(filters.owner, task.locator.owner)) return false;
-    if (!includes(filters.project, task.locator.project)) return false;
-    if (!includes(filters.state, task.state)) return false;
-    if (!includes(filters.family, task.locator.task_family))
-      return false;
-    const resultCount = task.results?.length || 0;
-    if (filters.results === "yes" && resultCount === 0) return false;
-    if (filters.results === "no" && resultCount > 0) return false;
-    if (!includes(filters.prompt, promptCaptureForTask(task)?.state)) return false;
-    if (
-      needle &&
-      ![
-        task.title,
-        task.locator.task_ref,
-        task.locator.project,
-        task.locator.owner,
-        task.episode_ref || "",
-      ].some((v) => v.toLocaleLowerCase().includes(needle))
-    )
-      return false;
-    if (filters.from || filters.through) {
-      const created = Date.parse(task.created_at);
-      if (!Number.isFinite(created)) return false;
-      if (filters.from && created < Date.parse(filters.from + "T00:00:00Z"))
-        return false;
-      if (
-        filters.through &&
-        created >= Date.parse(filters.through + "T00:00:00Z") + 86400000
-      )
-        return false;
-    }
-    return true;
-  });
+export { promptCaptureForTask } from "./shared/task-query";
+// Filters operate only on the bounded, authorized observation batch. Missing timestamps cannot satisfy an explicit
+// date range. The rules live in `compileTaskFilters`, which also gives the per-filter counts and the match ranking.
+export function filterTasks(tasks: TaskSnapshot[], filters: TaskFilters, options?: Parameters<typeof compileTaskFilters>[1]) {
+  const compiled = compileTaskFilters(filters, options);
+  return tasks.filter((task) => compiled.matches(task));
 }
 export function progressLabel(p: TaskProgress): string {
   if (
@@ -276,7 +303,7 @@ export const taskStateLabels: Record<string, string> = {
   cancelled: "已取消",
   canceled: "已取消",
   unknown: "结果未知",
-  waiting_review: "待审阅",
+  waiting_review: "等你确认",
   blocked: "受阻",
   cancel_requested: "取消请求中",
 };

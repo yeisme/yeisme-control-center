@@ -49,6 +49,20 @@ export function formatDurationMs(value: number | null | undefined) {
   return `${minutes}:${String(Math.round(seconds % 60)).padStart(2, "0")}`;
 }
 
+/** A working span in a person's units: 42 秒, 18 分, 2 小时 14 分, 3 天 4 小时. Under a second reads as "不到 1 秒". */
+export function formatSpan(value: number | null | undefined) {
+  if (value === null || value === undefined) return null;
+  const seconds = Math.floor(value / 1000);
+  if (seconds < 1) return value > 0 ? "不到 1 秒" : "0 秒";
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes < 10 && seconds % 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours} 小时 ${minutes % 60} 分` : `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days} 天 ${hours % 24} 小时` : `${days} 天`;
+}
+
 const currencySymbols: Record<string, string> = { CNY: "¥", USD: "$", EUR: "€" };
 
 export function formatMoney(amount: number | null | undefined, currency: string) {

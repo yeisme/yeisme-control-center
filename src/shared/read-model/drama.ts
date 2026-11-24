@@ -115,7 +115,7 @@ const attentionVerb: Record<string, string> = { review: "待审阅", repair: "�
 /** One sentence naming the stage and the owner, so a producer knows who has to move next. */
 export function nextStepText(rail: DramaRailStage[], attention: Parameters<typeof dramaNextStep>[1]): NextStepText {
   const step = dramaNextStep(rail, attention);
-  if (step.kind === "done") return { text: "已推进到制作拆解；生成、审阅与交付尚无 owner 合同", tone: "success" };
+  if (step.kind === "done") return { text: "前期走完了：分镜已经拆好，可以出画面了", tone: "success" };
   const stage = step.stage ? dramaStageLabels[step.stage] : "";
   const owner = step.owner ? dramaOwnerNames[step.owner] : "";
   if (step.kind === "start") return { text: `待开始：${stage}（${owner}）`, tone: "neutral" };

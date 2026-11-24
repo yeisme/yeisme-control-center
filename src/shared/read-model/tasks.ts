@@ -1,10 +1,11 @@
 import type { TaskArtifact, TaskConnectionState, TaskSnapshot } from "../../task-observation";
 import { taskIsActive, taskNeedsAttention, taskStageLabels } from "../../task-observation";
-import { kindOf, type MediaKind } from "../../components/ui/Kind";
+import { kindOf, ownerModality, type MediaKind } from "../media-kind";
 import { formatBytes, formatDurationMs } from "./format";
+import { isPlaceholderName, resultDisplayName } from "./labels";
 
 // Anatomia analyses videos; its results are still frames, which their own mime type marks as images.
-export const ownerModality: Record<string, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio", anatomia: "video" };
+export { ownerModality } from "../media-kind";
 
 export function taskKind(task: TaskSnapshot): MediaKind {
   const first = task.results.find((result) => result.mime);
@@ -34,7 +35,7 @@ export function inView(task: TaskSnapshot, view: TaskView) {
 const connectionStateLabels: Record<string, string> = {
   ready: "可读",
   not_checked: "尚未观察",
-  needs_authorization: "需要 owner 授权",
+  needs_authorization: "需要工具授权",
   needs_contract: "缺少观测合同",
   source_unavailable: "来源不可用",
   source_rate_limited: "来源限流",
@@ -124,3 +125,14 @@ export const recoveryLabels: Record<string, string> = {
   submission_unknown: "提交结果未知",
   blocked: "受阻",
 };
+
+/** What a result card is called: its own name, or the kind of work and when, for a tool's placeholder name. */
+export function resultName(entry: { task: TaskSnapshot; result: TaskArtifact; kind?: MediaKind }) {
+  return resultDisplayName({ name: entry.result.name, family: entry.task.locator.task_family, kind: entry.kind, title: entry.task.title, at: entry.task.updated_at || entry.task.created_at });
+}
+
+/** The line under a result's name: the source task, unless that is a placeholder or repeats the name; then the project. */
+export function resultSource(entry: { task: TaskSnapshot; result: TaskArtifact; kind?: MediaKind }) {
+  const title = entry.task.title?.trim() || "";
+  return title && !isPlaceholderName(title) && title !== resultName(entry) ? title : entry.task.locator.project;
+}

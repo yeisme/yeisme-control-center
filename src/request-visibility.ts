@@ -56,7 +56,12 @@ export interface RequestProjection {
   state: string;
   native_state: string;
   actor: string;
-  actor_type: "human" | "service" | "unknown";
+  actor_type: "human" | "agent" | "service" | "unknown";
+  origin_refs?: {
+    gateway_call_ref?: string;
+    mcp_session_ref?: string;
+    run_identity_purpose?: string;
+  };
   created_at: string;
   duration_ms: number | null;
   model: string | null;

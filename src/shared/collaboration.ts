@@ -5,6 +5,13 @@ export interface CollaborationOrganization { id: string; name: string; source_te
 export interface CollaborationMember { id: string; organization_id: string; identity: string; name: string; role: OrganizationRole; status: "active" | "suspended"; revision: number }
 export interface CollaborationTeam { id: string; organization_id: string; name: string; revision: number; member_ids: string[] }
 export interface ProjectGrant { subject_type: "member" | "team"; subject_id: string; role: ProjectRole }
+export interface ProjectCollectionBinding { owner: "auctra"; source_scope: string; project_ref: string }
+export interface ProjectCollectionBindingView {
+  binding: ProjectCollectionBinding | null; revision: number; epoch?: number;
+  availability: "connected" | "binding_missing" | "forbidden" | "target_missing" | "no_credential";
+  reason?: string;
+}
+export interface ProjectCollectionBindingOptions { rows: ProjectCollectionBinding[]; revision: number; epoch?: number }
 export interface ProjectBinding { owner: string; project_ref: string; source_scope: string; connection_ids: string[] }
 /** A tool project that can be bound: the binding itself, plus where it comes from (never sent back when saving). */
 export interface BindingOption extends ProjectBinding { pinned: boolean; registered: boolean }
@@ -45,7 +52,7 @@ export interface GenerationBatchDetail { batch: GenerationBatch; coverage: "comp
 export const projectRoleLabels: Record<ProjectRole, string> = { project_admin: "项目管理员", creator: "创作者", viewer: "查看者" };
 export const collaborationActions = [
   "organization.create", "organization.member.set", "team.create", "team.members.set",
-  "project.create", "project.update", "project.members.set", "project.bindings.set",
+  "project.create", "project.update", "project.members.set", "project.bindings.set", "project.collection_binding.set",
   "folder.create", "folder.rename", "item.move", "generation.input.prepare", "generation.batch.create", "generation.batch.submit", "generation.batch.reconcile",
 ] as const;
 export type CollaborationAction = typeof collaborationActions[number];

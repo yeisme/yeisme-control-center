@@ -1,4 +1,5 @@
 /** Keyboard conventions shared by the lists, the shell shortcuts and the shortcut reference. */
+import { effectiveKeymap, resolveKey, shortcutReference, stepFromEvent, type Keymap, type ShortcutGroup } from "./keymap";
 
 export interface Box { left: number; top: number; width: number; height: number }
 export type ListLayout = "list" | "grid";
@@ -45,48 +46,20 @@ export function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export type ShellShortcut = "search" | "page-search" | "shortcuts";
+const shellShortcuts: readonly string[] = ["search", "page-search", "shortcuts"];
 
-/** Which shell shortcut a key press triggers. Page shortcuts never fire while typing or while a dialog owns the keyboard. */
-export function shellShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; defaultPrevented: boolean; target: EventTarget | null }, dialogOpen: boolean): ShellShortcut | null {
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") return "search";
-  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || dialogOpen || isTypingTarget(event.target)) return null;
-  if (event.key === "/") return "page-search";
-  if (event.key === "?") return "shortcuts";
-  return null;
+/** Which shell shortcut a key press triggers with the default bindings. Page shortcuts never fire while typing or while a dialog owns the keyboard. */
+export function shellShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey?: boolean; defaultPrevented: boolean; target: EventTarget | null }, dialogOpen: boolean): ShellShortcut | null {
+  const result = resolveKey(stepFromEvent(event), null, effectiveKeymap(), { typing: isTypingTarget(event.target), dialog: dialogOpen, prevented: event.defaultPrevented });
+  return result.kind === "run" && shellShortcuts.includes(result.command.id) ? result.command.id as ShellShortcut : null;
 }
 
 /** Modifier shown for Ctrl/⌘ shortcuts on this platform. */
 export const modifierLabel = (userAgent: string) => /Mac|iPhone|iPad/.test(userAgent) ? "⌘" : "Ctrl";
 
-export interface ShortcutEntry { keys: string[]; action: string }
-export interface ShortcutGroup { title: string; entries: ShortcutEntry[] }
+export type { ShortcutEntry, ShortcutGroup } from "./keymap";
 
-/** The shortcut reference. Every entry here is handled by the shell, the lists, the viewer or the audio player. */
-export function shortcutGroups(modifier: string): ShortcutGroup[] {
-  return [
-    { title: "全局", entries: [
-      { keys: [modifier, "K"], action: "搜索任务、模型与工具，跳转页面或执行操作" },
-      { keys: ["/"], action: "聚焦当前页的搜索框" },
-      { keys: ["?"], action: "打开这张快捷键表" },
-      { keys: ["Esc"], action: "关闭最上层的面板或弹窗" },
-    ] },
-    { title: "列表", entries: [
-      { keys: ["↑", "↓"], action: "在任务、资源、请求和提醒之间移动" },
-      { keys: ["←", "→"], action: "在资源大图网格里横向移动" },
-      { keys: ["Home", "End"], action: "跳到第一项或最后一项" },
-      { keys: ["Enter"], action: "打开详情；关闭后焦点回到原来那一行" },
-      { keys: ["Shift", "F10"], action: "打开当前行的右键菜单（菜单键也可以）；Esc 关闭后焦点回到这一行" },
-      { keys: ["↓"], action: "在页面搜索框里按下，进入列表第一项" },
-    ] },
-    { title: "查看器", entries: [
-      { keys: ["←", "→"], action: "上一项、下一项" },
-      { keys: ["Home", "End"], action: "第一项、最后一项" },
-      { keys: ["+", "-", "0"], action: "放大、缩小、适应窗口" },
-      { keys: ["Space"], action: "播放或暂停视频" },
-      { keys: ["Esc"], action: "并排对比时先结束对比，再按一次关闭查看器" },
-    ] },
-    { title: "播放器", entries: [
-      { keys: ["⏮", "⏭"], action: "键盘或耳机上的媒体键：播放队列的上一条、下一条" },
-    ] },
-  ];
+/** The shortcut reference, drawn from the keymap table with the given bindings (the defaults when none are given). */
+export function shortcutGroups(modifier: string, keymap: Keymap = effectiveKeymap()): ShortcutGroup[] {
+  return shortcutReference(modifier, keymap);
 }
