@@ -80,6 +80,7 @@ describe("one-time repair of reminders duplicated by earlier restarts", () => {
     expect(store.list(scope, "", "user-a")).toHaveLength(1);
     // The next sight of the same failure, under the new identity format, touches the merged rows.
     expect(sync(store, [fact()]).inserted).toEqual([]);
+    expect(store.list(scope, "", "user-a")).toHaveLength(1);
     expect(rekeyNotifications(db, { key }).skipped).toBe(true);
   });
 });
@@ -94,7 +95,8 @@ describe("lasting mute rules and recovered tasks", () => {
     expect(store.list(scope, "s1", "user-a").find((row) => row.task_revision === "rev-2")?.state).toBe("muted");
     store.removeMuteRule(rule!.id, [scope], "user-a");
     sync(store, [fact({ revision: "rev-3" })]);
-    expect(store.list(scope, "s1", "user-a").find((row) => row.task_revision === "rev-3")?.state).toBe("unread");
+    // Removing the lasting rule does not reopen the reminder that was already muted.
+    expect(store.list(scope, "s1", "user-a").find((row) => row.task_revision === "rev-3")?.state).toBe("muted");
     expect(() => store.removeMuteRule(rule!.id, [scope], "user-a")).toThrow();
   });
 

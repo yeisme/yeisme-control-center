@@ -45,10 +45,23 @@ describe("bounded task paging", () => {
     expect(result.rows).toHaveLength(1);
   });
 
+  it("says where the next page would start, and reads deeper from there", async () => {
+    const seen: Array<Record<string, string> | undefined> = [];
+    let calls = 0;
+    const read = async (cursors?: Record<string, string>) => { seen.push(cursors); calls += 1; return page([`r${calls}`], `more-${calls}`); };
+    const first = await readTaskPagesBounded(read, 2);
+    expect(first).toMatchObject({ truncated: "task_page_limit", remaining: { c: "more-2" }, pages: 2 });
+    const deeper = await readTaskPagesBounded(read, 2, first.remaining);
+    expect(seen[2]).toEqual({ c: "more-2" });
+    expect(deeper.rows.map((task) => task.task_key)).toEqual(["r3", "r4"]);
+    expect(deeper.remaining).toEqual({ c: "more-4" });
+  });
+
   it("completes without truncation when cursors run out", async () => {
     const pages = [page(["a"], "x"), page(["b"])];
     const result = await readTaskPagesBounded(async () => pages.shift()!, 10);
     expect(result.truncated).toBeNull();
+    expect(result.remaining).toEqual({});
     expect(result.rows.map((task) => task.task_key)).toEqual(["a", "b"]);
   });
 });

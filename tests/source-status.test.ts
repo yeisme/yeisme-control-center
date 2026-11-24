@@ -29,7 +29,7 @@ describe("sourceStatus", () => {
     expect(status).toMatchObject({ kind: "partial", readable: 3, total: 5, tone: "warning", label: "3/5 连接可读", lanes: [] });
     expect(status.gaps).toEqual([
       { id: "d", label: "Scaena · 片场委托", reason: "来源不可用" },
-      { id: "e", label: "Eikona · 旧项目（未授权）", reason: "需要 owner 授权" },
+      { id: "e", label: "Eikona · 旧项目（未授权）", reason: "需要工具授权" },
     ]);
     expect(sourceLine(status, "任务列表", now)).toEqual({ text: "2 个连接暂不可读，任务列表可能不完整：Scaena · 片场委托、Eikona · 旧项目（未授权）", retry: false });
   });
@@ -43,8 +43,8 @@ describe("sourceStatus", () => {
 
   it("calls data stale only when the whole read failed, with the time of the rows shown", () => {
     const status = sourceStatus(input({ status: "stale", error: "network_error", readFailed: true, observedAt: "2026-10-28T07:57:00Z" }));
-    expect(status).toMatchObject({ kind: "stale", tone: "warning", label: "数据可能已过期" });
-    expect(sourceLine(status, "资源库", now)).toEqual({ text: "数据可能已过期：最近一次读取失败，显示的是 3 分钟前的结果。", retry: true });
+    expect(status).toMatchObject({ kind: "stale", tone: "warning", label: "数据有点旧" });
+    expect(sourceLine(status, "资源库", now)).toEqual({ text: "数据有点旧：最近一次读取失败，显示的是 3 分钟前的结果。", retry: true });
     expect(sourceLine(sourceStatus(input({ status: "stale", readFailed: true })), "资源库", now)?.text).toContain("显示的是刚刚的结果");
   });
 
@@ -70,8 +70,8 @@ describe("sourceStatus", () => {
     expect(sourceLine(down, "任务列表", now)).toBeNull();
     const blocked = sourceStatus(input({ status: "forbidden", connections: [connection("e", "Eikona · 旧项目", "needs_authorization")] }));
     expect(blocked).toMatchObject({ kind: "down", label: "0/1 连接可读" });
-    expect(sourceStatus(input({ status: "forbidden", error: "personal_connection_required", connections: [] }))).toMatchObject({ kind: "none", tone: "neutral", label: "无任务连接" });
-    expect(sourceStatus(input({ status: "empty", connections: [] }))).toMatchObject({ kind: "none", label: "无任务连接" });
+    expect(sourceStatus(input({ status: "forbidden", error: "personal_connection_required", connections: [] }))).toMatchObject({ kind: "none", tone: "neutral", label: "暂无连接" });
+    expect(sourceStatus(input({ status: "empty", connections: [] }))).toMatchObject({ kind: "none", label: "暂无连接" });
     expect(sourceStatus(input({ status: "loading" }))).toMatchObject({ kind: "loading", label: "读取连接…" });
     const ready = sourceStatus(input());
     expect(ready).toMatchObject({ kind: "ready", tone: "success", label: "3/3 连接可读" });

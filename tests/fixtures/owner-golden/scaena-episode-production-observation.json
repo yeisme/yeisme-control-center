@@ -1,0 +1,146 @@
+{
+  "schema_version": "yeisme.episode_production_observation.v1",
+  "project_ref": "p",
+  "rows": [
+    {
+      "episode_ref": "episode_workspace_a",
+      "production_episode_ref": "episode-1",
+      "version": 2,
+      "updated_at": "2026-11-07T01:00:00Z",
+      "owners": [
+        {
+          "owner": "sonora",
+          "purpose": "audio",
+          "resource_ref": "sonora://episodes/e1",
+          "version": "3",
+          "delegations": {
+            "completed": 1,
+            "running": 1
+          }
+        },
+        {
+          "owner": "scaena",
+          "purpose": "production_episode",
+          "resource_ref": "episode-1",
+          "version": "1",
+          "delegations": {}
+        },
+        {
+          "owner": "scaena",
+          "purpose": "edit_session",
+          "resource_ref": "session-1",
+          "version": "4",
+          "delegations": {}
+        }
+      ],
+      "sections": {
+        "references": {
+          "state": "needs_contract",
+          "reason": "reference_catalog_unpublished",
+          "counts": {}
+        },
+        "review": {
+          "state": "observed",
+          "status": "reviewed",
+          "counts": {
+            "critical_errors": 1,
+            "reviews": 1
+          },
+          "updated_at": "2026-11-07T02:00:00Z"
+        },
+        "edit": {
+          "state": "observed",
+          "status": "bound",
+          "counts": {
+            "sessions": 1
+          }
+        },
+        "assembly": {
+          "state": "observed",
+          "status": "completed",
+          "counts": {
+            "artifacts": 1,
+            "previews": 2
+          },
+          "artifact_ref": "artifact",
+          "updated_at": "2026-11-07T03:01:00Z"
+        },
+        "delivery": {
+          "state": "needs_contract",
+          "reason": "delivery_episode_link_missing",
+          "counts": {}
+        }
+      },
+      "timing": {
+        "state": "observed",
+        "run_count": 1,
+        "timed_run_count": 1,
+        "wall_duration_ms": 2550000,
+        "active_duration_ms": 2550000,
+        "queue_duration_ms": 0,
+        "blocked_duration_ms": null,
+        "human_wait_duration_ms": null,
+        "retry_count": 0,
+        "running": 0,
+        "stalled": 0,
+        "first_started_at": "2026-11-07T01:10:00Z",
+        "last_ended_at": "2026-11-07T01:52:30Z",
+        "splits_recorded": false
+      }
+    },
+    {
+      "episode_ref": "episode_workspace_b",
+      "version": 1,
+      "updated_at": "2026-11-07T01:00:00Z",
+      "owners": [],
+      "sections": {
+        "references": {
+          "state": "needs_contract",
+          "reason": "reference_catalog_unpublished",
+          "counts": {}
+        },
+        "review": {
+          "state": "observed",
+          "status": "not_reviewed",
+          "counts": {
+            "critical_errors": 0,
+            "reviews": 0
+          }
+        },
+        "edit": {
+          "state": "observed",
+          "status": "unbound",
+          "counts": {
+            "sessions": 0
+          }
+        },
+        "assembly": {
+          "state": "unavailable",
+          "reason": "production_episode_unbound",
+          "counts": {}
+        },
+        "delivery": {
+          "state": "needs_contract",
+          "reason": "delivery_episode_link_missing",
+          "counts": {}
+        }
+      },
+      "timing": {
+        "state": "observed",
+        "run_count": 0,
+        "timed_run_count": 0,
+        "wall_duration_ms": null,
+        "active_duration_ms": null,
+        "queue_duration_ms": null,
+        "blocked_duration_ms": null,
+        "human_wait_duration_ms": null,
+        "retry_count": 0,
+        "running": 0,
+        "stalled": 0,
+        "splits_recorded": false
+      }
+    }
+  ],
+  "next_cursor": "cABhAABlcGlzb2RlX3dvcmtzcGFjZV9i",
+  "observed_at": "2026-11-07T00:00:00Z"
+}

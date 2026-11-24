@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseProviderLiveArgs, providerLiveFlags, providerLiveOptions } from "../scripts/provider-live-args";
-import { DirtyTreeError, readReleaseSource, releaseTreeState, trackedChanges } from "../scripts/release-source";
+import { DirtyTreeError, readReleaseSource, releaseTreeState, reviewedSourceEntries, trackedChanges } from "../scripts/release-source";
 
 const root = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(join(root, path), "utf8");
@@ -175,6 +175,13 @@ describe("release preparation", () => {
     writeFileSync(join(repo, "tracked.txt"), "two\n");
     expect(() => releaseTreeState(readReleaseSource(repo).porcelain, {})).toThrow(DirtyTreeError);
     expect(releaseTreeState(readReleaseSource(repo).porcelain, { YEISME_RELEASE_ALLOW_DIRTY: "1" })).toMatchObject({ dirty: true, dirty_allowed: true });
+  });
+  it("records reviewed tracked and untracked source digests while refusing private or generated files", () => {
+    const porcelain = " M server/app.ts\n?? server/new.ts\n";
+    const digests = { "server/app.ts": "a", "server/new.ts": "b" };
+    expect(reviewedSourceEntries(porcelain, digests)).toEqual([{ path: "server/app.ts", state: "tracked", sha256: "a" }, { path: "server/new.ts", state: "untracked", sha256: "b" }]);
+    for (const path of ["temp/evidence.json", "dist/index.html", "design-proposals/x.png", ".pi/output", "config.json", "observer.key", "../outside.ts"]) expect(() => reviewedSourceEntries(`?? ${path}\n`, { [path]: "x" })).toThrow("reviewed_source_invalid");
+    expect(() => reviewedSourceEntries("?? server/new.ts\n", {})).toThrow("reviewed_source_invalid");
   });
 
   it("builds the release itself, from the allowlist, and records what it was built from", () => {

@@ -18,8 +18,8 @@ describe("directory groups", () => {
   it("folds every registered-only entry and keeps integrated ones, in directory order", () => {
     const view = directoryView(directory(), "all", "");
     expect(view.listed).toHaveLength(8);
-    expect(view.unintegrated).toHaveLength(17);
-    expect(view.unintegratedTotal).toBe(17);
+    expect(view.unintegrated).toHaveLength(16);
+    expect(view.unintegratedTotal).toBe(16);
     expect(ids(view.listed)).toEqual(["scaena", "eikona", "sonora", "gateway", "aigora", "drivebridge", "auctra", "anatomia"]);
     expect(ids(view.unintegrated).slice(0, 3)).toEqual(["pinax", "capsa", "manju"]);
     expect(ids([...view.listed, ...view.unintegrated]).sort()).toEqual(serviceDefinitions.map((definition) => definition.id).sort());
@@ -32,8 +32,8 @@ describe("directory groups", () => {
     expect(isUnintegrated(entry("scaena"))).toBe(false);
     const view = directoryView(directory({ pinax: { configuration: "configured" } }), "all", "");
     expect(ids(view.listed)).toContain("pinax");
-    expect(view.unintegrated).toHaveLength(16);
-    expect(view.unintegratedTotal).toBe(16);
+    expect(view.unintegrated).toHaveLength(15);
+    expect(view.unintegratedTotal).toBe(15);
   });
 
   it("filters as before: integrated, configured and gaps, and a search over name, purpose, path and gap", () => {
@@ -44,7 +44,7 @@ describe("directory groups", () => {
     expect(gaps).not.toContain("scaena");
     expect(gaps).toContain("sonora");
     expect(gaps).toContain("pinax");
-    expect(gaps).toHaveLength(23);
+    expect(gaps).toHaveLength(22);
     expect(ids(filterDirectory(rows, "all", "  PINAX "))).toEqual(["pinax"]);
     expect(ids(filterDirectory(rows, "all", "backend-server/capsa"))).toEqual(["capsa"]);
     expect(ids(filterDirectory(rows, "all", "不解密用户内容"))).toEqual(["capsa"]);
@@ -60,7 +60,7 @@ describe("directory groups", () => {
     const searched = directoryView(rows, "all", "open design");
     expect(searched.narrowed).toBe(true);
     expect(ids(searched.unintegrated)).toEqual(["opendesign"]);
-    expect(searched.unintegratedTotal).toBe(17);
+    expect(searched.unintegratedTotal).toBe(16);
     expect(directoryView(rows, "all", "   ").narrowed).toBe(false);
     // The integrated filter leaves nothing for the group to show.
     expect(directoryView(rows, "integrated", "").unintegrated).toEqual([]);
@@ -144,7 +144,7 @@ describe("the remembered open state", () => {
 
 describe("the directory panel", () => {
   const rows = directory();
-  const render = (props: Partial<Parameters<typeof UnintegratedGroup>[0]> = {}) => renderToStaticMarkup(createElement(UnintegratedGroup, { rows: rows.filter(isUnintegrated), total: 17, open: false, forced: false, onToggle: () => undefined, ...props }));
+  const render = (props: Partial<Parameters<typeof UnintegratedGroup>[0]> = {}) => renderToStaticMarkup(createElement(UnintegratedGroup, { rows: rows.filter(isUnintegrated), total: 16, open: false, forced: false, onToggle: () => undefined, ...props }));
 
   it("lists the integrated entries and shows the registered-only ones as a closed disclosure", () => {
     const html = renderToStaticMarkup(createElement(ServiceDirectoryPanel, { services: rows }));
@@ -156,7 +156,7 @@ describe("the directory panel", () => {
     expect(button).not.toBeNull();
     expect(html).toContain(`id="${button![1]}" hidden=""`);
     expect(html).toContain("未接入");
-    expect(html).toContain("17 项");
+    expect(html).toContain("16 项");
     // The group's heading says it is not integrated, so its rows have no status column and no pill that repeats it.
     const group = html.slice(html.indexOf('data-directory-group="unintegrated"'));
     expect(group).not.toContain(">状态<");
@@ -179,7 +179,7 @@ describe("the directory panel", () => {
   it("names the group in a heading, with the count", () => {
     const html = render();
     expect(html).toMatch(/<h3[^>]*><button[^>]*aria-expanded="false"/);
-    expect(html).toMatch(/未接入<span[^>]*>17 项<\/span>/);
+    expect(html).toMatch(/未接入<span[^>]*>16 项<\/span>/);
   });
 
   it("opens when it was remembered open, and the button says so", () => {
@@ -194,7 +194,7 @@ describe("the directory panel", () => {
     expect(html).not.toContain("<button");
     expect(html).not.toContain("aria-expanded");
     expect(html).not.toMatch(/ hidden=""/);
-    expect(html).toContain("1 / 17 项");
+    expect(html).toContain("1 / 16 项");
     expect(html).toContain("Pinax");
     expect(html).toContain('data-expanded="true"');
   });

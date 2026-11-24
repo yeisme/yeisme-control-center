@@ -114,8 +114,35 @@ describe("Scaena storyboard reader: episode board contract", () => {
     for (const forbidden of ["SECRET-ACTION-TEXT", "SECRET-PROMPT", "content-secret", "representation_ref", "action_summary", "candidate_refs", "allowed_actions"]) expect(serialized).not.toContain(forbidden);
     expect(result.outline?.scenes.map((scene) => scene.scene_ref)).toEqual(["sc-1", "sc-2"]);
     expect(result.outline?.scenes[0].heading).toHaveLength(80);
-    expect(result.outline?.scenes[1].shots[0]).toEqual({ shot_ref: "sh-3", order: 1, shot_size: "全景", camera_angle: "平视", camera_movement: "推", duration_ms: 3000 });
+    // The binding itself stays on the server; only whether the shot has a ready keyframe comes through.
+    expect(result.outline?.scenes[1].shots[0]).toEqual({ shot_ref: "sh-3", order: 1, shot_size: "全景", camera_angle: "平视", camera_movement: "推", duration_ms: 3000, frame_state: "ready" });
+    expect(serialized).not.toContain("media_type");
+    expect(serialized).not.toContain("cand-1");
     expect(result.outline).toMatchObject({ scene_count: 1, shot_count: 2, duration_ms: 9000 });
+  });
+
+  it("states each shot's keyframe and generation readiness, and says nothing when Scaena said nothing", async () => {
+    const scenes = [{ scene_ref: "sc-1", order: 1, heading: "站台", shots: [
+      { shot_ref: "sh-1", order: 1, generation_ready: true },
+      { shot_ref: "sh-2", order: 2, generation_ready: false },
+      { shot_ref: "sh-3", order: 3, generation_ready: "yes" },
+    ] }];
+    const media = [
+      { candidate_ref: "cand-1", shot_ref: "sh-1", representation_ref: "rep-1", digest: sha("a"), media_type: "image/png", status: "ready" },
+      { candidate_ref: "cand-1", shot_ref: "sh-2", representation_ref: "rep-2", digest: sha("b"), media_type: "image/png", status: "rendering" },
+    ];
+    const bound = await read(projection([breakdown("bd-1", "accepted", 1, "2026-10-22T00:00:00.000Z", { scenes, media })]));
+    expect(bound.outline?.scenes[0].shots.map((shot) => [shot.shot_ref, shot.frame_state, shot.generation_ready])).toEqual([
+      ["sh-1", "ready", true],
+      ["sh-2", "pending", false],
+      // A shot with no binding is waiting for one; a non-boolean readiness is not copied.
+      ["sh-3", "pending", undefined],
+    ]);
+    // Scaena omits an empty media list, so no list means "not said": no shot gets a keyframe state.
+    const silent = await read(projection([breakdown("bd-1", "accepted", 1, "2026-10-22T00:00:00.000Z", { scenes })]));
+    expect(silent.outline?.scenes[0].shots.every((shot) => !("frame_state" in shot))).toBe(true);
+    const empty = await read(projection([breakdown("bd-1", "accepted", 1, "2026-10-22T00:00:00.000Z", { scenes, media: [] })]));
+    expect(empty.outline?.scenes[0].shots.every((shot) => !("frame_state" in shot))).toBe(true);
   });
 
   it("rejects a projection for a different episode than the one asked for", async () => {

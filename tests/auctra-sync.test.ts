@@ -78,7 +78,7 @@ describe("Auctra collection sync", () => {
     const snapshot = vi.fn(async (scopeId: string): Promise<AuctraCollectionSnapshot> => ({ schema_version: "auctra.collection.snapshot.v1", owner: "auctra", scope: scopeId, project_ref: "project:a", observed_at: new Date().toISOString(), coverage: "complete", freshness: "fresh", next_cursor: "7", returned: 0, total: 9, records: [] }));
     const result = await syncCollection({ reader: { snapshot }, store, config: credentialed }, scope, makeSession());
     expect(snapshot).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ complete: true, pages: 1 });
+    expect(result).toMatchObject({ complete: false, coverage: "partial", blocker: "collection_cursor_invalid", pages: 1 });
   });
 
   it("gives up on further pages once the time budget is spent", async () => {

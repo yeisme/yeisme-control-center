@@ -33,7 +33,10 @@ export const row = (ref: string, state: string, over: Record<string, unknown> = 
   stage: state,
   revision: "rev-1",
   created_at: iso(T0 - 3 * hour),
-  updated_at: iso(T0 - hour),
+  // Keep ordinary observation fixtures fresh for the fake-clock horizon.
+  // Long-running liveness coverage supplies an explicit old timestamp so it
+  // does not add an unrelated operation reminder to failure/recovery cases.
+  updated_at: iso(T0 + (new Set(["queued", "pending", "created", "running", "cancel_requested"]).has(state) ? 2 * hour : -hour)),
   progress: { kind: "indeterminate" },
   results: [],
   allowed_actions: [],

@@ -14,6 +14,7 @@ function setup() {
   const fetcher = vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(String(input)).pathname;
     if (path.endsWith("collection.snapshot:invoke")) return Response.json({ status: "success", data: { schema_version: "auctra.collection.snapshot.v1", project_ref: "project:project-a", observed_at: new Date().toISOString(), freshness: "fresh", returned: 1, total: 1, records: [{ record_ref: "unit:one", record_kind: "text_unit", project_ref: "project:project-a", title: "章一", status: "draft", source_digest: "sha256:one", updated_at: new Date().toISOString() }] } });
+    if (path.endsWith("text.brief.list:invoke")) return Response.json({ status: "success", data: { schema_version: "auctra.text.brief.list.v1", work_ref: "project:project-a", briefs: [], returned: 0 } });
     return Response.json({ status: "failed", error: { code: "not_found" } }, { status: 404 });
   });
   const auth = new SessionAuth(config); auth.sessions.set(session.id, session);
@@ -23,6 +24,24 @@ function setup() {
 }
 
 describe("Auctra collection integration", () => {
+  it("forwards an allowlisted authoring operation without exposing owner credentials", async () => {
+    const { app, request } = setup();
+    const response = await app(request("/auctra/authoring?scope=scope-auctra", { method: "POST", headers: { "X-CSRF-Token": session.csrf, "Content-Type": "application/json" }, body: JSON.stringify({ operation_id: "text.brief.list", args: { work_ref: "project:project-a" } }) }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.operation_id).toBe("text.brief.list");
+    expect(body.status).toBe("success");
+    expect(JSON.stringify(body)).not.toContain("Authorization");
+    expect(JSON.stringify(body)).not.toContain("credential_ref");
+  });
+
+  it("rejects an operation outside the authoring allowlist", async () => {
+    const { app, request } = setup();
+    const response = await app(request("/auctra/authoring?scope=scope-auctra", { method: "POST", headers: { "X-CSRF-Token": session.csrf, "Content-Type": "application/json" }, body: JSON.stringify({ operation_id: "text.document.open", args: {} }) }));
+    expect(response.status).toBe(403);
+    expect((await response.json()).error).toBe("authoring_operation_not_allowed");
+  });
+
   it("syncs refs-only records into the local Control Center index", async () => {
     const { app, request } = setup();
     const sync = await app(request("/auctra/collection/sync?scope=scope-auctra", { method: "POST", headers: { "X-CSRF-Token": session.csrf, "Content-Type": "application/json" }, body: "{}" }));

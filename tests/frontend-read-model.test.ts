@@ -120,7 +120,14 @@ describe("route aliases", () => {
     expect(pageFromPath("/history")).toBe("tasks");
     expect(pageFromPath("/delivery")).toBe("review");
     expect(pageFromPath("/requests")).toBe("requests");
-    expect(pageFromPath("/settings")).toBe("team");
+    expect(pageFromPath("/settings")).toBe("settings");
+    expect(pageFromPath("/shortcuts")).toBe("settings");
+    // Members and the audit log moved from the team page to 成员与管理; their old addresses open the matching tab there.
+    expect(pageFromPath("/team")).toBe("team");
+    expect(pageFromPath("/admin")).toBe("admin");
+    expect(pageFromPath("/members")).toBe("admin");
+    expect(pageFromPath("/audit")).toBe("admin");
+    expect(pageFromPath("/accounts")).toBe("admin");
     expect(pageFromPath("/nonexistent")).toBe("home");
     expect(pageFromPath("/guide")).toBe("guide");
     // Chapters and tool pages stay on the guide page, so moving between them never remounts it.
@@ -128,5 +135,10 @@ describe("route aliases", () => {
     expect(pageFromPath("/mcp")).toBe("guide");
     // The batch-generation route stays addressable for project notifications without a sidebar entry.
     expect(pageFromPath("/creation")).toBe("creation");
+    // The timeline is its own page; the lists it gathers keep their own routes.
+    expect(pageFromPath("/activity")).toBe("activity");
+    expect(pageFromPath("/timeline")).toBe("activity");
+    expect(pageFromPath("/tasks")).toBe("tasks");
+    expect(pageFromPath("/episodes")).toBe("drama");
   });
 });

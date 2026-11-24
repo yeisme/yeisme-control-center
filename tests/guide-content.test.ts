@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { callFlow, connectCommands, faqs, guideTools, moreTools, tagline } from "../src/pages/guide/guide-content";
+import { agentAccountCommand, agentReadSteps, callFlow, connectCommands, faqs, flowStations, guideTools, handoffSteps, moreTools, tagline } from "../src/pages/guide/guide-content";
+import { productionStations } from "../src/shared/production-line";
+import { briefGuardrails } from "../src/shared/agent-brief";
 import { navItems, navItem } from "../src/app-shell/navigation";
 import { connectedTools, renewGeneral } from "../src/pages/guide/guide-reference";
 import { renewGuideTools, renewSection, renewSectionId } from "../src/shared/credentials";
@@ -12,11 +14,11 @@ const allCommands = () => [
 ];
 
 describe("使用指南 content", () => {
-  it("replaces AI 创作 in the sidebar while keeping batch generation addressable", () => {
+  it("keeps the guide and batch generation as tabs, and AI 创作 gone from the sidebar", () => {
     expect(navItems.map((item) => item.id)).toContain("guide");
-    expect(navItems.map((item) => item.id)).not.toContain("creation");
+    expect(navItem("creation")).toMatchObject({ label: "批量生成", group: "create" });
+    expect(navItem("guide").group).toBe("settings");
     expect(navItems.find((item) => item.label === "AI 创作")).toBeUndefined();
-    expect(navItem("creation").label).toBe("批量生成");
   });
 
   it("never ships internal addresses, home paths or token values in commands", () => {
@@ -110,5 +112,31 @@ describe("使用指南 content", () => {
     expect(tagline.join("").length).toBeGreaterThan(20);
     expect(faqs.length).toBeGreaterThanOrEqual(6);
     expect(faqs.length).toBeLessThanOrEqual(12);
+  });
+});
+
+describe("使用指南 · 流程", () => {
+  it("lists the seven stations in order and keeps the missing contracts visible", () => {
+    expect(Object.keys(flowStations)).toEqual([...productionStations]);
+    expect(flowStations.look.ready).toBe("no");
+    expect(flowStations.cut.today).toContain("待接通");
+  });
+
+  it("reads the line with placeholders only, logs in once with the key from a file, and writes nothing but the logout", () => {
+    for (const step of [...agentReadSteps, agentAccountCommand]) expect(step.command, step.command).not.toMatch(/https?:\/\/|Bearer|\b\d{1,3}(\.\d{1,3}){3}\b/);
+    const logins = agentReadSteps.filter((step) => step.command.includes("/auth/personal"));
+    expect(logins).toHaveLength(1);
+    expect(logins[0].command).toContain("--rawfile key '<密钥文件>'");
+    expect(agentReadSteps.filter((step) => step.command.includes("-X POST")).map((step) => step.command.match(/\/api\/control-center\/v1\/[a-z/]+/)?.[0])).toEqual(["/api/control-center/v1/auth/logout"]);
+    expect(agentReadSteps.some((step) => step.command.includes("/api/control-center/v1/production?scope=<范围>&episode_ref=<集引用>"))).toBe(true);
+    expect(agentReadSteps[0].command).toContain("YEISME_CONTROL_ORIGIN");
+    expect(agentReadSteps.slice(1).filter((step) => step.command.includes("/api/control-center/v1/")).every((step) => step.command.includes("$YEISME_CONTROL_ORIGIN"))).toBe(true);
+  });
+
+  it("shows the rules every brief carries, and hands off one text for any agent", () => {
+    expect(briefGuardrails.some((rule) => rule.includes("dry_run"))).toBe(true);
+    const words = handoffSteps.map((step) => `${step.title} ${step.body}`).join("\n");
+    expect(words).toContain("复制给 Agent 的说明");
+    expect(words).not.toMatch(/Claude Code|Codex|JSON|命令/);
   });
 });

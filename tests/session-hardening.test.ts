@@ -242,11 +242,14 @@ describe("account routes are matched exactly", () => {
     const reader = await auth.createPersonalUser(viewer("reader"));
     const { cookie, csrf } = await asAdmin(app);
     const status = async (path: string, method: string) => (await call(app, path, { method, cookie, csrf, body: method === "POST" ? {} : undefined })).status;
-    expect(await status("/admin/personal-users/reader", "GET")).toBe(404);
-    expect(await status("/admin/personal-users/reader", "POST")).toBe(404);
+    // One account is a resource now (PATCH edits it), so its other methods are 405; anything deeper or unknown stays 404.
+    expect(await status("/admin/personal-users/reader", "GET")).toBe(405);
+    expect(await status("/admin/personal-users/reader", "POST")).toBe(405);
     expect(await status("/admin/personal-users/reader/revoke/extra", "POST")).toBe(404);
     expect(await status("/admin/personal-users/reader/other", "POST")).toBe(404);
     expect(await status("/admin/personal-users/reader/revoke", "GET")).toBe(405);
+    expect(await status("/admin/personal-users/reader/rotate", "GET")).toBe(405);
+    expect(await status("/admin/personal-users/reader/enable", "PATCH")).toBe(405);
     expect(await status("/admin/personal-users", "DELETE")).toBe(405);
     // A viewer is refused before the route is looked at.
     const member = await signIn(app, "reader", reader.access_key);
@@ -337,6 +340,22 @@ describe("personal sessions and the clock", () => {
     at(55 + 31);
     expect(await status()).toBe(401);
     expect(auth.sessions.get(id)).toBeUndefined();
+  });
+
+  it("supports an explicit remembered-device session without storing credentials", async () => {
+    const { app, auth } = await running();
+    clock();
+    const response = await call(app, "/auth/personal", { method: "POST", body: { username: "root", password, remember: true } });
+    expect(response.status).toBe(200);
+    const id = auth.sessions.keys()[0];
+    expect(auth.sessions.get(id)?.remembered).toBe(true);
+    const cookie = response.headers.get("set-cookie") || "";
+    expect(cookie).toContain("Max-Age=2592000");
+    at(24 * 60);
+    expect((await call(app, "/session", { cookie })).status).toBe(200);
+    // The request above refreshes last_seen, so seven idle days start here.
+    at(24 * 60 + 7 * 24 * 60 + 1);
+    expect((await call(app, "/session", { cookie })).status).toBe(401);
   });
 
   it("writes the last-seen time at most once a minute", async () => {

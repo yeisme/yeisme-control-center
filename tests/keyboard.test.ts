@@ -53,7 +53,7 @@ describe("shortcut reference", () => {
     expect(modifierLabel("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)")).toBe("⌘");
     expect(modifierLabel("Mozilla/5.0 (X11; Linux x86_64)")).toBe("Ctrl");
     const groups = shortcutGroups("Ctrl");
-    expect(groups.map((group) => group.title)).toEqual(["全局", "列表", "查看器", "播放器"]);
+    expect(groups.map((group) => group.title)).toEqual(["全局", "跳转", "列表", "详情", "查看器", "播放器"]);
     expect(groups[0].entries[0].keys).toEqual(["Ctrl", "K"]);
   });
 });

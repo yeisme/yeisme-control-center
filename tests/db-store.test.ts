@@ -79,6 +79,7 @@ describe("control center persistence", () => {
     const loaded = store.get("s1")!;
     expect(loaded.accessAudience).toEqual(["aud-a", "aud-b"]);
     expect(loaded.personal).toBe(true);
+    expect(loaded.remembered).toBeUndefined();
     expect(loaded.epoch).toBe(1);
     expect(store.size).toBe(2);
     store.bumpAll();
@@ -86,10 +87,12 @@ describe("control center persistence", () => {
     store.bumpSubject("yeisme:personal", "other");
     expect(store.get("s2")!.epoch).toBe(3);
     expect(store.get("s1")!.epoch).toBe(2);
+    store.set("remembered", session({ id: "remembered", remembered: true }));
+    expect(store.get("remembered")!.remembered).toBe(true);
     store.set("expired", session({ id: "expired", expires: Date.now() - 1 }));
     store.prune();
     expect(store.has("expired")).toBe(false);
-    expect([...store.values()].map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+    expect([...store.values()].map((s) => s.id).sort()).toEqual(["remembered", "s1", "s2"]);
   });
 
   it("writes a session's last-seen time at most once per interval, and says whether it wrote", () => {

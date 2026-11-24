@@ -118,6 +118,18 @@ describe("credential slots", () => {
     expect(credentialHolder(cfg, "provider:eikona")).toBeUndefined();
     expect(credentialHolder(cfg, "connection:missing")).toBeUndefined();
   });
+
+  it("lists the gateway management credential as its own slot and never returns the file", () => {
+    const cfg = config();
+    cfg.open_tools!.gateway!.management_credential_ref = "/keys/gateway-admin.token";
+    cfg.open_tools!.gateway!.management_credential_expires_at = at(12);
+    const slots = credentialSlots(cfg, scope);
+    expect(slots.map((slot) => slot.id)).toContain("open_tool:gateway:management");
+    const row = credentialStatuses(cfg, scope, { now, stat: statOf() }).find((item) => item.id === "open_tool:gateway:management");
+    expect(row).toMatchObject({ owner: "gateway", label: "我的网关 管理", state: "ok" });
+    expect(JSON.stringify(row)).not.toContain("/keys/");
+    expect(credentialHolder(cfg, "open_tool:gateway:management")).toMatchObject({ refKey: "management_credential_ref", expiresKey: "management_credential_expires_at" });
+  });
 });
 
 describe("credential state", () => {

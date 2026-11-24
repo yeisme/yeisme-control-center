@@ -61,16 +61,17 @@ describe("failure reminders", () => {
     expect(rows[0]?.task_state).toBe("failed");
   });
 
-  it("opens a new reminder when revision, error code, or native state changes", () => {
+  it("updates the same reminder when revision, error code, or native state changes", () => {
     const reminders = store();
     const base = { scopeId: scope, sessionId: "s1", subject: "user-a", now: "2026-10-19T00:00:00.000Z" };
     reminders.sync({ ...base, observed: [fact()] });
-    reminders.sync({ ...base, observed: [fact({ revision: "rev-2" })] });
-    reminders.sync({ ...base, observed: [fact({ error_code: "provider_rejected" })] });
-    reminders.sync({ ...base, observed: [fact({ native_state: "provider_failed" })] });
+    reminders.sync({ ...base, now: "2026-10-19T00:02:00.000Z", observed: [fact({ revision: "rev-2" })] });
+    reminders.sync({ ...base, now: "2026-10-19T00:03:00.000Z", observed: [fact({ error_code: "provider_rejected" })] });
+    reminders.sync({ ...base, now: "2026-10-19T00:04:00.000Z", observed: [fact({ native_state: "provider_failed" })] });
     const rows = reminders.list(scope, "s1", "user-a");
-    expect(rows).toHaveLength(4);
-    expect(new Set(rows.map((row) => row.failure_fingerprint)).size).toBe(4);
+    expect(rows).toHaveLength(1);
+    // Each observation is a complete current fact, so the last read wins instead of accumulating earlier fields.
+    expect(rows[0]).toMatchObject({ task_revision: "rev-1", last_error_code: "upstream_timeout", native_state: "provider_failed", last_seen_at: "2026-10-19T00:04:00.000Z" });
   });
 
   it("keeps owner task facts unchanged when a reminder is acknowledged, muted, or archived", () => {
@@ -84,13 +85,14 @@ describe("failure reminders", () => {
     expect(reminders.list(scope, "s1", "user-a")[0]?.state).toBe("archived");
   });
 
-  it("mutes only the current fingerprint and still alerts a later failure version", () => {
+  it("keeps a muted task quiet when a later owner read changes its failure details", () => {
     const reminders = store();
     const inserted = reminders.sync({ scopeId: scope, sessionId: "s1", subject: "user-a", observed: [fact()] }).inserted[0]!;
     reminders.mute(inserted, scope, "s1", "user-a");
     const next = reminders.sync({ scopeId: scope, sessionId: "s1", subject: "user-a", observed: [fact({ revision: "rev-2" })] });
-    expect(next.inserted).toHaveLength(1);
-    expect(reminders.list(scope, "s1", "user-a").some((row) => row.state === "unread" && row.task_revision === "rev-2")).toBe(true);
+    expect(next.inserted).toHaveLength(0);
+    expect(next.touched).toEqual([inserted]);
+    expect(reminders.list(scope, "s1", "user-a")[0]).toMatchObject({ id: inserted, state: "muted", task_revision: "rev-2" });
   });
 
   it("demotes untouched reminders after 24 hours and 7 days without deleting them", () => {
@@ -156,7 +158,7 @@ describe("failure reminders", () => {
     expect(taskAllowsSafeCancel({ state: "failed", allowed_actions: actions })).toBe(false);
     expect(taskAllowsSafeCancel({ state: "running", allowed_actions: [{ action: "cancel", enabled: false }] })).toBe(false);
     expect(taskDeleteAvailable()).toBe(false);
-    expect(failureFingerprint(fact())).toContain("upstream_timeout");
+    expect(failureFingerprint(fact())).toBe([scope, "task-1", "failure"].join("\u001f"));
   });
 });
 
@@ -249,13 +251,13 @@ describe("snoozing a reminder", () => {
     expect(countsAsUnread(later, t0 + 3_600_001)).toBe(true);
     expect(reminderGroup(later, t0 + 3_600_001)).toBe("new");
     expect(reminders.unreadCount(scope, "s1", "user-a", t0 + 3_600_001)).toBe(1);
-    // Observing the same failure again does not undo it; a new failure version opens a reminder that is not snoozed.
+    // Observing the same task again, even with a changed owner revision, updates the snoozed reminder instead of opening another one.
     reminders.sync({ scopeId: scope, sessionId: "s1", subject: "user-a", observed: [fact()], now: new Date(t0 + 60_000).toISOString() });
     expect(reminders.list(scope, "s1", "user-a", t0)[0]!.snoozed_until).toBe(until);
     reminders.sync({ scopeId: scope, sessionId: "s1", subject: "user-a", observed: [fact({ revision: "rev-2" })], now: new Date(t0 + 120_000).toISOString() });
     const next = reminders.list(scope, "s1", "user-a", t0).find((row) => row.task_revision === "rev-2")!;
-    expect(next.snoozed_until).toBeNull();
-    expect(countsAsUnread(next, t0)).toBe(true);
+    expect(next.snoozed_until).toBe(until);
+    expect(countsAsUnread(next, t0)).toBe(false);
   });
 
   it("can be moved to a later time, only while the reminder is unread and has not recovered", () => {
@@ -365,7 +367,7 @@ describe("events that can end and come back", () => {
     expect(reminders.openEvent(credential({ event: "credential:open_tool:gateway:expired:-", now: "2026-11-04T00:00:00.000Z" }))).toEqual({ id: live.id, created: false });
     // With it, a recovered one opens again with nothing the old one was handled with.
     expect(reminders.openEvent(credential({ title: "MCP Gateway · 凭据被拒（再次）", now: "2026-11-05T00:00:00.000Z" }))).toEqual({ id: first.id, created: true });
-    const [again] = reminders.list("scope-a", "", "user-a").filter((row) => row.id === first.id);
+    const [again] = reminders.list("scope-a", "", "user-a", Date.parse("2026-11-05T00:01:00.000Z")).filter((row) => row.id === first.id);
     expect(again).toMatchObject({ state: "unread", archived_at: null, recovered_at: null, snoozed_until: null, read_at: null, title: "MCP Gateway · 凭据被拒（再次）", first_seen_at: "2026-11-05T00:00:00.000Z", priority: "normal" });
     expect(countsAsUnread(again)).toBe(true);
   });

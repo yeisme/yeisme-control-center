@@ -75,6 +75,23 @@ describe("tool catalog normalization", () => {
     expect(normalizeModels("eikona", [{ model_ref: "x", status: "ready" }], "test")[0].status).toBe("unknown");
   });
 
+  it("reads Eikona readiness: blocked is a status fact, ready never becomes latest_ready", () => {
+    const [blocked, ready, declared] = normalizeModels("eikona", [
+      { model_ref: "a", readiness: "blocked" },
+      { model_ref: "b", readiness: "ready" },
+      { model_ref: "c", readiness: "blocked", status: "historical" },
+    ], "eikona://models/readiness");
+    expect(blocked).toMatchObject({ status: "unavailable", status_source: "owner_readiness", readiness: "blocked" });
+    expect(ready).toMatchObject({ status: "unknown", status_source: "undeclared", readiness: "ready" });
+    expect(declared).toMatchObject({ status: "historical", status_source: "owner" });
+  });
+
+  it("keeps a configured channel apart from a ready one", () => {
+    const [configured, unknown] = normalizeChannels("eikona", { channels: [{ channel_id: "kie", status: "configured" }, { channel_id: "x", status: "unknown" }] });
+    expect(configured.status).toBe("configured");
+    expect(unknown.status).toBe("unknown");
+  });
+
   it("parses channel.summary.v1 and treats unknown observations as absent", () => {
     const channels = normalizeChannels("eikona", eikonaChannels(0));
     expect(channels.map((channel) => [channel.channel_id, channel.status])).toEqual([["openrouter", "ready"], ["kie", "ready"], ["legacy-gateway", "blocked"]]);
