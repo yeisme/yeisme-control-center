@@ -1,0 +1,18 @@
+/* Production time bars (src/pages/drama/ProductionTime.tsx). Categories are told apart by colour and by texture, so
+   blocked (hatched) and waiting for a person (dotted) read without colour; the legend always says the words and values.
+   A bar reveals once with opacity and scaleX from its start; reduced motion keeps opacity only, at 120ms or less. */
+.time-seg { display: block; height: 100%; min-width: 0; }
+.time-seg[data-cat="active"] { background: var(--chart-1); }
+.time-seg[data-cat="queue"] { background: var(--chart-2); }
+.time-seg[data-cat="blocked"] { background: repeating-linear-gradient(135deg, var(--warning) 0 3px, color-mix(in srgb, var(--warning) 45%, transparent) 3px 6px); }
+.time-seg[data-cat="human_wait"] { background: radial-gradient(circle, var(--chart-3) 1.1px, color-mix(in srgb, var(--chart-3) 30%, transparent) 1.4px) 0 0 / 5px 5px; }
+.time-seg[data-cat="unsplit"] { background: color-mix(in srgb, var(--chart-axis) 35%, var(--chart-grid)); }
+.time-seg + .time-seg { box-shadow: inset 1px 0 0 var(--panel); }
+
+.time-bar-fill { transform-origin: left center; animation: time-bar-in var(--dur-page) var(--ease-out) both; animation-delay: calc(min(var(--i, 0), 8) * 30ms); }
+@keyframes time-bar-in { from { opacity: 0; transform: scaleX(0.6); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .time-bar-fill { animation-name: fade-in; animation-duration: 120ms; animation-delay: 0ms; }
+}
+html[data-motion="reduced"] .time-bar-fill { animation-name: fade-in; animation-duration: 120ms; animation-delay: 0ms; }

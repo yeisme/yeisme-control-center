@@ -3,14 +3,23 @@
 :root { --viewer-ease: cubic-bezier(0.16, 1, 0.3, 1); }
 
 @layer components {
-  .viewer-backdrop { position: fixed; inset: 0; z-index: 70; background: rgb(8 11 10 / 0.95); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .viewer-backdrop { position: fixed; inset: 0; z-index: var(--z-viewer-scrim); background: rgb(8 11 10 / 0.95); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
   .viewer-backdrop[data-state="open"] { animation: viewer-fade 220ms var(--ease-out) both; }
-  .viewer-backdrop[data-state="closed"] { animation: viewer-fade-out 160ms var(--ease-out) both; }
-  .viewer { position: fixed; inset: 0; z-index: 71; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; color: #fff; outline: none; }
+  /* Closing is immediate (a closing dialog would still take the next Escape); a still copy fades out in its place. */
+  /* One column that may shrink below its content: a long title truncates instead of pushing the buttons off a phone. */
+  .viewer { position: fixed; inset: 0; z-index: var(--z-viewer); display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; color: #fff; outline: none; }
   .viewer[data-state="open"] .viewer-stage { animation: viewer-rise 420ms var(--viewer-ease) both; }
-  .viewer[data-state="closed"] { animation: viewer-fade-out 160ms var(--ease-out) both; }
+  /* Opened from a card on screen, the stage grows out of that card. */
+  .viewer[data-state="open"] .viewer-stage[data-origin] { animation: viewer-grow var(--dur-slow) var(--viewer-ease) both; }
+  /* The picture itself, blurred far out, tints the room behind everything. */
+  .viewer-ambient { position: absolute; inset: -10%; z-index: -1; background: center / cover no-repeat; filter: blur(64px) saturate(1.4); opacity: 0.32; pointer-events: none; animation: viewer-fade 600ms var(--ease-out) backwards; }
 
   .viewer-bar { display: flex; align-items: center; gap: 12px; padding: max(12px, env(safe-area-inset-top)) 16px 10px; }
+  /* Idle for 2.5 s: the tools step aside so the picture stands alone; a pointer or a key brings them back. */
+  .viewer :is(.viewer-bar, .viewer-strip, .viewer-foot) { transition: opacity var(--dur-normal) var(--ease-out); }
+  .viewer .viewer-nav { transition: opacity var(--dur-normal) var(--ease-out), background-color 200ms var(--ease-out), color 200ms var(--ease-out), transform 160ms var(--ease-out); }
+  .viewer[data-idle] :is(.viewer-bar, .viewer-nav, .viewer-strip, .viewer-foot) { opacity: 0; }
+  .viewer[data-idle] { cursor: none; }
   .viewer-count { flex-shrink: 0; border-radius: 999px; background: rgb(255 255 255 / 8%); padding: 2px 10px; font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; color: rgb(255 255 255 / 78%); }
   .viewer-icon { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px; color: rgb(255 255 255 / 84%); transition: background-color 200ms var(--ease-out), color 200ms var(--ease-out), transform 160ms var(--ease-out), opacity 200ms; }
   .viewer-icon:hover { background: rgb(255 255 255 / 10%); color: #fff; }
@@ -23,19 +32,30 @@
   .viewer-zoom-group { display: flex; align-items: center; gap: 2px; border-radius: 12px; background: rgb(255 255 255 / 6%); padding: 2px; }
   .viewer-zoom-value { height: 32px; min-width: 54px; border-radius: 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: rgb(255 255 255 / 86%); }
   .viewer-zoom-value:hover { background: rgb(255 255 255 / 10%); }
+  .viewer-actual { height: 32px; min-width: 40px; border-radius: 8px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: rgb(255 255 255 / 86%); }
+  .viewer-actual:hover { background: rgb(255 255 255 / 10%); }
 
+  .viewer-body { position: relative; display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr); }
+  .viewer-body[data-info] { grid-template-columns: minmax(0, 1fr) 320px; }
   .viewer-stage { position: relative; display: grid; min-height: 0; place-items: center; padding: 4px 76px 8px; }
+  .viewer-info { min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 4px 16px 8px 0; border-radius: 16px; background: rgb(255 255 255 / 7%); padding: 14px 16px 16px 18px; animation: viewer-info-in var(--dur-normal) var(--ease-out) backwards; }
   .viewer-media { position: relative; display: grid; width: 100%; height: 100%; min-height: 0; place-items: center; animation: viewer-swap 340ms var(--viewer-ease) both; transition: opacity 200ms var(--ease-out); }
   .viewer-media[data-direction="1"] { --swap-x: 28px; }
   .viewer-media[data-direction="-1"] { --swap-x: -28px; }
   .viewer-media[data-pending] { opacity: 0.5; }
 
   .viewer-zoom { position: relative; display: grid; width: 100%; height: 100%; place-items: center; overflow: hidden; touch-action: none; cursor: zoom-in; }
+  .viewer-zoom > :is(.viewer-image, .viewer-placeholder) { grid-area: 1 / 1; }
+  /* A thumbnail this tab already holds, softened, where the picture is about to appear. */
+  .viewer-placeholder { max-width: 100%; max-height: 100%; border-radius: 6px; background: center / cover no-repeat; filter: blur(10px) saturate(1.1); opacity: 0.85; }
+  .viewer-pending .viewer-placeholder { position: absolute; inset: 0; background-size: contain; }
   .viewer-zoom[data-zoomed] { cursor: grab; }
   .viewer-zoom[data-zoomed]:active { cursor: grabbing; }
   .viewer-image { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; border-radius: 6px; box-shadow: 0 30px 90px rgb(0 0 0 / 50%); transform-origin: center; opacity: 0; filter: blur(14px) saturate(0.6); transition: transform 140ms var(--ease-out), opacity 420ms var(--ease-out), filter 620ms var(--viewer-ease); }
   .viewer-image[data-loaded] { opacity: 1; filter: none; }
-  .viewer-zoom:active .viewer-image { transition-property: opacity, filter; }
+  /* With the thumbnail already standing in, the picture simply fades in over it; the blur is for a first sight. */
+  .viewer-image[data-reveal="fade"] { filter: none; transition: transform 140ms var(--ease-out), opacity 200ms var(--ease-out); }
+  .viewer-zoom:active .viewer-image, .viewer-zoom[data-dragging] .viewer-image { transition-property: opacity, filter; }
   /* Video fills the stage (small renders scale up); images stay at most 1:1 so review never shows upscaled pixels. */
   .viewer-video { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; background: #000; }
   .viewer-text { width: min(100%, 760px); max-height: 100%; overflow: auto; overscroll-behavior: contain; border-radius: 16px; background: var(--panel); padding: 28px 32px; font-size: 15px; line-height: 1.85; color: var(--ink); box-shadow: 0 30px 90px rgb(0 0 0 / 45%); }
@@ -82,19 +102,27 @@
     .viewer-nav { top: auto; bottom: 4px; margin-top: 0; width: 44px; height: 44px; }
     .viewer-nav-prev { left: 12px; }
     .viewer-nav-next { right: 12px; }
-    .viewer-foot { position: absolute; inset-inline: 0; bottom: 0; pointer-events: none; }
+    .viewer-strip { padding-top: 0; }
+    .viewer-thumb { width: 44px; height: 32px; }
+    .viewer-body[data-info] { grid-template-columns: minmax(0, 1fr); }
+    .viewer-info { position: absolute; inset-inline: 8px; bottom: 8px; z-index: 2; max-height: 60%; margin: 0; background: rgb(20 24 22 / 96%); animation-name: viewer-info-up; }
     .viewer-stage[data-compare] { grid-template-columns: none; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
     .viewer-alert { max-width: calc(100% - 128px); }
   }
 }
 
 @keyframes viewer-fade { from { opacity: 0; } }
-@keyframes viewer-fade-out { to { opacity: 0; } }
 @keyframes viewer-rise { from { opacity: 0; transform: translateY(18px) scale(0.985); filter: blur(6px); } }
 @keyframes viewer-swap { from { opacity: 0; transform: translateX(var(--swap-x, 0px)); } }
+@keyframes viewer-grow { from { opacity: 0; transform: translate(var(--grow-x, 0px), var(--grow-y, 0px)) scale(var(--grow-scale, 0.9)); } }
+@keyframes viewer-info-in { from { opacity: 0; transform: translateX(var(--move-panel)); } }
+@keyframes viewer-info-up { from { opacity: 0; transform: translateY(var(--move-panel)); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .viewer[data-state="open"] .viewer-stage, .viewer-media { animation-name: fade-in; }
-  .viewer-image { transition: opacity 200ms; filter: none; }
-  .viewer-skeleton::after { animation: none; }
+  html:not([data-motion="full"]) :is(.viewer[data-state="open"] .viewer-stage, .viewer-media, .viewer-info, .viewer-ambient, .viewer-backdrop[data-state="open"]) { animation-name: fade-in; animation-duration: 120ms; }
+  html:not([data-motion="full"]) .viewer-image { transition: opacity 200ms; filter: none; }
+  html:not([data-motion="full"]) .viewer-skeleton::after { animation: none; }
 }
+html[data-motion="reduced"] :is(.viewer[data-state="open"] .viewer-stage, .viewer-media, .viewer-info, .viewer-ambient, .viewer-backdrop[data-state="open"]) { animation-name: fade-in; animation-duration: 120ms; }
+html[data-motion="reduced"] .viewer-image { transition: opacity 200ms; filter: none; }
+html[data-motion="reduced"] .viewer-skeleton::after { animation: none; }

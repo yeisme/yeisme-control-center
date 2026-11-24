@@ -1,0 +1,63 @@
+/* Motion v21. Micro interactions (hover, press, selection, the sliding indicator) take 90–180ms and move at most 3px;
+   spatial ones (panels, sheets, popovers, a page) take 200–320ms, come from where they belong (the trigger or the screen
+   edge) and leave in about 0.7 of their entrance. Nothing bounces, everything can be interrupted, and the first frame is
+   already readable. Only transform, opacity and filter move; the indicator's size is the one exception, on a single
+   absolutely positioned element. Reduced motion (the system's, or 减少 in Settings) keeps opacity only, at 120ms or less. */
+:root {
+  --dur-instant: 90ms;
+  --dur-fast: 140ms;
+  --dur-normal: 220ms;
+  --dur-slow: 320ms;
+  --dur-exit: 160ms;
+  --dur-page: 240ms;
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  /* A critically damped spring (src/shared/motion/spring.ts): fast start, no overshoot. */
+  --ease-spring-soft: var(--ease-spring);
+  --move-micro: 3px;
+  --move-panel: 12px;
+  --move-swap: 24px;
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root { --ease-spring-soft: linear(0, 0.055, 0.1734, 0.3101, 0.4422, 0.5591, 0.6575, 0.7374, 0.8009, 0.8503, 0.8883, 0.9172, 0.9389, 0.9551, 0.9672, 0.9761, 0.9826, 0.9874, 0.9909, 0.9935, 0.9953, 0.9966, 0.9976, 0.9983, 1); }
+}
+
+/* Radix keeps a layer mounted while an exit animation runs on [data-state="closed"], and a mounted layer is still the
+   top one: it takes the next Escape, blocks clicks outside it and hides the rest from assistive tech. So dialogs, sheets,
+   popovers and menus close at once (pressing Esc twice closes two layers, and the page answers the next click); only
+   what holds no keyboard leaves with an animation: tooltips, and a scrim, which fades and lets clicks through. */
+@layer components {
+  .pop-in[data-state="closed"]:not([role="dialog"], [role="alertdialog"], [role="menu"]) { animation: pop-out var(--dur-exit) var(--ease-exit) both; }
+  .fade-in[data-state="closed"]:not([role="dialog"], [role="alertdialog"], [role="menu"]) { animation: fade-out var(--dur-exit) var(--ease-exit) both; pointer-events: none; }
+
+  /* The sliding indicator: one pill behind the selected item of a tab list, a choice group or the navigation. It appears
+     where the selection is and only slides once it has been placed, so the first frame never sweeps in from a corner. */
+  .slide-indicator { position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none; opacity: 0; }
+  [data-indicator-ready] > .slide-indicator {
+    opacity: 1;
+    transition: transform var(--dur-normal) var(--ease-spring-soft), width var(--dur-normal) var(--ease-spring-soft), height var(--dur-normal) var(--ease-spring-soft), opacity var(--dur-fast) var(--ease-out);
+  }
+  [data-indicator-ready] > :not(.slide-indicator) { position: relative; z-index: 1; }
+}
+
+/* A station card the rail just opened rings once (opacity only), so the eye finds where the click landed. */
+.station-card::after { content: ""; position: absolute; inset: -4px; border: 2px solid var(--warm); border-radius: calc(var(--radius-tile) + 4px); opacity: 0; pointer-events: none; }
+.station-card[data-flash]::after { animation: station-ring 1s var(--ease-out); }
+@keyframes station-ring { 0% { opacity: 0; } 18% { opacity: 1; } 100% { opacity: 0; } }
+
+/* The still copy a closing panel leaves (src/components/panel-ghost.ts) moves only by its own exit animation. */
+[data-panel-ghost], [data-panel-ghost] *, [data-panel-ghost] *::before, [data-panel-ghost] *::after { animation: none !important; transition: none !important; }
+/* Dragging the panel's edge: the whole page shows the resize cursor and no text gets selected on the way. */
+html[data-inspector-resizing], html[data-inspector-resizing] * { cursor: col-resize !important; user-select: none; }
+
+@keyframes pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(0.98) translateY(-2px); } }
+@keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) :is(.pop-in, .fade-in)[data-state="closed"]:not([role="dialog"], [role="alertdialog"], [role="menu"]) { animation-name: fade-out; animation-duration: 120ms; }
+  html:not([data-motion="full"]) :is(.page-enter, .stagger-in, .sheet-in, .sheet-in-bottom, .pop-in, .fade-in, .inspector-fixed-in, .inspector-float-in, .inspector-maximized-in, .inspector-sheet-in, .rise) { animation-duration: 120ms; }
+  /* The ring around a station just opened is shown, not animated, and goes when the mark does. */
+  html:not([data-motion="full"]) .station-card[data-flash]::after { animation: none; opacity: 1; }
+}
+html[data-motion="reduced"] :is(.pop-in, .fade-in)[data-state="closed"]:not([role="dialog"], [role="alertdialog"], [role="menu"]) { animation-name: fade-out; animation-duration: 120ms; }
+html[data-motion="reduced"] :is(.page-enter, .stagger-in, .sheet-in, .sheet-in-bottom, .pop-in, .fade-in, .inspector-fixed-in, .inspector-float-in, .inspector-maximized-in, .inspector-sheet-in, .rise) { animation-duration: 120ms; }
+html[data-motion="reduced"] .station-card[data-flash]::after { animation: none; opacity: 1; }

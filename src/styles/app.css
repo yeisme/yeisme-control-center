@@ -5,6 +5,8 @@
 @import "./audio.css";
 @import "./guide.css";
 @import "./viewer.css";
+@import "./motion.css";
+@import "./production-time.css";
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
@@ -12,6 +14,19 @@
 @theme inline {
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+
+  --color-lime: var(--lime);
+  --color-lime-ink: var(--lime-ink);
+  --color-warm: var(--warm);
+  --color-warm-soft: var(--warm-soft);
+  --color-surface-hero: var(--surface-hero);
+  --color-hero-ink: var(--hero-ink);
+  --color-rail: var(--rail);
+  --color-rail-ink: var(--rail-ink);
+  --color-rail-muted: var(--rail-muted);
+  --color-rail-active: var(--rail-active);
+  --color-rail-active-ink: var(--rail-active-ink);
 
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);
@@ -70,6 +85,10 @@
   --radius-card: var(--radius-card);
   --radius-control: var(--radius-control);
   --radius-chip: var(--radius-chip);
+  --radius-hero: var(--radius-hero);
+  --radius-tile: var(--radius-tile);
+  --shadow-card: var(--shadow-card);
+  --shadow-hero: var(--shadow-hero);
   --shadow-panel: var(--shadow-panel);
   --shadow-float: var(--shadow-float);
   --shadow-raised: var(--shadow-raised);
@@ -91,7 +110,33 @@
   --text-metric--line-height: 28px;
   --text-display: 26px;
   --text-display--line-height: 32px;
+  /* Serif display lines (font-display): page leads, hero sentences, episode names. */
+  --text-lead: 22px;
+  --text-lead--line-height: 30px;
+  --text-headline: clamp(28px, 2.6vw, 38px);
+  --text-headline--line-height: 1.2;
+  --text-hero: clamp(32px, 3.6vw, 52px);
+  --text-hero--line-height: 1.14;
 }
+
+/* Stacking layers from tokens.css. Anything fixed or portalled takes one of these, never a literal z value. */
+@utility z-sticky { z-index: var(--z-sticky); }
+@utility z-nav { z-index: var(--z-nav); }
+@utility z-dock { z-index: var(--z-dock); }
+@utility z-inspector-scrim { z-index: var(--z-inspector-scrim); }
+@utility z-inspector { z-index: var(--z-inspector); }
+@utility z-sheet-scrim { z-index: var(--z-sheet-scrim); }
+@utility z-sheet { z-index: var(--z-sheet); }
+@utility z-palette-scrim { z-index: var(--z-palette-scrim); }
+@utility z-palette { z-index: var(--z-palette); }
+@utility z-viewer-scrim { z-index: var(--z-viewer-scrim); }
+@utility z-viewer { z-index: var(--z-viewer); }
+@utility z-popover { z-index: var(--z-popover); }
+@utility z-critical-scrim { z-index: var(--z-critical-scrim); }
+@utility z-critical { z-index: var(--z-critical); }
+@utility z-toast { z-index: var(--z-toast); }
+@utility z-tooltip { z-index: var(--z-tooltip); }
+@utility z-skip { z-index: var(--z-skip); }
 
 @layer base {
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -111,6 +156,22 @@
   [data-sidebar] :focus-visible { outline-color: var(--sidebar-focus); }
   [data-theme-switching] *, [data-theme-switching] *::before, [data-theme-switching] *::after { transition: none !important; }
   * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+  /* Film grain over everything at a few percent: never takes a pointer, never changes a colour token. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-grain);
+    pointer-events: none;
+    opacity: var(--grain-opacity);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.5 0 0 0 0 0.5 0 0 0 0 0.5 0 0 0 1 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    mix-blend-mode: soft-light;
+  }
+  /* The shell's floating navigation capsule on phones and tablets: floating layers keep clear of it, with a gap. */
+  html:has([data-tabbar]) { --workspace-bottom: 0px; }
+  @media (max-width: 1023.98px) {
+    html:has([data-tabbar]) { --workspace-bottom: calc(var(--tabbar-height) + 18px + env(safe-area-inset-bottom)); }
+  }
 }
 
 @layer components {
@@ -130,18 +191,28 @@
     animation: shimmer 1.4s ease-in-out infinite;
   }
   .tabular { font-variant-numeric: tabular-nums; }
+  .rise { animation: rise 600ms var(--ease-spring) both; animation-delay: calc(min(var(--i, 0), 6) * 60ms); }
+  .ken-burns { animation: ken-burns 26s ease-in-out infinite alternate; transform-origin: 60% 40%; }
+  .hero-scrim { background: linear-gradient(90deg, rgb(8 12 10 / 82%) 0%, rgb(8 12 10 / 52%) 42%, rgb(8 12 10 / 8%) 75%), linear-gradient(0deg, rgb(8 12 10 / 70%) 0%, transparent 48%); }
+  .tile-scrim { background: linear-gradient(0deg, rgb(8 12 10 / 72%) 0%, rgb(8 12 10 / 20%) 38%, transparent 62%); }
+  /* A cover with no real picture yet: type and a quiet gradient, never a stock image standing in for the work. */
+  .cover-type {
+    background:
+      radial-gradient(120% 90% at 85% 15%, color-mix(in srgb, var(--lime) 22%, transparent) 0%, transparent 55%),
+      radial-gradient(90% 80% at 10% 100%, color-mix(in srgb, var(--warm) 26%, transparent) 0%, transparent 60%),
+      linear-gradient(135deg, #16241d 0%, #0d1511 100%);
+  }
   .media-checker {
     background-color: var(--panel-sunken);
     background-image: linear-gradient(45deg, var(--line) 25%, transparent 25%), linear-gradient(-45deg, var(--line) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--line) 75%), linear-gradient(-45deg, transparent 75%, var(--line) 75%);
     background-size: 16px 16px;
     background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   }
-  .inspector-fixed-in { animation: inspector-fixed-in 180ms var(--ease-out) both; }
-  @media (min-width: 1024px) {
-    [data-task-inspector="fixed"]:not([data-task-inspector-maximized="true"]) { right: 0 !important; left: auto !important; margin-right: 0; }
-  }
-  .inspector-float-in { animation: inspector-float-in 180ms var(--ease-out) both; }
-  .inspector-maximized-in { animation: inspector-maximized-in 180ms var(--ease-out) both; }
+  /* Panels come in from the edge they sit on. Only the start is filled: afterwards a drag may move the sheet. */
+  .inspector-fixed-in { animation: inspector-fixed-in var(--dur-normal) var(--ease-out) backwards; }
+  .inspector-float-in { animation: inspector-float-in var(--dur-normal) var(--ease-out) backwards; }
+  .inspector-maximized-in { animation: inspector-maximized-in var(--dur-normal) var(--ease-out) backwards; }
+  .inspector-sheet-in { animation: sheet-in-bottom var(--dur-normal) var(--ease-out) backwards; }
 }
 
 @keyframes page-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -151,15 +222,25 @@
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: scale(0.97) translateY(-4px); } to { opacity: 1; transform: none; } }
 @keyframes shimmer { to { transform: translateX(100%); } }
-@keyframes inspector-fixed-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes ken-burns { from { transform: scale(1.02); } to { transform: scale(1.09) translate(-1%, -1%); } }
+@keyframes inspector-fixed-in { from { opacity: 0; transform: translateX(var(--move-panel)); } to { opacity: 1; transform: none; } }
 @keyframes inspector-float-in { from { opacity: 0; transform: translateX(18px) scale(0.99); } to { opacity: 1; transform: none; } }
 @keyframes inspector-maximized-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .page-enter, .stagger-in, .sheet-in, .sheet-in-bottom, .pop-in, .inspector-fixed-in, .inspector-float-in, .inspector-maximized-in { animation-name: fade-in; animation-delay: 0ms; }
-  .skeleton::after { animation: none; }
-  *, *::before, *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  html:not([data-motion="full"]) :is(.page-enter, .stagger-in, .sheet-in, .sheet-in-bottom, .pop-in, .inspector-fixed-in, .inspector-float-in, .inspector-maximized-in, .inspector-sheet-in, .rise) { animation-name: fade-in; animation-delay: 0ms; }
+  html:not([data-motion="full"]) .ken-burns { animation: none; }
+  html:not([data-motion="full"]) .skeleton::after { animation: none; }
+  html:not([data-motion="full"]) *, html:not([data-motion="full"]) *::before, html:not([data-motion="full"]) *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+/* This device chose less motion (Settings → 外观 → 动效 → 减少): the same rules as the system's reduced-motion
+   preference. A device that chose 完整 is left out of those, so its choice wins over the system's. */
+html[data-motion="reduced"] :is(.page-enter, .stagger-in, .sheet-in, .sheet-in-bottom, .pop-in, .inspector-fixed-in, .inspector-float-in, .inspector-maximized-in, .inspector-sheet-in, .rise) { animation-name: fade-in; animation-delay: 0ms; }
+html[data-motion="reduced"] .ken-burns { animation: none; }
+html[data-motion="reduced"] .skeleton::after { animation: none; }
+html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-motion="reduced"] *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+html[data-motion="reduced"] .animate-spin { animation: none; }
 
 
 /* A notice stack is one line tall on every width: the first rendered notice folds to one clipped line, its actions
@@ -180,4 +261,26 @@
   .notice-stack[data-folded] > [data-notice] > :not(:first-child, [data-notice-actions]) :not(button, a) { display: inline; }
   .notice-stack[data-folded] > [data-notice] > :not(:first-child, [data-notice-actions]) :is(button, a) { display: none; }
   .notice-stack[data-folded] > .notice-stack-toggle { position: absolute; inset-block: 0; right: 0; margin: 0; padding: 0 12px; }
+}
+
+/* Below a 560px table every row is a card: the main cell on top, short cells (a state, a quick action) on one wrapping
+   line, priority-2 cells as 「标签 值」 lines and priority-3 cells hidden. The header stays for assistive tech, and the
+   sort menu takes its place on screen. The card rules live in the utilities layer because they have to beat the
+   columns' own `hidden` and `@2xl:table-cell`. */
+@layer components {
+  .data-table-sort { display: none; }
+}
+@layer utilities {
+  @container (max-width: 559.98px) {
+    [data-table] > thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    [data-table], [data-table] > tbody { display: block; }
+    [data-table] > tbody > tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 12px 16px; }
+    [data-table] > tbody > tr > td { display: block; width: auto; max-width: none; padding: 0; text-align: start; }
+    [data-table] > tbody > tr > td[data-main] { flex: 1 0 100%; min-width: 0; }
+    [data-table] > tbody > tr > td[data-priority="2"] { display: flex; flex: 1 0 100%; align-items: baseline; gap: 8px; font-size: 12px; line-height: 18px; }
+    [data-table] > tbody > tr > td[data-priority="2"]::before { content: attr(data-label); flex: none; min-width: 4em; color: var(--muted); }
+    [data-table] > tbody > tr > td[data-priority="3"] { display: none; }
+    [data-table] > tbody > tr > td[data-align="end"][data-priority="1"] { margin-inline-start: auto; }
+    .data-table-sort { display: flex; }
+  }
 }

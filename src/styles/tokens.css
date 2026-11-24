@@ -1,21 +1,22 @@
-/* Yeisme Control Center v18.1 tokens: the only color, radius and motion source. */
+/* Yeisme Studio v20 tokens: the only color, radius and motion source. Light is "warm paper", dark is "set at night".
+   Status hues keep their v18.1 values: notice text is checked at 4.5:1 against them (tests/notice-action-hover.test.ts). */
 :root {
   color-scheme: light;
-  --canvas: #f5f3ee;
-  --panel: #fffefa;
-  --panel-soft: #faf8f2;
-  --panel-sunken: #f0eee7;
-  --ink: #1f2b25;
-  --ink-soft: #3d4a43;
-  --muted: #616e66;
-  --faint: #67726a;
-  --line: #e2e6dc;
-  --line-strong: #cdd6c9;
+  --canvas: #f6f1e7;
+  --panel: #fffdf7;
+  --panel-soft: #faf6ee;
+  --panel-sunken: #efe9dd;
+  --ink: #17211b;
+  --ink-soft: #37443c;
+  --muted: #5b675f;
+  --faint: #616c64;
+  --line: #e7e0d2;
+  --line-strong: #d4cbb9;
   --primary: #214b3e;
   --primary-ink: #ffffff;
-  --primary-soft: #e6eee8;
-  --accent: #d0e778;
-  --accent-ink: #1d3a12;
+  --primary-soft: #e4ece4;
+  --accent: #d9f26e;
+  --accent-ink: #1b2610;
   --focus: #2f6b5c;
 
   --sidebar: #173c30;
@@ -65,19 +66,39 @@
   --folder-ink: #1f2b25;
   --chart-axis: #8d978f;
 
-  --shadow-panel: 0 1px 2px rgb(25 49 38 / 5%), 0 8px 24px rgb(25 49 38 / 5%);
-  --shadow-raised: 0 1px 2px rgb(25 49 38 / 6%), 0 10px 28px rgb(25 49 38 / 9%);
+  --shadow-panel: 0 1px 2px rgb(52 40 18 / 4%), 0 10px 30px -18px rgb(52 40 18 / 16%);
+  --shadow-raised: 0 1px 2px rgb(52 40 18 / 6%), 0 18px 44px -22px rgb(52 40 18 / 24%);
   --shadow-float: 0 18px 48px rgb(25 49 38 / 16%), 0 2px 6px rgb(25 49 38 / 8%);
   --ring-selected: 0 0 0 1px var(--primary), 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
   --sidebar-focus: #d0e778;
   --scrim: rgb(18 30 24 / 34%);
 
-  --radius-card: 14px;
-  --radius-control: 9px;
-  --radius-chip: 6px;
+  /* v20 semantic layer. lime is a fill (never small text on paper); warm is only "a person's next step". */
+  --lime: #d9f26e;
+  --lime-ink: #1b2610;
+  --warm: #8f5228;
+  --warm-soft: #f7eadc;
+  --surface-hero: #101813;
+  --hero-ink: #f4f7ef;
+  --rail: #f1ebdf;
+  --rail-ink: #26322b;
+  --rail-muted: #5b675f;
+  --rail-active: #e4ead6;
+  --rail-active-ink: #173c30;
+  --grain-opacity: 0.028;
+  --shadow-card: 0 1px 2px rgb(52 40 18 / 5%), 0 16px 40px -24px rgb(52 40 18 / 22%);
+  --shadow-hero: 0 40px 100px -48px rgb(30 24 12 / 45%);
+
+  --radius-hero: 28px;
+  --radius-tile: 20px;
+  --radius-card: 18px;
+  --radius-control: 10px;
+  --radius-chip: 999px;
   --sidebar-width: 248px;
   --sidebar-collapsed: 72px;
   --topbar-height: 60px;
+  --rail-width: 88px;
+  --tabbar-height: 60px;
   --content-gutter: clamp(16px, 2vw, 32px);
   --inspector-width: clamp(400px, 34vw, 520px);
 
@@ -88,26 +109,65 @@
 
   --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", ui-sans-serif, system-ui, sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+  /* Chinese serif for display lines only; system fonts, nothing bundled. */
+  --font-display: "Noto Serif CJK SC", "Source Han Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Stacking scale. Every fixed layer takes its z from here (utilities z-<layer> in app.css), so a sheet opened from
+     the Inspector always lands above it, menus inside dialogs stay on top, and the film grain sits under the viewer. */
+  --z-sticky: 20;
+  --z-nav: 30;
+  --z-dock: 35;
+  --z-inspector-scrim: 44;
+  --z-inspector: 45;
+  --z-sheet-scrim: 50;
+  --z-sheet: 51;
+  --z-palette-scrim: 60;
+  --z-palette: 61;
+  --z-grain: 65;
+  --z-viewer-scrim: 70;
+  --z-viewer: 71;
+  --z-popover: 80;
+  --z-critical-scrim: 86;
+  --z-critical: 87;
+  --z-toast: 88;
+  --z-tooltip: 90;
+  --z-skip: 95;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --canvas: #111714;
-  --panel: #18201c;
-  --panel-soft: #1d2622;
-  --panel-sunken: #141b18;
-  --ink: #e8efe9;
-  --ink-soft: #cbd6ce;
-  --muted: #a1afa6;
-  --faint: #8d9b92;
-  --line: #29352f;
-  --line-strong: #3b4a42;
-  --primary: #d0e778;
-  --primary-ink: #142a1d;
-  --primary-soft: #26321f;
-  --accent: #d0e778;
-  --accent-ink: #142a1d;
-  --focus: #d0e778;
+  --canvas: #0b110e;
+  --panel: #131c17;
+  --panel-soft: #18221c;
+  --panel-sunken: #0f1612;
+  --ink: #eef3ec;
+  --ink-soft: #c9d3c8;
+  --muted: #98a69c;
+  --faint: #87958b;
+  --line: #212d26;
+  --line-strong: #33433a;
+  --primary: #d9f26e;
+  --primary-ink: #1b2610;
+  --primary-soft: #222d1b;
+  --accent: #d9f26e;
+  --accent-ink: #1b2610;
+  --focus: #d9f26e;
+
+  --lime: #d9f26e;
+  --lime-ink: #1b2610;
+  --warm: #f0bb8f;
+  --warm-soft: #2e2318;
+  --surface-hero: #0f1813;
+  --hero-ink: #f4f7ef;
+  --rail: #0d1410;
+  --rail-ink: #dfe8e0;
+  --rail-muted: #8d9b91;
+  --rail-active: #1c2617;
+  --rail-active-ink: #d9f26e;
+  --grain-opacity: 0.045;
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 18px 48px -24px rgb(0 0 0 / 80%);
+  --shadow-hero: 0 44px 120px -40px rgb(0 0 0 / 90%);
 
   --sidebar: #0f1a15;
   --sidebar-ink: #e3ece6;
@@ -151,8 +211,8 @@
   --folder-tone-5: oklch(0.72 0.008 80);
   --chart-axis: #76847b;
 
-  --shadow-panel: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 0 0 1px rgb(255 255 255 / 2%);
-  --shadow-raised: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 0 0 1px rgb(255 255 255 / 5%), 0 10px 28px rgb(0 0 0 / 30%);
+  --shadow-panel: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 0 0 1px rgb(255 255 255 / 3%), 0 18px 44px -28px rgb(0 0 0 / 80%);
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / 5%) inset, 0 0 0 1px rgb(255 255 255 / 5%), 0 22px 56px -24px rgb(0 0 0 / 85%);
   --shadow-float: 0 22px 56px rgb(0 0 0 / 45%), 0 0 0 1px rgb(255 255 255 / 6%);
   --scrim: rgb(0 0 0 / 52%);
 }
