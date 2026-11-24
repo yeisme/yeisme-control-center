@@ -4,6 +4,8 @@
 
 正式客户端只使用真实模式；不存在独立 demo 入口，普通读取失败绝不切换为样例。
 
+2026-11-03 责任对账：Sonora 的 OIDC client/跨 owner 委托协调、日常四服务读取及分层证据待办已合并至 [本项目 request-visibility 2.2–2.4](../openspec/changes/yeisme-request-visibility-v1/tasks.md)，保留 pending。Sonora 只负责自身的身份与范围校验、业务读取及审计；本项目负责 Web 会话、浏览器 scope 失效和跨服务联调。新 issuer、IdP 注册、grant 变更或真实部署仍需各自具体授权，迁移任务没有执行或批准这些动作。
+
 ## 布局与交互
 
 正式前端使用 Geist、Lucide 和统一 Workspace 令牌。主区保留可访问 h1，左栏支持收起和手机抽屉；项目、任务、资产、能力、用量与团队页面共享同一套状态组件。视觉规范以 `src/styles/`、`src/app-shell/` 和现有设计说明为准。
@@ -49,3 +51,9 @@ Scaena保留OrganizationID；Sonora/Eikona当前查询合同以owner project作�
 ## 当前工程边界
 
 本地实现包括客户端、OIDC/个人会话、范围化聚合、三 owner 元数据列表/汇总、Aigora 范围核验与归档适配、按需正文及 Eikona 附件传输。Sonora/Scaena 的业务文本增量与未采集状态仍按各任务族区分，不能把某一族可读扩大为所有输入/输出/附件可读。四服务的当前实际授权读取、Scaena/Sonora 附件和组织成员委托继续逐项验收，证据边界见 [当前状态](current-status.md)。
+
+## 任务检查器原始提示词
+
+任务检查器「提示词采集」只在 owner 返回 `prompt_capture.readable=true` 且带有 `capture_ref` 时显示原始提示词读取入口。读取使用 `POST /tasks/:task_key/prompt:read`：先写控制中心 `tasks.prompt_read` 审计，再通过固定连接的 `control_center.tasks.prompt` 动作向 owner 请求正文。owner 再校验个人观察/正文授权、项目与任务绑定，先写 owner 审计，再返回正文或 `not_recorded`。
+
+正文只保留在当前检查器内存；关闭检查器、切换范围或登出即清除。连接未开启 `allow_content`、审计失败、owner 拒绝或未留存时显示明确状态，不以空正文冒充成功，也不回退演示数据。读取不触发生成、取消、重试或新 Provider 调用。

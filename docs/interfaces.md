@@ -4,7 +4,7 @@
 
 2026-10-21 核对：同源 Bun 服务、账户/会话、任务/请求读取、媒体授权、收集索引、工作队列、工具目录及协作代码已经存在；部分共享项目实现仍在未提交工作树。实现合同分布于 `server/app.ts`、`server/contracts.ts`、`src/shared/**` 与 `src/shared/api/control-center-client.ts`，实际部署/真实授权状态见 [current-status.md](current-status.md)。
 
-后续完成顺序见 [完成方案](completion-roadmap.md)；现有路由、前端调用方和拟议分页/参考/视频接口的逐项设计见 [前端接口补齐](frontend-api-completion.md)。拟议路由尚未实现，不能据此声明 owner 或部署能力。
+后续完成顺序见 [完成方案](completion-roadmap.md)；现有路由、前端调用方和分页/参考/视频接口的逐项设计见 [前端接口补齐](frontend-api-completion.md)。参考 binding 路由目前只实现本地 fail-closed 合同和缺口投影；owner 目录、授权预览与部署能力仍需独立合同和真实验收。
 
 ## 接线边界
 
@@ -21,8 +21,18 @@
 运行与操作步骤见 [运行与部署边界](lan-deployment.md)，这里只写接口上看得见的行为。
 
 - **账号文件**：服务端在处理登录、已登录的请求和 `/auth/methods` 之前，以及后台观察每个周期开始时，比对配置文件（一次 `stat`），变了就只重读 `personal.users`，所以 `personal-config user add|revoke|enable|rotate` 对下一个请求生效，不需要重启；被吊销账号的已有会话下一个请求得到 401，旧密钥登录得到 401。网页吊销没存进文件时，吊销在进程内保持有效，并带进之后每一次写文件和每一次重读（只增不减），文件记下吊销后才以文件为准。命令的输出带 `restart_required: false`。
-- **账号路由**：`GET|POST /admin/personal-users` 与 `POST /admin/personal-users/{用户名}/revoke` 各自完整匹配；前缀下的其他路径是 404 `not_found`，方法不对是 405。撤销路由不读请求体，所以不会因为请求体的样子建出账号或撤销失败。创建与撤销都在配置文件锁内写文件；锁 5 秒内没等到时答 503 `config_busy`（已做出的吊销仍在进程内生效，并随下一次写文件存盘）。
-- **空闲到期**：个人会话在最后一次请求 30 分钟后结束，不是登录后 30 分钟。最后一次请求的时间每个会话每分钟最多写一次（`SessionStore.touch`），所以空闲上限实际在 29 到 30 分钟之间；登录 12 小时后的绝对到期不变。
+- **账号路由**（v21 起网页全面管理，见 [studio-v21 设计](design/studio-v21.md) §7）：以下路由各自完整匹配，前缀下的其他路径是 404 `not_found`，路径对但方法不对是 405（单个账号 `/admin/personal-users/{用户名}` 只接受 `PATCH`）。全部要求个人管理员会话；写操作还要求 CSRF 令牌，并且都写审计。
+  - `GET /admin/personal-users`：返回 `users`（每项带 `version`、`duplicate`、`key_rotated_at`）、`management`（`enabled`、`reason`、只能用命令行管理的 `legacy_owner`，以及 `needs_owner_username`）和 `scopes`（能分给账号的范围，只有配置里的，不含共享项目）。
+  - `POST /admin/personal-users`：新建账号，201 返回 `user` 和只出现这一次的 `access_key`。用户名与配置主账号相同时得到 409 `user_exists`；主账号还没有用户名、又还没有别的账号时得到 409 `owner_username_required`，因为建出第一个账号后主账号就登录不了了。
+  - `POST /admin/personal-users/{用户名}/rotate`：在配置锁里以 0600 原子替换摘要，返回新的 `access_key`；该账号所有会话在下一个请求结束。
+  - `POST /admin/personal-users/{用户名}/enable`：重新启用；同名重复时得到 409 `user_duplicate`。
+  - `POST /admin/personal-users/{用户名}/revoke`：停用；不读请求体，所以不会因为请求体的样子建出账号或撤销失败。
+  - `PATCH /admin/personal-users/{用户名}`：改 `name`、`role`、`scope_ids`，必须带读到的 `if_match`；期间被改过得到 409 `user_changed`。
+  - 防护：不能停用自己（409 `cannot_revoke_self`）；不能让服务端没有有效管理员（409 `last_admin_required`，有用户名的管理员主账号也算一个）；配置主账号只能用命令行管理（409 `legacy_owner_managed_by_cli`）；`personal.web_accounts.manage: false` 时写操作得到 403 `web_account_management_disabled`；没有可写配置文件时得到 503 `user_management_unavailable`。
+  - 创建、停用、启用、重置、修改都在配置文件锁内写文件；锁 5 秒内没等到时答 503 `config_busy`（已做出的停用仍在进程内生效，并随下一次写文件存盘）。返回新 Key 的响应都是 `no-store`。
+- **自助重置**：`POST /account/rotate-key`，个人会话、任何角色都可以，只重置自己的 Key。请求体只能有 `current_key`，Key 不对得到 401 `invalid_credentials`（会话不受影响）。成功时，这个账号的其他会话立刻结束；发出请求的会话继续有效，好让页面把新 Key 显示完，页面在用户确认保存后退出登录。`/session` 的 `own_key` 字段说明能不能自助重置：`available`，或不能的原因（`legacy_owner_managed_by_cli`、`web_account_management_disabled` 等）。
+- **审计筛选**：`GET /audit` 只给管理员，可以按 `action`、`outcome`（`succeeded|denied|failed|unavailable|initiated`）、`actor`（完整标识，最长 320 字符）和 `from`/`to`（`YYYY-MM-DD`，UTC 日）筛选，用 `before` 往前翻页；值不合法时得到 400。
+- **空闲到期**：普通个人会话在最后一次请求 30 分钟后结束，不是登录后 30 分钟。最后一次请求的时间每个会话每分钟最多写一次（`SessionStore.touch`），所以空闲上限实际在 29 到 30 分钟之间；登录 12 小时后的绝对到期不变。登录页可显式勾选“记住此设备”：仍只保存 HttpOnly opaque session cookie，不保存密码或访问 Key；该会话最长 30 天、连续 7 天无请求后结束。控制中心可见页面每 5 分钟发起一次 `/session` 心跳，focus/visibility 恢复时立即刷新；网络短暂失败不清掉当前页面，只有服务明确返回 `login_required` 才要求重新登录。
 - **epoch**：新会话的 epoch 取“当前毫秒时间”与“已存会话最大 epoch + 1”中较大的一个，所以它是一个时间量级的数，而且总比之前任何会话的高；权限变化（账号列表变动、共享项目变动、工具项目接入）让所有活动会话 +1。另一个标签页换人登录后，旧标签页下一次读取看到更大的 epoch 就重读 `/session`；它发出的写请求带着旧 CSRF，得到 403 `csrf_denied`，前端读一次 `/session`：服务端给出的令牌与被拒的不同，就换上新会话并提示“登录状态已在别处更改”；给出的仍是刚被拒的那个令牌（例如反向代理去掉了 `Origin`，每个写请求都被拒），重读也没有用，页面停在“服务端拒绝了本页发出的请求”的状态，不再循环；被拒令牌已经不是页面当前令牌时忽略，两次这样的重读至少隔 10 秒。
 - **登录限流**：被拒的登录按来源地址和账号分开计，15 分钟一个窗口：同一已有账号加同一来源地址 5 次，同一来源地址（任何名字）20 次，同一已有账号（任何地址）50 次，整台服务 500 次；不对应任何账号的名字只计入地址和整台服务，所以一个地址乱试名字不会锁住别处的管理员。额度满了得到 429 `login_rate_limited`，在口令计算和“正在核验”标记之前检查；成功的登录和服务端自己的凭据文件问题（503）不计数。地址先化成唯一写法再计数、再判断是否本机（IPv6 压缩成小写，IPv4 映射的 IPv6 就是它带的 IPv4，去掉区域标识）；IPv4 按单个地址，IPv6 按 /64。来源地址取连接对端（处理请求一开始就读，不等读完请求体）；只有对端是本机回环地址时才采用 `X-Forwarded-For` 的最后一项，缺失、不合法或来自其他对端的头都忽略。本机上每一层代理都要自己写这个头为自己连接上的对端：开发服务器的 `/api/control-center` 代理已经把它整个替换成真实对端，客户端写的值到不了控制中心。密钥或口令超过 1024 字节的请求不是猜测：400 `invalid_login_request`，在任何口令计算和计数之前，不占额度（用户名超过 80 个字符、请求超过 2048 个字符同样是 400）。一个登录正在核验时到达的另一个登录得到 429 `login_busy`，几秒后再试即可，它不计入任何额度。用户名不对应任何账号时，按同样代价对一个启动时生成的摘要校验、只计入地址与整台服务的失败并返回 401 `invalid_credentials`（不会因旧版所有者的口令文件读不到而变成 503）。残余风险（见 [运行与部署边界](lan-deployment.md)）：至少 10 个不同的真实地址可以用光一个账号的 50 次，至少 25 个可以触发 500 次的断路器；限额按进程计数，重启清零。登录审计：被拒的登录只有用户名与已配置账号完全一致才记名字，否则记 `(unknown)`；被 429 拒绝的请求不逐条记，某个额度被填满时记一条（`meta.bucket`）。
 - **每个账号的上限**：同一账号 15 分钟内最多成功登录 20 次，第 21 次在口令计算和“正在核验”标记之前就得到 429 `login_rate_limited`，只影响这个账号（失败的尝试不计入，所以不知道密钥的人替它用不光；持有密钥的人可以，所以一个账号只给一个人用，见 [运行与部署边界](lan-deployment.md)）；每个账号最多 8 个会话，再登录时结束最早的一个；闲置满 30 分钟的个人会话在下一次请求或登录前就被删除，不再占着全局 100 个会话的名额。
@@ -48,6 +58,12 @@
 `GET /api/control-center/v1/drama/episode?scope=<scope>&episode_ref=<ref>[&scaena_episode_ref=<ref>][&refresh=1]` 返回一集的 `creative_flow` 投影、五节点阶段链、head 拆解的结构（`outline`：场景标题与镜头景别/角度/运镜/时长；`older_attempts`、`truncated`）和每个阶段的安全交接（Auctra/Scaena 命令模板、已配置时的 MuWeave URL）。引用最长 512 且不含控制字符，否则 400 `invalid_reference`；`scaena_episode_ref` 只改变 Scaena 的读取。响应不含 `action_summary`、媒体绑定、prompt、凭据。
 
 两个路由只接受 GET（其余方法 405）。读取走“会话 + epoch + 范围 + 绑定 + 集”隔离的 45 秒缓存；owner 暂时不可用只记 10 秒，之后重试，其余状态（包括未绑定、缺合同）按 45 秒缓存，所以部分连接的范围不会每次请求都重读 owner。同一键的强制刷新 10 秒内只生效一次，响应的 `cache` 为 `hit`、`miss` 或 `refresh_limited`。`order=recent` 把最近更新的剧集排在前面（审阅页用它）。列表的实时读取预算只计需要 owner 调用的行，已缓存的行不占额度。`episode_ref` 查询参数里不合法的引用（控制字符、首尾空白、超长）被忽略而不是让整个请求失败，超过 12 个才返回 400。收集库里不存在的引用（多半是任务里的 Scaena 引用）不会发给 Auctra，因为 Auctra 按引用末尾的数字匹配计划，会把别的集的计划显示在它名下；该行的 Auctra 阶段显示“收集库里没有这一集”。旧版本服务端没有这两个路由，前端据此显示“服务端版本过旧”，不用演示数据补齐。
+
+### 制作耗时（yeisme.process_timing.v1，只读）
+
+任务观察行可带 `timing`，它是工具自己的 `yeisme.process_timing.v1` 记录。控制中心只保留以下字段：`run_ref`、`parent_run_ref`、`phase`、`operation`、13 种 `status` 之一、`started_at`、`ended_at`、五类 `*_duration_ms`、`heartbeat_at`、`stall_after_ms` 和 `retry_count`。不转发 `events`、`input_digest`、`evidence_ref`、`next_action`。`schema_version` 不对、状态未知或缺 `run_ref`、`started_at` 时，整条记录丢弃；时长不是非负安全整数时记为 null，不当成 0。
+
+`GET /production` 的响应中，每个站带 `time`：`observed`（汇总、最慢的 run），或者 `needs_contract`（故事、设定、分镜站）。整条线带 `time.total`；项目范围另带 `episodes` 和 `unattributed`，单集范围另带 `owner_total`。`owner_total` 读自 Scaena `control_center.production.episodes` 行的可选 `timing`；没有这个字段时为 `needs_contract`（`episode_timing_contract_missing`）。读取时的合计与 `owner_total` 不相加。剧集归属只认 Scaena 的 `episode_ref`。规则见 [studio-v25](design/studio-v25.md)。
 
 ### 工具目录（yeisme.tool_catalog.v1）
 
@@ -77,7 +93,7 @@ DriveBridge 与个人 MCP Gateway 不是任务 owner，控制中心只读它们�
 | 工具 | 只调用的 GET | 保留 | 丢弃 |
 | --- | --- | --- | --- |
 | DriveBridge（空间级 Agent 令牌，`read`） | `/healthz`（不带凭据）、`/api/v1/capabilities`、`/api/v1/operations?limit=50` | 接口版本、分块、单文件上限；运行的 id、类型、状态、时间、大小或进度、snake_case 错误码 | 公开地址、路径、文件名、摘要、错误文本 |
-| MCP Gateway（`mcp:tools:read,mcp:audit:read`，必须绑定工作区） | `/readyz`（不带凭据）、`/v1/tenants/current`、`/v1/backends`、`/v1/tools`、`/v1/operations`、`/v1/usage?group_by=backend` | 后端 id、命名空间、启用、状态（就绪由 `/readyz` 决定）、工具数；工具摘要；REST 运行的 id、类型、状态、时间；7 天调用、失败、p95 | 后端地址、`last_error`、缺失的环境变量名、运行结果；不读 `/healthz` 与 `/v1/runtime/state` |
+| MCP Gateway（`mcp:tools:read,mcp:audit:read`，必须绑定工作区；可选独立 `management_credential_ref`） | `/readyz`（不带凭据）、`/v1/tenants/current`、`/v1/backends`、`/v1/tools`、`/v1/operations`、`/v1/usage?group_by=backend` 以及 `/v1/personal/{mcp-telemetry,agent-sessions,calls,client-presets,events}` | 后端 id、命名空间、启用、协议版本、缓存新鲜度、`stdio_supervisor` 安全快照；工具摘要与 Token 足迹；活跃会话与调用阶段摘要；7 天用量与延迟分位 | 后端地址、`command`/`args`/`env`、`last_error` 原文、PID、运行正文；网页严禁修改命令或地址（详见 [个人 MCP 网关与 Agent 监控](mcp-gateway-and-agent-monitoring.md)） |
 
 - 每次调用 5 秒超时、拒绝重定向、响应上限 1 MiB；401/403 → 无权限，404/405 → 待补齐接口，429 → 限流，其余 → 不可用，不透传 owner 文本。
 - 缓存：DriveBridge 120 秒（它每次鉴权调用都写审计行），Gateway 60 秒；并发共享；强刷每 15 秒一次；读不到时保留上次读数并标 `stale`，同时写明当前不可用。
@@ -96,7 +112,7 @@ owner 与开放工具不报告凭据到期，所以到期时间由签发的人�
 Anatomia 按 `yeisme.task_observation.v1` 接入任务连接（`owner: "anatomia"`），由 Anatomia 侧变更 `anatomia-control-center-task-observation-v1` 提供（开关 `ANATOMIA_TASK_OBSERVATION_ENABLED`，另需 `ANATOMIA_MCP_ENABLED`）。
 
 - 观察密钥：`observer.read`（必须绑定项目），预览关键帧另需 `observer.content`；`anatomia control service-keys create --scope observer.read [--scope observer.content] --project project:<name> --output-file <file> --json`。
-- 回复直接放在 `structuredContent`，没有 `result` / `data` 包装；工具层 `FORBIDDEN` 显示为“需要 owner 授权”。
+- 回复直接放在 `structuredContent`，没有 `result` / `data` 包装；工具层 `FORBIDDEN` 显示为“需要工具授权”。
 - 任务族：`decompose`（拉片分析）、`understand`（视频问答）；只列出带项目的分析，存量没有项目的分析不出现。
 - 媒体：`anatomia.task_artifact_grant.v1`，地址必须同源、恰为 `/api/v1/control-center/artifact-grants/<32 位十六进制>`、无 query 与 fragment、125 秒内过期，取媒体时带同一个观察凭据。
 - 取消：一律 `cancel_not_supported`。
@@ -184,7 +200,6 @@ Preview/Confirm 使用 `scope_id`、`owner`、`target_kind`、`target_ref`、`ac
 | 成本与用量 | 实际费用的原账本/Provider 结算 owner；网关成本仍归 Aigora | 去重原账单 ref、分币种、估算与确认分离；缺数保持未知 | 各服务 billing_ref / currency / charge_state 适配 needs_contract；测跨服务重复引用与 pending |
 | 跨 owner 资产与交接 | Eikona、Sonora、Scaena、DriveBridge 等公开 ref/grant 合同 | 每次交接核验固定版本、权限、用途和接收回执 | 聚合搜索与血缘投影待接；测旧版本、403、过期 grant、不自动采用 |
 | 写作与分析 | Auctra accepted revision；Anatomia source/analysis/evidence API | 正文和来源真源留 owner，接受与 production adoption 独立 | 管理摘要适配待接；测修订变化、证据缺失、固定版本返回 |
-| 知识、同步、研究与扩展 | Pinax/Capsa/Manju/Quaestor 与各工具公开合同 | 未部署的本地工具只显示 local；不读数据库或复制 canonical 内容 | 各服务摘要按能力矩阵逐项接入，未确认项为 needs_contract |
 | 诊断和审计 | 原 owner request/operation/receipt/evidence | SSE 与详情相同权限；只读脱敏导出；缺 cursor 时重新取快照 | 有界轮询作 fallback；测断线、重复/乱序事件、分页与 scope 隔离 |
 
 ## 实施顺序与验收归属

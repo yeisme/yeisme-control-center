@@ -17,6 +17,7 @@
     "preview:fixture": "bun scripts/fixture-preview.ts",
     "test:public-guide": "bun scripts/verify-public-guide.ts",
     "test:browser-journey": "bun scripts/verify-browser-journey.ts",
+    "test:accounts-journey": "bun scripts/verify-accounts-journey.ts",
     "test:visual-matrix": "bun scripts/capture-visual-matrix.ts",
     "test:preview:real": "node scripts/verify-dev-preview.mjs",
     "serve": "bun server/index.ts",
@@ -27,7 +28,8 @@
     "test:app": "node scripts/verify-app.mjs",
     "test:contract-integration": "bun scripts/verify-contract-integration.ts",
     "test:server-boot": "bun scripts/verify-server-boot.ts",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "test:prompt-library": "bun scripts/verify-prompt-library.ts"
   },
   "type": "module",
   "private": true,
