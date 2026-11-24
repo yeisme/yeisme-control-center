@@ -1826,3 +1826,10 @@ A button inside a notice (`NoticeAction`) MUST show hover by lifting its backgro
 - **WHEN** the notice stack is unfolded with a click on its toggle and the pointer is now over a button of the first notice, on a 390 px wide window
 - **THEN** the button's label has at least 4.5:1 against its hovered background, and the scan reports nothing
 
+### Requirement: Gateway management credential slot isolation
+When `open_tools.gateway.management_credential_ref` is configured on an enabled gateway open tool for a bound scope, `credentialStatuses` SHALL expose a dedicated `open_tool:gateway:management` slot for personal administrators, evaluated independently from the read-only `open_tool:gateway` slot and never exposing file paths or secret contents.
+
+#### Scenario: Read-only token valid while management token expires
+- **WHEN** `open_tools.gateway.credential_ref` is valid and accepted, while `management_credential_ref` is within 7 days of `management_credential_expires_at`
+- **THEN** `open_tool:gateway` reports `ok` and `open_tool:gateway:management` reports `expiring` with stage `7d`
+
