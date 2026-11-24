@@ -81,7 +81,7 @@ export function PromptCaptureSummary({ prompt, compact = false, className }: { p
       {prompt.version && <span className="whitespace-nowrap text-2xs text-muted">版本 {prompt.version}</span>}
       {prompt.length !== undefined && <span className="tabular whitespace-nowrap text-2xs text-muted">{prompt.length} 字符</span>}
     </div>
-    {prompt.summary ? <p className="rounded-control border border-line bg-panel-soft p-3 text-body-sm leading-5 text-ink-soft">{prompt.summary}</p> : <p className="text-body-sm text-muted">Owner 没有返回可展示的提示词摘要。</p>}
+    {prompt.summary ? <p className="rounded-control border border-line bg-panel-soft p-3 text-body-sm leading-5 text-ink-soft">{prompt.summary}</p> : <p className="text-body-sm text-muted">{prompt.readable ? "Owner 已授权读取原始提示词；使用下方入口读取，读取会写入审计。" : "Owner 没有返回可展示的提示词摘要。"}</p>}
     <FactsWithGaps items={[
       { label: "来源", value: prompt.source ? labelFrom(sourceLabels, prompt.source) : null },
       { label: "语言", value: prompt.locale ? labelFrom(localeLabels, prompt.locale) : null },

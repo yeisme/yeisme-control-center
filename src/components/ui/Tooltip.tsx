@@ -16,7 +16,7 @@ export function Tooltip({ content, children, side = "top", className }: { conten
         side={side}
         sideOffset={6}
         collisionPadding={8}
-        className={cx("pop-in z-[90] max-w-xs rounded-[8px] bg-ink px-2.5 py-1.5 text-xs leading-5 text-panel shadow-float text-pretty", className)}
+        className={cx("pop-in z-tooltip max-w-xs rounded-[8px] bg-ink px-2.5 py-1.5 text-xs leading-5 text-panel shadow-float text-pretty", className)}
       >
         {content}
       </RadixTooltip.Content>

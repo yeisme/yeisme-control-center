@@ -6,7 +6,7 @@ import type { TaskArtifact, TaskSnapshot } from "../task-observation";
 import { type MediaPreviewController, type PreviewTarget } from "./media-preview";
 import { grantErrorLabel } from "./media-preview";
 import { audioTrackFrom, useTrackPhase } from "../app/audio-player";
-import { AudioPlayButton, AudioScrubber } from "./AudioDock";
+import { AudioMiniWave, AudioPlayButton, AudioScrubber } from "./AudioDock";
 
 /** Result metadata and actions; visual previews open the full-screen viewer, audio plays in the global player. */
 export function ResultViewer({ task, result, kind, preview, compact = false, showPreview = true }: { task: TaskSnapshot; result: TaskArtifact; kind: MediaKind; preview: MediaPreviewController; compact?: boolean; showPreview?: boolean }) {
@@ -69,6 +69,7 @@ function AudioResult({ target, preview, compact, showProgress }: { target: Previ
       </div>
     </div>
     {showProgress && phase !== "inactive" && <AudioScrubber className="mt-3" label={`${track.title} 播放进度`} />}
+    {showProgress && phase === "inactive" && previewAction.enabled && <AudioMiniWave trackKey={target.key} durationMs={track.durationMs} className="mt-3" />}
     {!previewAction.enabled && <p className="mt-3 flex items-center gap-1.5 text-2xs text-muted"><LockKeyhole className="size-3" />{previewAction.reason}</p>}
   </div>;
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorCode, type ArtifactGrant } from "../shared/api/control-center-client";
+import { api, errorCode, isAbort, type ArtifactGrant } from "../shared/api/control-center-client";
 import { useWorkspace } from "../app/workspace";
 import { useToast } from "./ui";
 import type { MediaKind } from "./ui/Kind";
@@ -78,6 +78,9 @@ export function formatSeconds(value: number) {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/** How long a step inside the open viewer waits before asking for its grant; a quicker next step cancels it. */
+export const stepSettleMs = 180;
+
 export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlParam }: {
   previewKey: string | null;
   resolve: (key: string) => PreviewTarget | null;
@@ -94,7 +97,13 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlPa
   const loadNonce = useRef(0);
 
   const target = previewKey ? resolve(previewKey) : null;
-  const identity = `${scopeId}|${generation}|${previewKey || ""}|${target?.task.task_key || ""}|${target?.result.ref || ""}`;
+  // `resolve` may return a fresh object when the task list re-renders. Use
+  // stable scalar identity below; otherwise every render re-issues the owner
+  // grant and a slow image can produce a burst of 422s/requests.
+  const targetTaskKey = target?.task.task_key || "";
+  const targetResultRef = target?.result.ref || "";
+  const targetKind = target?.kind || "";
+  const identity = `${scopeId}|${generation}|${previewKey || ""}|${targetTaskKey}|${targetResultRef}`;
   const cacheIdentity = `${session?.identity}|${scopeId}|${generation}|${session?.epoch || 0}`;
 
   const fetchBlob = useCallback(async (url: string, expiresAt: number) => {
@@ -126,7 +135,12 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlPa
     setState((current) => ({ ...current, status: "error", grant: null, sourceUrl: null, transport: null, error: code }));
   }, []);
 
+  // The key the viewer showed last; a new key while it is open is a step, and a step asks for its grant only once it
+  // settles, so stepping quickly past items reads none of them.
+  const shownKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    const stepping = shownKeyRef.current !== null && !!previewKey && shownKeyRef.current !== previewKey;
+    shownKeyRef.current = previewKey;
     identityRef.current = identity;
     mediaSessionCache.setIdentity(cacheIdentity);
     loadNonce.current += 1;
@@ -151,13 +165,17 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlPa
     let cancelled = false;
     const requestId = loadNonce.current;
     setState((current) => ({ status: "requesting", target, grant: null, sourceUrl: null, transport: null, error: null, autoplay: current.autoplay, pendingDownload: false }));
-    void api.artifactAccess(scopeId, target.task.task_key, target.result.ref, "preview", session.csrf)
+    const controller = new AbortController();
+    const request = () => void api.artifactAccess(scopeId, target.task.task_key!, target.result.ref, "preview", session.csrf, controller.signal)
       .then(async (grant) => {
         if (cancelled || identityRef.current !== identity || requestId !== loadNonce.current) return;
         const expiresAt = Date.parse(grant.expires_at);
         const key = mediaCacheKey(scopeId, session.epoch, target.task.task_key || target.task.locator.task_ref, target.result.ref + "|" + (target.result.version || target.task.revision), grant.mime || target.result.mime);
         const cached = mediaSessionCache.get(key);
-        const shouldPreload = target.kind === "image" || (target.result.bytes !== null && target.result.bytes <= 8 * 1024 * 1024);
+        // Let the browser progressively decode images from the authenticated
+        // proxy URL. Full Blob buffering made large-image first paint wait for
+        // the entire file and doubled memory; Blob remains the decode fallback.
+        const shouldPreload = target.kind !== "image" && (target.result.bytes !== null && target.result.bytes <= 8 * 1024 * 1024);
         let sourceUrl = grant.url;
         let transport: MediaTransport = "streaming";
         if (cached) {
@@ -187,11 +205,13 @@ export function useMediaPreview({ previewKey, resolve, onPreviewKeyChange, urlPa
         }
       })
       .catch((failure) => {
-        if (cancelled || identityRef.current !== identity) return;
-        setState((current) => ({ ...current, status: "error", target, grant: null, sourceUrl: null, transport: null, error: failure instanceof Error ? failure.message : errorCode(failure) }));
+        if (cancelled || identityRef.current !== identity || isAbort(failure)) return;
+        setState((current) => ({ ...current, status: "error", target, grant: null, sourceUrl: null, transport: null, error: errorCode(failure) }));
       });
-    return () => { cancelled = true; window.clearTimeout(expiryRef.current); };
-  }, [cacheIdentity, fetchBlob, identity, previewKey, target, scopeId, session, generation, retryNonce]);
+    const settle = stepping ? window.setTimeout(request, stepSettleMs) : undefined;
+    if (!stepping) request();
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(settle); window.clearTimeout(expiryRef.current); };
+  }, [cacheIdentity, fetchBlob, identity, previewKey, targetKind, targetResultRef, targetTaskKey, scopeId, session?.csrf, session?.epoch, generation, retryNonce]);
 
   const open = useCallback((next: PreviewTarget, options: PreviewOptions) => {
     // Switching to another result drops the previous source at once, so no surface paints old media under the new name.

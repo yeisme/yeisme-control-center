@@ -22,7 +22,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, [dismiss]);
   return <ToastContext.Provider value={notify}>
     {children}
-    <div aria-live="polite" className="pointer-events-none fixed left-1/2 top-[calc(var(--topbar-height)+12px)] z-[85] flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-2">
+    <div aria-live="polite" className="pointer-events-none fixed left-1/2 top-[calc(var(--topbar-height)+12px)] z-toast flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-2">
       {items.map((item) => <div key={item.id} role="status" className="pop-in pointer-events-auto flex w-full items-start gap-2.5 rounded-[12px] border border-line bg-panel px-3.5 py-3 text-[13px] text-ink shadow-float">
         <span className={cx("mt-0.5 shrink-0 [&>svg]:size-4", item.tone === "success" ? "text-success" : item.tone === "warning" ? "text-warning" : "text-info")}>
           {item.tone === "success" ? <CheckCircle2 /> : item.tone === "warning" ? <CircleAlert /> : <Info />}

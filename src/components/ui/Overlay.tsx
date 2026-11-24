@@ -31,18 +31,20 @@ export function DetailSheet({ open, onOpenChange, title, eyebrow, description, a
   };
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal>
-      <Dialog.Overlay className="fade-in fixed inset-0 z-40 backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
+      <Dialog.Overlay className="fade-in fixed inset-0 z-sheet-scrim backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
       <Dialog.Content
         aria-describedby={undefined}
         onCloseAutoFocus={restore}
         className={cx(
-          "fixed z-50 flex flex-col bg-panel text-ink shadow-float outline-none",
-          "inset-0 sheet-in-bottom",
-          "sm:inset-y-3 sm:right-3 sm:left-auto sm:rounded-[16px] sm:border sm:border-line sm:sheet-in",
+          "fixed z-sheet flex flex-col bg-panel text-ink shadow-float outline-none",
+          // Phones: a sheet from the bottom that can fill the screen; wider screens: a panel docked at the right.
+          "inset-x-0 bottom-0 top-[max(10px,env(safe-area-inset-top))] rounded-t-[22px] sheet-in-bottom",
+          "sm:inset-y-3 sm:top-3 sm:right-3 sm:left-auto sm:rounded-[22px] sm:border sm:border-line sm:sheet-in",
           width === "lg" ? "sm:w-[min(640px,calc(100vw-24px))]" : "sm:w-[min(480px,calc(100vw-24px))]",
         )}
       >
-        <header className="flex items-start gap-3 border-b border-line px-5 pb-4 pt-[max(16px,env(safe-area-inset-top))]">
+        <span aria-hidden="true" className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-line-strong sm:hidden" />
+        <header className="flex items-start gap-3 border-b border-line px-5 pb-4 pt-3 sm:pt-4">
           <div className="min-w-0 flex-1">
             {eyebrow && <p className="text-2xs font-medium text-muted">{eyebrow}</p>}
             <Dialog.Title className="mt-0.5 text-[17px] font-semibold leading-snug text-ink break-words">{title}</Dialog.Title>
@@ -63,7 +65,7 @@ export function DetailSheet({ open, onOpenChange, title, eyebrow, description, a
 }
 
 // Menus sit above every panel: the task inspector (55) and the media viewer (71) included.
-const menuSurface = "pop-in z-[80] rounded-[12px] border border-line bg-panel p-1.5 text-ink shadow-float outline-none";
+const menuSurface = "pop-in z-popover rounded-[14px] border border-line bg-panel p-1.5 text-ink shadow-float outline-none";
 const menuPanel = cx(menuSurface, "min-w-56 max-w-[min(360px,calc(100vw-16px))]");
 // A context menu opens where the pointer is; on a phone neither side of a mid-screen press fits 14rem, so it narrows to
 // the room Radix measured there (labels truncate) instead of running off the screen.
@@ -94,6 +96,15 @@ export function MenuItem({ children, icon, onSelect, disabled, tone }: { childre
     {icon}
     {children}
   </DropdownMenu.Item>;
+}
+
+/** A short choice laid out in one row inside a menu (theme: 浅色 / 深色 / 跟随系统); the menu stays open on a pick. */
+export function MenuChoiceRow<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { id: T; label: string; icon?: ReactNode }[]; onChange: (value: T) => void }) {
+  return <DropdownMenu.RadioGroup aria-label={label} value={value} onValueChange={(next) => onChange(next as T)} className="grid gap-1 px-1 py-1" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
+    {options.map((option) => <DropdownMenu.RadioItem key={option.id} value={option.id} onSelect={(event) => event.preventDefault()} className={cx("flex h-9 cursor-default select-none items-center justify-center gap-1.5 rounded-[8px] px-1.5 text-xs outline-none data-[highlighted]:bg-panel-sunken data-[state=checked]:bg-panel-sunken data-[state=checked]:font-semibold data-[state=checked]:text-ink [&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-muted")}>
+      {option.icon}{option.label}
+    </DropdownMenu.RadioItem>)}
+  </DropdownMenu.RadioGroup>;
 }
 
 /** A menu entry that switches a setting; assistive tech hears it as checked or not. */
@@ -151,7 +162,7 @@ export const PopoverTrigger = Popover.Trigger;
 /** Popover panel. Radix gives it the dialog role, so `label` names it for assistive tech. */
 export function PopoverContent({ children, className, align = "end", label }: { children: ReactNode; className?: string; align?: "start" | "end" | "center"; label: string }) {
   return <Popover.Portal>
-    <Popover.Content aria-label={label} align={align} sideOffset={8} collisionPadding={8} className={cx("pop-in z-50 rounded-[14px] border border-line bg-panel text-ink shadow-float outline-none", className)}>
+    <Popover.Content aria-label={label} align={align} sideOffset={8} collisionPadding={8} className={cx("pop-in z-popover rounded-[14px] border border-line bg-panel text-ink shadow-float outline-none", className)}>
       {children}
     </Popover.Content>
   </Popover.Portal>;

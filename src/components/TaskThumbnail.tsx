@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorCode } from "../shared/api/control-center-client";
 import { useWorkspace } from "../app/workspace";
 import { MediaSessionCache, mediaCacheKey } from "../app/media-cache";
@@ -23,6 +23,18 @@ async function withThumbnailSlot<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
+const thumbnailKey = (scopeId: string, epoch: number | undefined, task: TaskSnapshot, result: TaskArtifact) =>
+  mediaCacheKey(scopeId, epoch, task.task_key || "", result.ref + "|thumbnail|" + task.revision + "|" + result.thumbnail?.ref, "image/webp");
+
+/**
+ * A thumbnail this tab already holds, or null. For previews that must not ask for a media grant of their own (the ⌘K
+ * preview): they show a picture only when the list already loaded it.
+ */
+export function peekThumbnail(scopeId: string, epoch: number | undefined, task: TaskSnapshot, result: TaskArtifact): string | null {
+  if (!task.task_key || result.thumbnail?.state !== "ready") return null;
+  return thumbnailSessionCache.get(thumbnailKey(scopeId, epoch, task, result))?.url || null;
+}
+
 function stateForError(error: unknown): ThumbnailState {
   const code = errorCode(error);
   if (/forbidden|not_authorized|denied/.test(code)) return "forbidden";
@@ -30,7 +42,11 @@ function stateForError(error: unknown): ThumbnailState {
   return "unavailable";
 }
 
-export function TaskThumbnail({ task, result, className, size = "sm" }: { task: TaskSnapshot; result?: TaskArtifact; className?: string; size?: "sm" | "md" | "lg" }) {
+/**
+ * A result's owner thumbnail, requested only once it scrolls into view. `frameless` drops the tile's border and
+ * rounding for covers; `fallback` replaces the media-kind badge shown when no picture can be read.
+ */
+export function TaskThumbnail({ task, result, className, size = "sm", frameless = false, fallback, alt }: { task: TaskSnapshot; result?: TaskArtifact; className?: string; size?: "sm" | "md" | "lg"; frameless?: boolean; fallback?: ReactNode; alt?: string }) {
   const { scopeId, session } = useWorkspace();
   const host = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(false);
@@ -73,7 +89,7 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
       setState("forbidden");
       return;
     }
-    const key = mediaCacheKey(scopeId, session.epoch, task.task_key, result.ref + "|thumbnail|" + task.revision + "|" + result.thumbnail?.ref, "image/webp");
+    const key = thumbnailKey(scopeId, session.epoch, task, result);
     const cached = thumbnailSessionCache.get(key);
     if (cached) {
       setSrc(cached.url);
@@ -102,8 +118,14 @@ export function TaskThumbnail({ task, result, className, size = "sm" }: { task: 
   }, [image, result, scopeId, session, task, visible]);
 
   const fallbackKind = result ? kindOf(result.mime, undefined) : kindOf(undefined, undefined);
-  const sizeClass = size === "lg" ? "size-full min-h-0 rounded-[12px]" : size === "md" ? "size-16 rounded-[10px]" : "size-10 rounded-[9px]";
-  return <span ref={host} className={cx("grid shrink-0 place-items-center overflow-hidden border border-line bg-panel-soft", sizeClass, className)} title={state === "forbidden" ? "缩略图读取未授权" : state === "needs_contract" ? "来源未提供缩略图合同" : undefined}>
-    {state === "ready" && src ? <img src={src} alt={result?.name || task.title} className="size-full object-cover" loading="lazy" /> : state === "loading" ? <span className="skeleton size-full" role="img" aria-label="加载缩略图" /> : <KindBadge kind={fallbackKind} size="sm" />}
+  const sizeClass = frameless ? "size-full min-h-0" : size === "lg" ? "size-full min-h-0 rounded-[12px]" : size === "md" ? "size-16 rounded-[10px]" : "size-10 rounded-[9px]";
+  return <span ref={host} className={cx("grid shrink-0 place-items-center overflow-hidden", !frameless && "border border-line bg-panel-soft", sizeClass, className)} title={state === "forbidden" ? "缩略图读取未授权" : state === "needs_contract" ? "来源未提供缩略图合同" : undefined}>
+    {state === "ready" && src ? <FadeImage key={src} src={src} alt={alt ?? (result?.name || task.title)} /> : state === "loading" ? <span className="skeleton size-full !rounded-none" role="img" aria-label="加载缩略图" /> : fallback ?? <KindBadge kind={fallbackKind} size="sm" />}
   </span>;
+}
+
+/** A thumbnail fades in once decoded instead of popping in line by line. */
+function FadeImage({ src, alt }: { src: string; alt: string }) {
+  const [loaded, setLoaded] = useState(false);
+  return <img src={src} alt={alt} loading="lazy" onLoad={() => setLoaded(true)} className={cx("size-full object-cover transition-opacity duration-200 ease-out", loaded ? "opacity-100" : "opacity-0")} />;
 }

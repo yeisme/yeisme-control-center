@@ -1,16 +1,9 @@
 import { AudioLines, FileText, Image, Video } from "../../icons";
+import type { MediaKind } from "../../shared/media-kind";
 import { cx } from "./cx";
 
-export type MediaKind = "image" | "video" | "audio" | "text";
-
-export function kindOf(mime: string | null | undefined, fallback?: string): MediaKind {
-  const value = (mime || "").toLowerCase();
-  if (value.startsWith("image/")) return "image";
-  if (value.startsWith("video/")) return "video";
-  if (value.startsWith("audio/")) return "audio";
-  if (fallback === "image" || fallback === "video" || fallback === "audio") return fallback;
-  return "text";
-}
+// The kind itself is plain data so read models and the server can use it without pulling in icons.
+export { kindOf, type MediaKind } from "../../shared/media-kind";
 
 const labels: Record<MediaKind, string> = { image: "图像", video: "视频", audio: "音频", text: "文本" };
 export function kindLabel(kind: MediaKind) {

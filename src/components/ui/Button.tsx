@@ -5,9 +5,10 @@ import { Tooltip } from "./Tooltip";
 type Variant = "primary" | "secondary" | "ghost" | "quiet" | "danger";
 type Size = "sm" | "md" | "icon" | "icon-sm";
 
+// Pills: the primary is the one filled thing on a screen (forest on paper, lime at night); the rest stay quiet.
 const variants: Record<Variant, string> = {
-  primary: "bg-primary text-primary-ink shadow-[0_1px_2px_rgb(0_0_0/12%)] hover:brightness-110 dark:hover:brightness-95",
-  secondary: "bg-panel text-ink border border-line hover:border-line-strong hover:bg-panel-soft",
+  primary: "bg-primary text-primary-ink shadow-[0_10px_24px_-14px_var(--primary)] hover:brightness-110 dark:hover:brightness-105",
+  secondary: "bg-panel text-ink border border-line shadow-[0_1px_0_rgb(255_255_255/4%)_inset] hover:border-line-strong hover:bg-panel-soft",
   ghost: "bg-transparent text-ink-soft hover:bg-panel-sunken hover:text-ink",
   quiet: "bg-transparent text-muted hover:text-ink",
   danger: "bg-danger-soft text-danger hover:brightness-95",
@@ -37,7 +38,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     ref={ref}
     type={type}
     className={cx(
-      "inline-flex shrink-0 select-none items-center whitespace-nowrap rounded-control font-medium transition-[background-color,border-color,color,filter,transform] duration-150 ease-out active:scale-[0.97] disabled:pointer-events-none disabled:opacity-45",
+      "inline-flex shrink-0 select-none items-center whitespace-nowrap rounded-full font-medium transition-[background-color,border-color,color,filter,transform,box-shadow] duration-150 ease-out active:scale-[0.97] disabled:pointer-events-none disabled:opacity-45",
       variants[variant],
       sizes[size],
       className,
@@ -51,7 +52,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   if (!reason) return button;
   // Disabled buttons emit no pointer or focus events, so a focusable wrapper carries the explanation.
   return <Tooltip content={reason}>
-    <span tabIndex={0} className="inline-flex rounded-control outline-none focus-visible:ring-2 focus-visible:ring-focus">{button}</span>
+    <span tabIndex={0} className="inline-flex rounded-full outline-none focus-visible:ring-2 focus-visible:ring-focus">{button}</span>
   </Tooltip>;
 });
 

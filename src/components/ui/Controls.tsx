@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Checkbox as RadixCheckbox, Tabs as RadixTabs, ToggleGroup as RadixToggleGroup } from "radix-ui";
 import { Check, Minus } from "../../icons";
 import { cx } from "./cx";
+import { useSlidingIndicator } from "../../app/use-sliding-indicator";
 
 interface Option<T extends string> {
   id: T;
@@ -10,8 +11,12 @@ interface Option<T extends string> {
   disabled?: boolean;
 }
 
-const segment = "inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-[7px] px-3 text-[13px] font-medium text-muted transition-[background-color,color,box-shadow] duration-150 hover:text-ink disabled:pointer-events-none disabled:opacity-45 data-[state=active]:bg-panel data-[state=active]:text-ink data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/8%)] data-[state=on]:bg-panel data-[state=on]:text-ink data-[state=on]:shadow-[0_1px_2px_rgb(0_0_0/8%)]";
-const track = "inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-control bg-panel-sunken p-0.5";
+const segmentBase = "inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-[7px] px-3 text-[13px] font-medium text-muted transition-[background-color,color,box-shadow] duration-150 hover:text-ink disabled:pointer-events-none disabled:opacity-45 data-[state=active]:text-ink data-[state=on]:text-ink";
+/** Before the sliding pill is placed, the selected segment draws its own background. */
+const segmentFilled = "data-[state=active]:bg-panel data-[state=active]:shadow-[0_1px_2px_rgb(0_0_0/8%)] data-[state=on]:bg-panel data-[state=on]:shadow-[0_1px_2px_rgb(0_0_0/8%)]";
+const segment = (ready: boolean) => cx(segmentBase, !ready && segmentFilled);
+const pill = "rounded-[7px] bg-panel shadow-[0_1px_2px_rgb(0_0_0/8%)]";
+const track = "relative inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-control bg-panel-sunken p-0.5";
 
 function Count({ value }: { value?: number | null }) {
   if (value === undefined || value === null) return null;
@@ -20,9 +25,11 @@ function Count({ value }: { value?: number | null }) {
 
 /** Real tabs: arrow keys move between triggers and each trigger controls a `TabPanel`. */
 export function Tabs<T extends string>({ value, onChange, options, label, children, className, listClassName }: { value: T; onChange: (value: T) => void; options: Option<T>[]; label: string; children: ReactNode; className?: string; listClassName?: string }) {
+  const { ref, ready, indicator } = useSlidingIndicator<HTMLDivElement>('[data-state="active"]', `${value}|${options.length}`, pill);
   return <RadixTabs.Root value={value} onValueChange={(next) => onChange(next as T)} className={className}>
-    <RadixTabs.List aria-label={label} className={cx(track, listClassName)}>
-      {options.map((option) => <RadixTabs.Trigger key={option.id} value={option.id} disabled={option.disabled} className={segment}>
+    <RadixTabs.List ref={ref} data-indicator-ready={ready ? "" : undefined} aria-label={label} className={cx(track, listClassName)}>
+      {indicator}
+      {options.map((option) => <RadixTabs.Trigger key={option.id} value={option.id} disabled={option.disabled} className={segment(ready)}>
         {option.label}
         <Count value={option.count} />
       </RadixTabs.Trigger>)}
@@ -37,8 +44,10 @@ export function TabPanel({ value, children, className }: { value: string; childr
 
 /** Single-choice filter (not navigation): exactly one option stays pressed. */
 export function ToggleGroup<T extends string>({ value, onChange, options, label, className }: { value: T; onChange: (value: T) => void; options: Option<T>[]; label: string; className?: string }) {
-  return <RadixToggleGroup.Root type="single" value={value} onValueChange={(next) => { if (next) onChange(next as T); }} aria-label={label} className={cx(track, className)}>
-    {options.map((option) => <RadixToggleGroup.Item key={option.id} value={option.id} disabled={option.disabled} className={segment}>
+  const { ref, ready, indicator } = useSlidingIndicator<HTMLDivElement>('[data-state="on"]', `${value}|${options.length}`, pill);
+  return <RadixToggleGroup.Root ref={ref} data-indicator-ready={ready ? "" : undefined} type="single" value={value} onValueChange={(next) => { if (next) onChange(next as T); }} aria-label={label} className={cx(track, className)}>
+    {indicator}
+    {options.map((option) => <RadixToggleGroup.Item key={option.id} value={option.id} disabled={option.disabled} className={segment(ready)}>
       {option.label}
       <Count value={option.count} />
     </RadixToggleGroup.Item>)}

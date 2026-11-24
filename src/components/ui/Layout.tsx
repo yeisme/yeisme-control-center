@@ -6,9 +6,9 @@ import { readErrorMessage, readStatusLabels, type ReadStatus } from "../../share
 import { cjkSpaced, formatRelative } from "../../shared/read-model/format";
 
 export function Panel({ title, eyebrow, actions, children, className, bodyClassName, id }: { title?: ReactNode; eyebrow?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string; bodyClassName?: string; id?: string }) {
-  return <section id={id} className={cx("min-w-0 rounded-card border border-line bg-panel shadow-panel", className)}>
-    {(title || actions || eyebrow) && <header className="flex min-h-14 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-5 py-3">
-      <div className="min-w-0 shrink-0">
+  return <section id={id} className={cx("min-w-0 rounded-card border border-line/80 bg-panel shadow-panel", className)}>
+    {(title || actions || eyebrow) && <header className="flex min-h-14 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line/80 px-5 py-3">
+      <div className="min-w-0 max-w-full">
         {eyebrow && <p className="text-2xs font-medium tracking-wide text-muted">{eyebrow}</p>}
         {title && <h2 className="truncate text-[15px] font-semibold text-ink">{title}</h2>}
       </div>
@@ -26,7 +26,9 @@ export function Panel({ title, eyebrow, actions, children, className, bodyClassN
  * Page header. On phones the description, the sources (children), the observation time and counts marked
  * `foldMetrics` fold into one status line, so the first result reaches the first screen; desktops see everything.
  */
-export function PageToolbar({ summary, metrics, meta, actions, children, className, foldMetrics = false }: {
+export function PageToolbar({ lead, summary, metrics, meta, actions, children, className, foldMetrics = false }: {
+  /** One serif line that says what this page is for, in a person's words. Desktop only: phones keep the first result high. */
+  lead?: ReactNode;
   summary?: ReactNode;
   metrics?: ReactNode;
   meta?: ReactNode;
@@ -40,10 +42,11 @@ export function PageToolbar({ summary, metrics, meta, actions, children, classNa
   const foldable = Boolean(summary || children || meta || (foldMetrics && metrics));
   const fold = foldable && !unfolded ? "max-sm:hidden" : undefined;
   return <div className={cx("flex flex-col gap-3", className)} data-page-toolbar>
+    {lead && <p className="font-display text-lead font-semibold text-ink text-pretty max-sm:hidden" data-page-lead>{lead}</p>}
     {(summary || actions || foldable) && <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
       {foldable && <button type="button" aria-expanded={unfolded} onClick={() => setUnfolded((value) => !value)} className="flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded-control text-left text-2xs text-muted hover:text-ink sm:hidden" data-page-status>
-        <span className="min-w-0 flex-1 truncate">{meta || "页面说明"}</span>
-        <span className="inline-flex shrink-0 items-center gap-0.5 font-medium text-ink-soft">{unfolded ? "收起" : "说明与来源"}<ChevronDown className={cx("size-3.5 transition-transform", unfolded && "rotate-180")} /></span>
+        {meta && <span className="min-w-0 flex-1 truncate">{meta}</span>}
+        <span className="inline-flex shrink-0 items-center gap-0.5 font-medium text-ink-soft">{unfolded ? "收起" : meta ? "说明与来源" : "页面说明"}<ChevronDown className={cx("size-3.5 transition-transform", unfolded && "rotate-180")} /></span>
       </button>}
       {summary ? <p className={cx("min-w-0 max-w-3xl text-body-sm text-muted text-pretty max-sm:order-last max-sm:w-full", fold)}>{summary}</p> : <span className="max-sm:hidden" />}
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}

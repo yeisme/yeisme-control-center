@@ -1,8 +1,10 @@
 import type { KeyboardEvent, ReactNode } from "react";
+import { ArrowDown, ArrowUp, ChevronsUpDown } from "../../icons";
 import { cx } from "./cx";
 import type { Tone } from "./Status";
 import { moveBetweenRows } from "./list-keys";
 import { ActionsContextMenu, type ItemAction } from "./actions";
+import { ariaSort, nextSort, sortRows, type SortDir, type SortState, type SortValue } from "../../shared/list-sort";
 
 const toneText: Record<Tone, string> = { success: "text-success", info: "text-info", warning: "text-warning", danger: "text-danger", review: "text-review", neutral: "text-ink" };
 const toneChip: Record<Tone, string> = { success: "bg-success-soft text-success", info: "bg-info-soft text-info", warning: "bg-warning-soft text-warning", danger: "bg-danger-soft text-danger", review: "bg-review-soft text-review", neutral: "bg-panel-sunken text-ink-soft" };
@@ -57,10 +59,25 @@ export interface Column<T> {
   id: string;
   header: ReactNode;
   cell: (row: T) => ReactNode;
-  /** 1 always visible; 2 needs a 672px-wide table; 3 needs 896px. Driven by container width, not viewport. */
+  /**
+   * 1 always visible; 2 needs a 672px-wide table; 3 needs 896px. Driven by container width, not viewport. Below a
+   * 560px table every row becomes a card: priority 2 cells turn into 「标签：值」 lines, priority 3 cells hide.
+   */
   priority?: 1 | 2 | 3;
   align?: "start" | "end";
   className?: string;
+  /** The column's name in words, for card labels and the sort menu; defaults to a text header. */
+  label?: string;
+  /** Makes the header a sort button: the value rows sort by, and which way a first click sorts (default A→Z). */
+  sort?: { value: (row: T) => SortValue; first?: SortDir };
+}
+
+const columnLabel = <T,>(column: Column<T>) => column.label ?? (typeof column.header === "string" ? column.header : column.id);
+
+/** Rows in the order a sorted column asks for, before paging; no sort (or an unknown column) keeps the list's order. */
+export function sortByColumn<T>(rows: readonly T[], columns: Column<T>[], sort: SortState | null): T[] {
+  const column = sort ? columns.find((item) => item.id === sort.id && item.sort) : undefined;
+  return column?.sort && sort ? sortRows(rows, column.sort.value, sort.dir) : [...rows];
 }
 
 const priorityClass = { 1: "", 2: "hidden @2xl:table-cell", 3: "hidden @4xl:table-cell" } as const;
@@ -83,11 +100,12 @@ export const fillMainColumn = "w-full max-w-0 @min-[1200px]:w-[560px] @min-[1200
 const densityPad = { compact: "py-1.5", comfortable: "py-2.5", spacious: "py-3.5" } as const;
 
 /**
- * Shared list table. Column visibility follows the table's own width, so a docked Inspector never
- * squeezes columns into one-character wraps. Rows are clickable with the mouse; the first cell's
- * button is the keyboard target, and ↑/↓/Home/End move between those buttons.
+ * Shared list table. Column visibility follows the table's own width, so a docked Inspector never squeezes columns into
+ * one-character wraps, and below 560px the rows restack as cards. Rows are clickable with the mouse; the first cell's
+ * button is the keyboard target, and ↑/↓/Home/End move between those buttons. The roles are written out because a
+ * restacked row is no longer laid out as a table row, and assistive tech must still read it as one.
  */
-export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabel, selectedKey, density = "comfortable", empty, className, rowAttributes, rowActions }: {
+export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabel, selectedKey, density = "comfortable", empty, className, rowAttributes, rowActions, sort, onSort }: {
   columns: Column<T>[];
   rows: T[];
   rowKey: (row: T) => string;
@@ -101,31 +119,59 @@ export function DataTable<T>({ columns, rows, rowKey, label, onRowClick, rowLabe
   rowAttributes?: (row: T) => Record<string, string | undefined>;
   /** What the row's context menu offers (right click, long press, Shift+F10); the same list as its "更多操作". */
   rowActions?: (row: T) => ItemAction[];
+  /** The sorted column; the page sorts the rows (all of them, before paging) with `sortByColumn`. */
+  sort?: SortState | null;
+  onSort?: (next: SortState | null) => void;
 }) {
   if (!rows.length && empty) return <>{empty}</>;
   const open = (row: T) => onRowClick?.(row);
   const onKey = (event: KeyboardEvent<HTMLButtonElement>, row: T) => {
     if (event.key === " ") { event.preventDefault(); open(row); }
   };
+  const sortable = onSort ? columns.filter((column) => column.sort) : [];
   // Without row buttons nothing inside can take focus, so the scroll box itself does when the table is wider than the screen.
   return <div tabIndex={onRowClick ? undefined : 0} className={cx("@container min-w-0 overflow-x-auto", className)}>
-    <table aria-label={label} className="w-full border-collapse text-left text-body-sm">
-      <thead className="sticky top-0 z-[1] bg-panel-soft">
-        <tr className="border-b border-line">
-          {columns.map((column) => <th key={column.id} scope="col" className={cx("whitespace-nowrap px-4 py-2 text-2xs font-medium text-muted", column.align === "end" && "text-right", priorityClass[column.priority || 1])}>{column.header}</th>)}
+    {sortable.length > 0 && <label className="data-table-sort items-center gap-2 border-b border-line px-4 py-1.5 text-2xs text-muted">
+      排序
+      <select
+        aria-label={`${label}排序`}
+        className="h-8 min-w-0 flex-1 rounded-control border border-line bg-panel px-2 text-[13px] text-ink"
+        value={sort ? `${sort.id}:${sort.dir}` : ""}
+        onChange={(event) => { const [id, dir] = event.target.value.split(":"); onSort?.(id ? { id, dir: dir as SortDir } : null); }}
+      >
+        <option value="">默认顺序</option>
+        {sortable.flatMap((column) => [
+          <option key={`${column.id}:asc`} value={`${column.id}:asc`}>{columnLabel(column)} · 从小到大</option>,
+          <option key={`${column.id}:desc`} value={`${column.id}:desc`}>{columnLabel(column)} · 从大到小</option>,
+        ])}
+      </select>
+    </label>}
+    <table role="table" aria-label={label} data-table className="w-full border-collapse text-left text-body-sm">
+      <thead role="rowgroup" className="sticky top-0 z-[1] bg-panel-soft">
+        <tr role="row" className="border-b border-line">
+          {columns.map((column) => {
+            const canSort = !!onSort && !!column.sort;
+            return <th key={column.id} role="columnheader" scope="col" aria-sort={canSort ? ariaSort(sort || null, column.id) : undefined} className={cx("whitespace-nowrap px-4 py-2 text-2xs font-medium text-muted", column.align === "end" && "text-right", priorityClass[column.priority || 1])}>
+              {canSort ? <button type="button" data-sort-header={column.id} onClick={() => onSort?.(nextSort(sort || null, column.id, column.sort?.first))} className={cx("-mx-1.5 inline-flex items-center gap-1 rounded-[6px] px-1.5 py-0.5 transition-colors duration-150 hover:bg-panel-sunken hover:text-ink", sort?.id === column.id && "text-ink")}>
+                {column.header}
+                {sort?.id === column.id ? (sort.dir === "asc" ? <ArrowUp aria-hidden="true" className="size-3" /> : <ArrowDown aria-hidden="true" className="size-3" />) : <ChevronsUpDown aria-hidden="true" className="size-3 opacity-50" />}
+              </button> : column.header}
+            </th>;
+          })}
         </tr>
       </thead>
-      <tbody onKeyDown={onRowClick ? (event) => moveBetweenRows(event) : undefined}>
+      <tbody role="rowgroup" onKeyDown={onRowClick ? (event) => moveBetweenRows(event) : undefined}>
         {rows.map((row) => {
           const key = rowKey(row);
           const selected = selectedKey === key;
           return <ActionsContextMenu key={key} actions={rowActions?.(row) || []}><tr
+            role="row"
             {...rowAttributes?.(row)}
             data-selected={selected || undefined}
             onClick={onRowClick ? () => open(row) : undefined}
             className={cx("border-b border-line last:border-b-0 transition-colors duration-150", onRowClick && "cursor-pointer hover:bg-panel-soft", selected && "bg-primary-soft/50 hover:bg-primary-soft/60")}
           >
-            {columns.map((column, index) => <td key={column.id} className={cx("min-w-0 px-4 align-middle", densityPad[density], column.align === "end" && "text-right", priorityClass[column.priority || 1], column.className)}>
+            {columns.map((column, index) => <td key={column.id} role="cell" data-label={columnLabel(column)} data-priority={column.priority || 1} data-main={index === 0 || undefined} data-align={column.align === "end" ? "end" : undefined} className={cx("min-w-0 px-4 align-middle", densityPad[density], column.align === "end" && "text-right", priorityClass[column.priority || 1], column.className)}>
               {index === 0 && onRowClick
                 ? rowLabel
                   // The labelled button lies over the cell instead of wrapping it: its name stays the short row label, and the
