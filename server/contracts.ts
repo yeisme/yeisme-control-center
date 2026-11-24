@@ -19,6 +19,8 @@ export interface ScopeBinding {
       { tenant: string; project: string; actor: string; audience: string }
     >
   >;
+  /** Server-only isolation identity for shared collection indexes and read caches. */
+  read_context?: string;
   collection?: Partial<Record<"auctra", { tenant: string; project: string; actor: string; audience: string }>>;
   /**
    * Shared projects only: every bound tool project, several per owner allowed. `owners` keeps one entry per owner for
@@ -58,6 +60,7 @@ export interface TaskConnection extends CredentialLifecycle {
   enabled: boolean;
   allow_private_http?: boolean;
   allow_cancel?: boolean;
+  /** Content reads are open by default for panel logins; set false to opt one connection out. Owner authorization is still checked per read. */
   allow_content?: boolean;
   media_origins?: string[];
   studio_origin?: string;
@@ -68,6 +71,13 @@ export interface OpenToolConnection extends CredentialLifecycle {
   endpoint: string;
   /** A user-level 0600 file holding a read-only bearer credential issued by the tool. */
   credential_ref: string;
+  /**
+   * Gateway only. A separate 0600 file holding `gateway:management-only`. Writes stay closed when this is absent.
+   * The file content never reaches the browser.
+   */
+  management_credential_ref?: string;
+  management_credential_expires_at?: string;
+  management_credential_issued_at?: string;
   allow_private_http?: boolean;
   enabled?: boolean;
   label?: string;
@@ -92,6 +102,8 @@ export interface ProviderConnection extends CredentialLifecycle {
   };
 }
 export interface ServerConfig {
+  /** Disposable verification instances refuse domain writes at the HTTP boundary. */
+  read_only?: boolean;
   auth_mode?: "personal" | "oidc";
   personal?: {
     name: string;
@@ -100,6 +112,11 @@ export interface ServerConfig {
     password_hash_ref: string;
     scope_ids: string[];
     users?: PersonalUser[];
+    /**
+     * Account management from the web (create, reset a key, disable and enable, edit). On unless `manage` is `false`;
+     * the command line (`personal-config`) works either way.
+     */
+    web_accounts?: { manage?: boolean };
   };
   /** Optional SQLite persistence location; defaults beside the config file. */
   database?: { path?: string };
@@ -120,6 +137,8 @@ export interface ServerConfig {
         audience: string;
         /** Optional 0600 service credential for personal (non-OIDC) sessions. */
         credential_ref?: string;
+        /** The origin may be plain http on a private IPv4 address (set by `personal-config owner --private-http`). */
+        allow_private_http?: boolean;
       } & CredentialLifecycle
     >
   >;
@@ -163,6 +182,8 @@ export interface PersonalUser {
   scope_ids: string[];
   enabled?: boolean;
   created_at?: string;
+  /** When the access key was last replaced, from the web or the command line. */
+  key_rotated_at?: string;
 }
 export interface Session {
   id: string;
@@ -174,8 +195,12 @@ export interface Session {
   expires: number;
   csrf: string;
   personal?: boolean;
+  /** Explicit browser opt-in for the longer, still bounded login cache. */
+  remembered?: boolean;
   last_seen?: number;
   credential_version?: string;
+  /** Present when this personal session was redeemed from a one-time invitation token. */
+  invite_id?: string;
   /** Bumped when permission bindings change. A new session starts above every earlier one (see `SessionAuth.nextEpoch`). */
   epoch: number;
 }

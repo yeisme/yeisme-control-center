@@ -1,5 +1,5 @@
 import { randomBytes, createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { ServerConfig, Session, PrincipalBinding, PersonalUser } from "./contracts";
 import type { ControlCenterRole } from "../src/service-directory";
@@ -9,6 +9,7 @@ import { ConfigBusyError, ConfigChangedError, ConfigLockInvalidError, canonicalC
 import { duplicateNames, enabledUsers, findEnabledUser, isEnabledFlag } from "./personal-users";
 import { LoginLimiter, loginLimits } from "./login-limits";
 import { SessionStore } from "./db/session-store";
+import { InviteStore, defaultInviteTtlMs, maxInviteTtlMs, minInviteTtlMs, type PersonalInviteView } from "./db/invite-store";
 import { createMemoryDB } from "./db/client";
 const nonce = () => randomBytes(32).toString("base64url");
 /** An account entry the server can use. One edited by hand into something else is skipped, not trusted; a role other than admin is a viewer, as it always was. */
@@ -16,8 +17,12 @@ function isPersonalUser(value: unknown): value is PersonalUser {
   const user = value as Partial<PersonalUser> | null;
   return !!user && typeof user === "object" && typeof user.username === "string" && typeof user.name === "string" && typeof user.key_hash_ref === "string" && typeof user.role === "string" && Array.isArray(user.scope_ids) && user.scope_ids.every((id) => typeof id === "string");
 }
-/** A personal session ends this long after its last request. */
+/** A normal personal session ends this long after its last request. */
 export const personalIdleMs = 30 * 60_000;
+/** Explicit "remember this device" sessions remain bounded and never store credentials in the browser. */
+export const rememberedIdleMs = 7 * 24 * 3600_000;
+export const personalSessionMs = 12 * 3600_000;
+export const rememberedSessionMs = 30 * 24 * 3600_000;
 /** One account may hold this many sessions at once; signing in again ends its oldest, so one account cannot fill the table. */
 export const maxSessionsPerAccount = 8;
 /** Successful sign-ins one account may make in a window. Checked before any credential work, so it costs nothing to refuse. */
@@ -27,6 +32,9 @@ let decoy: Promise<string> | undefined;
  * A scrypt digest of a random value that nobody knows, made once per process. A sign-in that names no account is checked
  * against it, so it costs the same as a real check and fails the same way (401), whether or not the legacy owner's digest file can be read.
  */
+/** A short fingerprint of an account entry, for `if_match`: any change to it, from here or the command line, changes it. */
+export const userVersion = (user: PersonalUser) => createHash("sha256").update(JSON.stringify([user.username, user.name, user.role, user.scope_ids, user.enabled ?? null, user.key_rotated_at ?? null])).digest("hex").slice(0, 16);
+
 export const decoyDigest = () => (decoy ??= hashPassword(randomBytes(24).toString("base64url")));
 export class AuthError extends Error {
   constructor(
@@ -169,6 +177,7 @@ export function verifyIDToken(
 }
 export class SessionAuth {
   sessions: SessionStore;
+  invites: InviteStore;
   private challenges = new Map<
     string,
     { state: string; verifier: string; nonce: string; expires: number }
@@ -179,6 +188,7 @@ export class SessionAuth {
     sessions?: SessionStore,
   ) {
     this.sessions = sessions ?? new SessionStore(createMemoryDB());
+    this.invites = new InviteStore(this.sessions.db);
   }
   /** The limits on refused sign-ins: per account and client address, per address, per account, and for the whole server. */
   limiter = new LoginLimiter(loginLimits, () => Date.now());
@@ -318,7 +328,7 @@ export class SessionAuth {
    * `address` is where the request came from (`clientAddress`), which the limits on refused sign-ins are kept by. An error this throws
    * for a refused sign-in carries `trips`, the limit buckets that the refusal filled, so the caller can record that once.
    */
-  async personalLogin(request: Request, secretValue: string, username?: string, address = "unknown") {
+  async personalLogin(request: Request, secretValue: string, username?: string, address = "unknown", remember = false) {
     this.followConfigFile();
     const users = this.personalUsers();
     const user = username ? this.personalUser(username) : undefined;
@@ -368,15 +378,16 @@ export class SessionAuth {
         name: binding.name,
         accessToken: "",
         accessAudience: [],
-        expires: now + 12 * 3600_000,
+        expires: now + (remember ? rememberedSessionMs : personalSessionMs),
         csrf: nonce(),
         personal: true,
+        remembered: remember,
         last_seen: now,
         credential_version: credentialVersion(encoded),
         epoch: this.nextEpoch(),
       });
       this.loginSuccesses.set(binding.subject, [...this.successesOf(binding.subject, now), now]);
-      return { cookie: this.cookie(id, 12 * 3600) };
+      return { cookie: this.cookie(id, Math.floor((remember ? rememberedSessionMs : personalSessionMs) / 1000)) };
     } finally {
       this.loginBusy = false;
     }
@@ -398,14 +409,150 @@ export class SessionAuth {
   listPersonalUsers() {
     this.followConfigFile();
     const enabled = new Set<PersonalUser>(enabledUsers(this.personalUsers()));
-    return this.personalUsers().map(({ key_hash_ref: _keyHashRef, ...user }, index) => ({ ...user, enabled: enabled.has(this.personalUsers()[index]) }));
+    const repeated = duplicateNames(this.personalUsers());
+    return this.personalUsers().map(({ key_hash_ref: _keyHashRef, ...user }, index) => ({ ...user, enabled: enabled.has(this.personalUsers()[index]), duplicate: repeated.has(user.username), version: userVersion(this.personalUsers()[index]) }));
+  }
+  /**
+   * Whether the web may manage accounts, and if not why: switched off in the configuration, or no configuration file to
+   * write to. The legacy owner of a single-account configuration is shown, but only the command line changes it.
+   */
+  accountManagement() {
+    const personal = this.config.personal;
+    const legacyOwner = personal && (personal.username !== undefined || !personal.users?.length) ? { username: personal.username || "owner", name: personal.name, role: personal.role === "admin" ? "admin" as const : "viewer" as const } : null;
+    if (!personal) return { enabled: false, reason: "personal_login_unavailable", legacy_owner: null, needs_owner_username: false };
+    const needsOwnerUsername = this.firstAccountLocksOutOwner();
+    if (personal.web_accounts?.manage === false) return { enabled: false, reason: "web_account_management_disabled", legacy_owner: legacyOwner, needs_owner_username: needsOwnerUsername };
+    if (!this.config.config_file) return { enabled: false, reason: "user_management_unavailable", legacy_owner: legacyOwner, needs_owner_username: needsOwnerUsername };
+    return { enabled: true, reason: null, legacy_owner: legacyOwner, needs_owner_username: needsOwnerUsername };
+  }
+  /**
+   * Without a username the configuration's owner signs in with the key alone, and only while no other account exists. The
+   * web refuses the first account then, because it would lock out the very admin who asked; the command line's `account`
+   * gives the owner a username first.
+   */
+  firstAccountLocksOutOwner() {
+    const personal = this.config.personal;
+    return !!personal && personal.username === undefined && !this.personalUsers().length;
+  }
+  /** The scopes an account can be given: those of the configuration, never a shared project's (those are granted per project). */
+  assignableScopes() {
+    const seen = new Map<string, { id: string; label: string; tenant?: string; project?: string }>();
+    for (const scope of this.config.principals.flatMap((principal) => principal.scopes)) if (!seen.has(scope.id)) seen.set(scope.id, { id: scope.id, label: scope.label || scope.id, tenant: scope.tenant, project: scope.project });
+    return [...seen.values()];
+  }
+  /** Whether the person behind a session can reset their own key from the web, or why not. */
+  ownKeyState(session: Session): string {
+    if (!session.personal) return "personal_connection_required";
+    const management = this.accountManagement();
+    if (!management.enabled) return management.reason || "user_management_unavailable";
+    return this.personalUsers().some((user) => user.username === session.subject) ? "available" : "legacy_owner_managed_by_cli";
+  }
+  private requireManagement() {
+    const management = this.accountManagement();
+    if (!management.enabled) throw new AuthError(management.reason || "user_management_unavailable", management.reason === "web_account_management_disabled" ? 403 : 503);
+  }
+  /** The account a web change is about; the legacy owner is the command line's to change. */
+  private managedUser(username: string) {
+    this.followConfigFile();
+    const personal = this.config.personal;
+    const user = this.personalUsers().find((candidate) => candidate.username === username);
+    if (!user) {
+      if (personal && (username === personal.username || (personal.username === undefined && username === "owner"))) throw new AuthError("legacy_owner_managed_by_cli", 409);
+      throw new AuthError("user_not_found", 404);
+    }
+    return user;
+  }
+  /** Enabled admins after a change, the legacy owner included when it is an admin: the server must always keep one. */
+  private adminsAfter(change: (users: PersonalUser[]) => PersonalUser[]) {
+    const personal = this.config.personal;
+    const legacyAdmin = personal && (personal.username !== undefined || !personal.users?.length) && personal.role === "admin" ? 1 : 0;
+    return enabledUsers(change(this.personalUsers())).filter((user) => user.role === "admin").length + legacyAdmin;
+  }
+  /**
+   * A new access key for an account. The digest file is replaced in one rename, mode 0600, so a reader sees the old or the
+   * new digest and never half of one; every session of the account ends at its next request, because a session remembers
+   * the digest it signed in with. The key is returned once and never stored or logged.
+   */
+  async rotatePersonalUserKey(username: string) {
+    this.requireManagement();
+    const user = this.managedUser(username);
+    const accessKey = "yk_live_" + nonce();
+    await this.replaceDigest(user.key_hash_ref, accessKey);
+    this.endSessionsOf(username);
+    await this.persistConfig((stored) => stored.map((entry) => entry.username === username ? { ...entry, key_rotated_at: new Date().toISOString() } : entry)).catch(() => undefined);
+    return { access_key: accessKey };
+  }
+  /**
+   * The person's own key, when they can show the current one. Their other sessions end at once. This one carries on with
+   * the new key, so the page that shows the key once is not signed out under it; the page signs out when the person says
+   * the key is saved, and they sign in again with it.
+   */
+  async rotateOwnKey(session: Session, currentKey: string) {
+    this.requireManagement();
+    if (!session.personal) throw new AuthError("personal_connection_required", 403);
+    const user = this.managedUser(session.subject);
+    if (typeof currentKey !== "string" || !currentKey || !(await checkPassword(currentKey, secret(user.key_hash_ref)))) throw new AuthError("invalid_credentials", 401);
+    const accessKey = "yk_live_" + nonce();
+    await this.replaceDigest(user.key_hash_ref, accessKey);
+    for (const other of this.sessions.values()) if (other.personal && other.subject === user.username && other.id !== session.id) this.sessions.delete(other.id);
+    const current = this.sessions.get(session.id);
+    if (current) this.sessions.set(session.id, { ...current, credential_version: credentialVersion(secret(user.key_hash_ref)) });
+    await this.persistConfig((stored) => stored.map((entry) => entry.username === user.username ? { ...entry, key_rotated_at: new Date().toISOString() } : entry)).catch(() => undefined);
+    return { access_key: accessKey };
+  }
+  private async replaceDigest(ref: string, accessKey: string) {
+    const digest = (await hashPassword(accessKey)) + "\n";
+    const temporary = `${ref}.${nonce()}.tmp`;
+    try {
+      writeFileSync(temporary, digest, { mode: 0o600, flag: "wx" });
+      renameSync(temporary, ref);
+    } catch {
+      rmSync(temporary, { force: true });
+      throw new AuthError("user_management_unavailable", 503);
+    }
+  }
+  /** Turns a disabled account back on. A name listed twice stays off: nobody can say which entry was meant. */
+  async enablePersonalUser(username: string) {
+    this.requireManagement();
+    this.managedUser(username);
+    if (duplicateNames(this.personalUsers()).has(username)) throw new AuthError("user_duplicate", 409);
+    this.revoked.delete(username);
+    await this.persistConfig((stored) => {
+      if (duplicateNames(stored).has(username)) throw new AuthError("user_duplicate", 409);
+      return stored.map((entry) => entry.username === username ? { ...entry, enabled: true } : entry);
+    });
+  }
+  /**
+   * Display name, role and scopes. `if_match` is the version the editor read: a change made meanwhile (here or with the
+   * command line) is refused as `user_changed`, never silently overwritten. Taking the last admin role away is refused.
+   */
+  async updatePersonalUser(actor: string, username: string, patch: { name?: string; role?: ControlCenterRole; scope_ids?: string[] }, ifMatch: string) {
+    this.requireManagement();
+    const user = this.managedUser(username);
+    if (userVersion(user) !== ifMatch) throw new AuthError("user_changed", 409);
+    if (patch.name !== undefined && !patch.name.trim()) throw new AuthError("invalid_user", 400);
+    if (patch.role !== undefined && !["admin", "viewer"].includes(patch.role)) throw new AuthError("invalid_user", 400);
+    const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
+    if (patch.scope_ids !== undefined && (!patch.scope_ids.length || patch.scope_ids.some((id) => !allowedScopes.has(id)))) throw new AuthError("scope_not_found", 404);
+    const apply = (entry: PersonalUser): PersonalUser => entry.username === username ? { ...entry, ...(patch.name !== undefined ? { name: patch.name.trim() } : {}), ...(patch.role ? { role: patch.role } : {}), ...(patch.scope_ids ? { scope_ids: patch.scope_ids } : {}) } : entry;
+    if (patch.role === "viewer" && user.role === "admin" && this.adminsAfter((users) => users.map(apply)) < 1) throw new AuthError("last_admin_required", 409);
+    if (patch.role === "viewer" && actor === username && this.adminsAfter((users) => users.map(apply)) < 1) throw new AuthError("last_admin_required", 409);
+    await this.persistConfig((stored) => {
+      const current = stored.find((entry) => entry.username === username);
+      if (!current || userVersion(current) !== ifMatch) throw new AuthError("user_changed", 409);
+      return stored.map(apply);
+    });
+    return this.listPersonalUsers().find((entry) => entry.username === username);
   }
   async createPersonalUser(input: { username: string; name: string; role: ControlCenterRole; scope_ids: string[] }) {
     if (!this.config.personal || !this.config.config_file) throw new AuthError("user_management_unavailable", 503);
+    if (this.config.personal.web_accounts?.manage === false) throw new AuthError("web_account_management_disabled", 403);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(input.username) || !input.name.trim() || !["admin", "viewer"].includes(input.role))
       throw new AuthError("invalid_user", 400);
     // An account added with personal-config since the server started is in the file but not yet in memory.
     this.followConfigFile();
+    // The configuration's own owner signs in under its username: an account of the same name would stand in front of it.
+    if (input.username === this.config.personal.username) throw new AuthError("user_exists", 409);
     const onDisk = this.readConfigFile().personal?.users;
     if ([...this.personalUsers(), ...(Array.isArray(onDisk) ? onDisk : [])].some((user) => user?.username === input.username)) throw new AuthError("user_exists", 409);
     const allowedScopes = new Set(this.config.principals.flatMap((principal) => principal.scopes.map((scope) => scope.id)));
@@ -438,13 +585,24 @@ export class SessionAuth {
     }
     return { user: { ...user, key_hash_ref: undefined }, access_key: accessKey };
   }
-  async revokePersonalUser(username: string) {
+  /**
+   * `actor` is the account asking from the web; the command line passes none. From the web an account cannot disable
+   * itself, and the last admin cannot be disabled.
+   */
+  async revokePersonalUser(username: string, actor?: string) {
     this.followConfigFile();
+    if (actor !== undefined) {
+      this.requireManagement();
+      this.managedUser(username);
+      if (actor === username) throw new AuthError("cannot_revoke_self", 409);
+      if (this.adminsAfter((users) => users.map((entry) => entry.username === username ? { ...entry, enabled: false } : entry)) < 1) throw new AuthError("last_admin_required", 409);
+    }
     if (!this.config.personal || !this.personalUsers().some((user) => user.username === username)) throw new AuthError("user_not_found", 404);
     // Effective at once, even when the file cannot be written or is busy: a revocation must not wait for the disk or for
     // another writer. Everything up to the first await runs before this function returns its promise. It is also remembered
     // until the file holds it, so a later write or a reload of the file cannot bring the account back.
     this.revoked.add(username);
+    this.invites.revokeAllForUser(username);
     this.adopt(this.withRevocations(this.personalUsers()));
     this.endSessionsOf(username);
     await this.persistConfig((stored) => stored);
@@ -667,15 +825,22 @@ export class SessionAuth {
       throw new AuthError("identity_not_bound", 403);
     }
     if (s.personal) {
-      const user = this.personalUser(s.subject);
-      const ref = user?.key_hash_ref || this.config.personal?.password_hash_ref;
-      if (
-        (s.last_seen || 0) + personalIdleMs <= now ||
-        !ref ||
-        s.credential_version !== credentialVersion(secret(ref))
-      ) {
+      if ((s.last_seen || 0) + (s.remembered ? rememberedIdleMs : personalIdleMs) <= now) {
         this.sessions.delete(s.id);
         throw new AuthError("login_required");
+      }
+      if (s.invite_id) {
+        if (!this.invites.isSessionAllowed(s.invite_id)) {
+          this.sessions.delete(s.id);
+          throw new AuthError("login_required");
+        }
+      } else {
+        const user = this.personalUser(s.subject);
+        const ref = user?.key_hash_ref || this.config.personal?.password_hash_ref;
+        if (!ref || s.credential_version !== credentialVersion(secret(ref))) {
+          this.sessions.delete(s.id);
+          throw new AuthError("login_required");
+        }
       }
       // The idle time runs from the last request. `get` returns a copy, so the time is written back (at most once a minute).
       if (this.sessions.touch(s.id, now)) s.last_seen = now;
@@ -689,9 +854,126 @@ export class SessionAuth {
     )
       throw new AuthError("csrf_denied", 403);
   }
+  /** Issues a one-time invitation token for an enabled personal account (or the configured owner). */
+  createPersonalInvite(input: { username: string; label?: string; ttlHours?: number; createdBy: string }): { invite: PersonalInviteView; token: string } {
+    this.requireManagement();
+    this.followConfigFile();
+    const personal = this.config.personal!;
+    const namedUser = this.personalUser(input.username);
+    const legacyOwner =
+      !namedUser &&
+      personal.username !== undefined &&
+      input.username === personal.username;
+    if (!namedUser && !legacyOwner) {
+      if (this.personalUsers().some((u) => u.username === input.username)) {
+        throw new AuthError("user_disabled", 409);
+      }
+      throw new AuthError("user_not_found", 404);
+    }
+    const ttlMs = input.ttlHours !== undefined ? Math.round(input.ttlHours * 3600_000) : defaultInviteTtlMs;
+    if (!Number.isFinite(ttlMs) || ttlMs < minInviteTtlMs || ttlMs > maxInviteTtlMs) {
+      throw new AuthError("invalid_invite_ttl", 400);
+    }
+    if (input.label !== undefined && /[\x00-\x1f\x7f]/.test(input.label)) {
+      throw new AuthError("invalid_request", 400);
+    }
+    return this.invites.issue({
+      username: input.username,
+      label: input.label,
+      createdBy: input.createdBy,
+      ttlMs,
+    });
+  }
+
+  listPersonalInvites(username?: string): PersonalInviteView[] {
+    this.followConfigFile();
+    return this.invites.list(username);
+  }
+
+  revokePersonalInvite(id: string): PersonalInviteView {
+    this.requireManagement();
+    const revoked = this.invites.revoke(id);
+    if (!revoked) throw new AuthError("invite_not_found", 404);
+    for (const session of this.sessions.values()) {
+      if (session.personal && session.invite_id === id) {
+        this.sessions.delete(session.id);
+      }
+    }
+    return revoked;
+  }
+
+  /**
+   * Redeems a one-time invitation token into a personal HttpOnly session.
+   * Uses the same origin check, rate limiter, and session caps as `personalLogin`,
+   * while claiming the token atomically so forwarding or second use is rejected.
+   */
+  redeemPersonalInvite(request: Request, rawToken: string, address = "unknown"): { cookie: string; invite: PersonalInviteView } {
+    this.followConfigFile();
+    let requestOrigin = "";
+    try {
+      requestOrigin = new URL(request.url).origin;
+    } catch {
+      throw new AuthError("invalid_login_request", 400);
+    }
+    if (
+      this.config.auth_mode !== "personal" ||
+      !this.config.personal ||
+      request.headers.get("origin") !== this.config.origin ||
+      requestOrigin !== this.config.origin
+    ) {
+      throw new AuthError("personal_login_unavailable", 403);
+    }
+    validateControlOrigin(this.config.origin);
+    if (this.limiter.full(address, undefined).length) {
+      throw new AuthError("login_rate_limited", 429);
+    }
+    const now = Date.now();
+    const claimed = this.invites.claim(rawToken, now);
+    if (!claimed) {
+      throw Object.assign(new AuthError("invite_token_invalid", 401), {
+        trips: this.limiter.failed(address, undefined),
+      });
+    }
+    const user = this.personalUser(claimed.username);
+    const personal = this.config.personal;
+    const legacy = !user && personal.username !== undefined && claimed.username === personal.username;
+    const binding = user ? this.personalUserBinding(user) : legacy ? this.personalBinding() : undefined;
+    if (!binding) {
+      this.invites.revoke(claimed.id, now);
+      throw Object.assign(new AuthError("invite_token_invalid", 401), {
+        trips: this.limiter.failed(address, claimed.username),
+      });
+    }
+    if (this.successesOf(binding.subject, now).length >= loginBudget.max) {
+      throw new AuthError("login_rate_limited", 429);
+    }
+    this.prune();
+    this.sessions.evictOldest(binding.issuer, binding.subject, maxSessionsPerAccount - 1);
+    if (this.sessions.size >= 100) {
+      throw new AuthError("session_capacity", 503);
+    }
+    const id = nonce();
+    this.sessions.set(id, {
+      id,
+      issuer: binding.issuer,
+      subject: binding.subject,
+      name: binding.name,
+      accessToken: "",
+      accessAudience: [],
+      expires: now + 12 * 3600_000,
+      csrf: nonce(),
+      personal: true,
+      last_seen: now,
+      invite_id: claimed.id,
+      epoch: this.nextEpoch(),
+    });
+    this.loginSuccesses.set(binding.subject, [...this.successesOf(binding.subject, now), now]);
+    return { cookie: this.cookie(id, 12 * 3600), invite: claimed };
+  }
+
   private prune() {
     this.sessions.prune();
-    this.sessions.pruneIdle(Date.now(), personalIdleMs);
+    this.sessions.pruneIdle(Date.now(), personalIdleMs, rememberedIdleMs);
     for (const [k, v] of this.challenges)
       if (v.expires <= Date.now()) this.challenges.delete(k);
   }

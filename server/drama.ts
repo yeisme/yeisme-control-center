@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AuthError } from "./auth";
+import { collectionIndexScope } from "./collection-context";
 import { auctraConnection, collectionFingerprint, type AuctraCollectionReader, type AuctraCreativeFlowSnapshot } from "./auctra";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { AuctraCollectionStore } from "./db/auctra-collection-store";
@@ -84,7 +85,7 @@ export class DramaService {
 
   /** Owner reads are delegated per session, so no cached projection may cross a session, epoch, scope or binding. */
   private key(session: Session, scope: ScopeBinding, episode: string, scaenaEpisode: string, skipAuctra: boolean) {
-    const binding = createHash("sha256").update(JSON.stringify([scope.project, scope.collection?.auctra ?? null, scope.owners.scaena ?? null])).digest("hex").slice(0, 16);
+    const binding = createHash("sha256").update(JSON.stringify([scope.read_context, scope.project, scope.collection?.auctra ?? null, scope.owners.scaena ?? null])).digest("hex").slice(0, 16);
     return createHash("sha256").update(JSON.stringify([session.id, session.epoch, scope.id, binding, episode, scaenaEpisode, skipAuctra])).digest("hex");
   }
 
@@ -93,8 +94,8 @@ export class DramaService {
    * matches plans by the ref's trailing digits, so asking it would show another episode's plans. Never synced means we cannot tell.
    */
   private notInCollection(scope: ScopeBinding, episode: string) {
-    if (!episode || !this.auctraBound(scope) || this.deps.store.coverage(scope.id).state === "unknown") return false;
-    return !this.deps.store.episodeUnits(scope.id).some((unit) => unit.unit_ref === episode);
+    if (!episode || !this.auctraBound(scope) || this.deps.store.coverage(collectionIndexScope(scope)).state === "unknown") return false;
+    return !this.deps.store.episodeUnits(collectionIndexScope(scope)).some((unit) => unit.unit_ref === episode);
   }
 
   private peek(session: Session, scope: ScopeBinding, episode: string, scaenaEpisode: string) {
@@ -150,7 +151,7 @@ export class DramaService {
   async flow(scope: ScopeBinding, session: Session, query: { episode_ref?: string; breakdown_ref?: string } = {}): Promise<CreativeFlowProjection> {
     let episode = query.episode_ref || "";
     if (!episode && this.auctraBound(scope)) {
-      const units = this.deps.store.episodeUnits(scope.id);
+      const units = this.deps.store.episodeUnits(collectionIndexScope(scope));
       if (units.length === 1) episode = units[0].unit_ref;
     }
     const { value } = await this.read(scope, session, episode, episode, { breakdown_ref: query.breakdown_ref });
@@ -160,7 +161,7 @@ export class DramaService {
   /** Flows for the most recently updated episodes, for the attention queue. Served from the same cache as the board. */
   async attentionFlows(scope: ScopeBinding, session: Session, max = 3): Promise<{ flows: CreativeFlowProjection[]; checked: number; total: number }> {
     if (!this.auctraBound(scope)) return { flows: [], checked: 0, total: 0 };
-    const all = this.deps.store.episodeUnits(scope.id);
+    const all = this.deps.store.episodeUnits(collectionIndexScope(scope));
     const units = [...all].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, max);
     const flows = await mapPool(units, max, async (unit) => {
       try { return (await this.read(scope, session, unit.unit_ref, unit.unit_ref)).value.flow; } catch { return null; }
@@ -185,14 +186,19 @@ export class DramaService {
     const offset = Math.max(query.offset ?? 0, 0);
     const bound = this.auctraBound(scope);
     const connection = auctraConnection(this.deps.config, scope, session);
-    const sync = this.deps.store.coverage(scope.id);
-    const last = bound ? this.deps.store.cursor(scope.id, collectionFingerprint(this.deps.config, scope)) : undefined;
+    const sync = this.deps.store.coverage(collectionIndexScope(scope));
+    const last = bound ? this.deps.store.cursor(collectionIndexScope(scope), collectionFingerprint(this.deps.config, scope)) : undefined;
     // A sync that stopped before Auctra's last page leaves episodes out; saying "complete" would hide them.
     const complete = !last || last.coverage !== "partial";
-    const units = bound ? this.deps.store.episodeUnits(scope.id) : [];
-    const universeCoverage: CoverageState = !bound ? "needs_contract" : sync.state === "unknown" ? "unknown" : sync.state === "stale" ? "expired" : complete ? "complete" : "partial";
-    // Never synced with no way to sync says what is actually in the way.
-    const universeReason = !bound ? connection.reason : sync.state === "unknown" ? (connection.state === "connected" ? "collection_not_synced" : connection.reason) : !complete ? "collection_partial" : undefined;
+    const units = bound ? this.deps.store.episodeUnits(collectionIndexScope(scope)) : [];
+    let universeCoverage: CoverageState = "complete";
+    let universeReason: string | undefined;
+    if (!bound) { universeCoverage = "needs_contract"; universeReason = connection.reason; }
+    else if (sync.state === "unknown" && !last) {
+      universeCoverage = "unknown";
+      universeReason = connection.state === "connected" ? "collection_not_synced" : connection.reason;
+    } else if (sync.state === "stale") universeCoverage = "expired";
+    else if (!complete) { universeCoverage = "partial"; universeReason = "collection_partial"; }
 
     const rows: DramaEpisodeRow[] = units.map((unit) => ({
       episode_ref: unit.unit_ref,

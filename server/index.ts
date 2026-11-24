@@ -49,7 +49,7 @@ const config: ServerConfig = {
   bind: validateControlBind(process.env.YEISME_CONTROL_BIND || baseConfig.bind || "127.0.0.1"),
   // The real file, links resolved, so the account writes and their lock use one path. The database stays beside the path that was given.
   ...(file ? { config_file: canonicalConfigPath(file) } : {}),
-  providers: { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
+  providers: baseConfig.read_only ? {} : { ...(baseConfig.providers || {}), ...Object.fromEntries(providerEntries) },
 };
 // Persistence: explicit config wins, then beside the config file, then memory.
 const dbPath =
@@ -62,7 +62,7 @@ const { handle: app, services } = createControlCenter(config, { db }),
   root = resolve("dist");
 // Background observation turns failures into reminders with no browser open. The release candidate check starts the
 // server with YEISME_CONTROL_BACKGROUND=off so it never reads an owner on its own.
-const backgroundOff = process.env.YEISME_CONTROL_BACKGROUND === "off";
+const backgroundOff = config.read_only || process.env.YEISME_CONTROL_BACKGROUND === "off";
 // The observation block is checked once, here. A malformed block is logged by code and treated as switched off; it is
 // never an error for the server or for /observation/status.
 const observationConfig = observationSettings(config);

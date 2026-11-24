@@ -1,3 +1,4 @@
+import { collectionIndexScope } from "./collection-context";
 import { createHash } from "node:crypto";
 import { collectionFingerprint, type AuctraCollectionCoverage, type AuctraCollectionReader } from "./auctra";
 import type { ScopeBinding, ServerConfig, Session } from "./contracts";
@@ -39,26 +40,28 @@ export async function syncCollection(
   let stored = 0;
   let last: Awaited<ReturnType<AuctraCollectionReader["snapshot"]>> | undefined;
   let stop: string | undefined;
+  const seen = new Set<string>(cursor ? [cursor] : []);
   for (;;) {
     if (pages >= collectionSyncLimits.maxPages) { stop = "collection_page_limit"; break; }
     if (pages > 0 && now() - started > collectionSyncLimits.budgetMs) { stop = "collection_time_budget"; break; }
     last = await deps.reader.snapshot(scope.id, scope, session, { ...(cursor ? { cursor } : {}), ...(options.updated_after ? { updated_after: options.updated_after } : {}), limit });
     pages++;
     if (last.coverage !== "complete") { stop = last.blocker || "owner_unavailable"; break; }
-    const page = deps.store.upsertSnapshot(scope.id, last);
+    const page = deps.store.upsertSnapshot(collectionIndexScope(scope), last);
     stored++;
     counts.inserted += page.inserted;
     counts.updated += page.updated;
     counts.returned += page.returned;
     counts.total = page.total;
     digest.update(JSON.stringify(last.records));
-    // An empty page with a cursor would loop forever on a misbehaving owner; treat it as the end.
-    if (!last.next_cursor || !last.records.length) { cursor = undefined; break; }
+    if (!last.next_cursor) { cursor = undefined; break; }
     cursor = last.next_cursor;
+    if (!last.records.length || seen.has(cursor)) { stop = "collection_cursor_invalid"; break; }
+    seen.add(cursor);
   }
   const complete = !stop && !cursor;
   // A first page that failed stored nothing: the previous sync's record still describes the index.
-  if (stored > 0) deps.store.saveCursor(scope.id, collectionFingerprint(deps.config, scope), cursor || "", digest.digest("hex"), complete ? "complete" : "partial", stop);
+  if (stored > 0) deps.store.saveCursor(collectionIndexScope(scope), collectionFingerprint(deps.config, scope), cursor || "", digest.digest("hex"), complete ? "complete" : "partial", stop);
   const failedFirst = stored === 0 && !!last && last.coverage !== "complete";
   return {
     coverage: failedFirst ? last!.coverage : complete ? "complete" : "partial",

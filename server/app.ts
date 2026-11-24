@@ -1,3 +1,7 @@
+import { PromptCollectionStore, type PromptLink } from "./db/prompt-collection-store";
+import { PromptRecipeStore, type PromptRecipeInput } from "./db/prompt-recipe-store";
+import { promptOwners, type PromptOwner, type PromptQuery } from "../src/shared/prompt-library";
+import { promptWrite } from "./prompt-library";
 import {
   randomBytes,
   createHash,
@@ -11,6 +15,11 @@ import { OwnerReaders, owners } from "./owners";
 import { TaskConnections, taskIdentityOf } from "./task-connections";
 import { ConnectionCatalog, ownerProjectRef } from "./connection-catalog";
 import { MediaBridge } from "./media";
+import { readOnlyRequestAllowed } from "./read-only-policy";
+import { collectionIndexScope } from "./collection-context";
+import { projectCollectionRead } from "./project-collection-routes";
+import { gatewayEventStream } from "./gateway-event-stream";
+import type { EpisodeArtifactAccessPort } from "./episode-artifact-access";
 import { serviceDirectory } from "./service-directory";
 import type { TaskSnapshot } from "../src/task-observation";
 import type { ServerConfig, ScopeBinding, Session, Owner } from "./contracts";
@@ -20,7 +29,7 @@ import { RunStore } from "./db/run-store";
 import { ActionService, type PreviewRecord } from "./actions";
 import type { ActionConfirmRequest, ActionPreviewRequest, ActionReceipt } from "../src/shared/action-contract";
 import { createMemoryDB, type ControlDB } from "./db/client";
-import { NotificationStore, attentionStates, countsAsUnread, failureFact, snoozeDeadline } from "./notifications";
+import { NotificationStore, attentionStates, countsAsUnread, failureFact, livenessFact, snoozeDeadline } from "./notifications";
 import { controlStateOf, taskSigningKey, type ControlState } from "./db/control-state";
 import { rekeyNotifications } from "./db/notification-rekey";
 import { ToolCatalogService } from "./tool-catalog";
@@ -40,9 +49,15 @@ import { OpenToolService } from "./open-tools/service";
 import { credentialStatuses, isPersonalAdmin } from "./credentials";
 import { workQueueKinds } from "../src/shared/work-queue";
 import { DramaService, dramaLimits, validDramaRef } from "./drama";
+import { ProductionReader } from "./production";
+import { EpisodeProductionReader } from "./episode-production";
+import { TaskReviewReader } from "./task-review";
+import { GatewayMonitorService, gatewayConnection } from "./gateway-monitor";
 import { collectionSyncLimits, syncCollection } from "./auctra-sync";
 import { ScaenaStoryboardReader } from "./scaena-storyboard";
 import { observationStatus, type ObservationLoop } from "./observation-loop";
+import { referenceBindingKinds, referenceBindingOwners, type ReferenceBindingAccessRequest, type ReferenceBindingSource } from "../src/shared/reference-bindings";
+import type { PromptRecipeQuery, PromptRecipeUsePreview } from "../src/shared/prompt-recipes";
 import {
   defaultRequestQuery,
   type RequestQuery,
@@ -144,6 +159,8 @@ export interface ControlCenterDeps {
   auctra?: AuctraCollectionReader;
   scaenaStoryboard?: ScaenaStoryboardReader;
   openTools?: OpenToolService;
+  /** Explicit owner-backed episode artifact authorization; absent means episode media access is unavailable. */
+  episodeArtifacts?: EpisodeArtifactAccessPort;
   db?: ControlDB;
   /** Milliseconds since the epoch; the background loop reads time through it. */
   clock?: () => number;
@@ -183,13 +200,18 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
     auctra = deps.auctra || new AuctraCollectionReader(config),
     scaenaStoryboard = deps.scaenaStoryboard || new ScaenaStoryboardReader(config),
     collectionStore = new AuctraCollectionStore(db),
+    promptCollectionsStore = new PromptCollectionStore(db),
+    promptRecipesStore = new PromptRecipeStore(db),
     drama = new DramaService({ config, auctra, scaena: scaenaStoryboard, store: collectionStore }),
+    episodeProduction = new EpisodeProductionReader({ tasks }),
+    taskReviews = new TaskReviewReader({ tasks }),
+    production = new ProductionReader({ drama, tasks, episodeProduction, taskReviews, clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin } }),
     projectMetadata = new ProjectMetadataStore(db),
     audit = new AuditStore(db),
     notifications = new NotificationStore(db),
     openTools = deps.openTools || new OpenToolService(config),
     catalog = new ToolCatalogService(providers, new ToolCatalogStore(db), openTools),
-    media = new MediaBridge(tasks, undefined, audit),
+    media = new MediaBridge(tasks, undefined, audit, deps.episodeArtifacts),
     actions = new ActionService(db),
     collaboration = new CollaborationService(db, config, auth, connectionCatalog),
     generationBatches = new GenerationBatches(collaboration, readers, config),
@@ -228,9 +250,15 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
     return found;
   };
   /** Collaboration actions carry their own project grants; every other action changes owner, Provider or account state and needs an admin. */
-  const authorizeAction = (s: Session, action: string) => {
+  const authorizeAction = (s: Session, action: string, actionScope?: ScopeBinding) => {
+    if (action.startsWith("prompts.") && actionScope?.id.startsWith("project_")) { collaboration.project(s, actionScope.id, "creator"); return; }
     if (isCollaborationAction(action)) return;
     if (auth.role(s) !== "admin" || (action.startsWith("admin.") && !s.personal)) throw new AuthError("control_center_admin_required", 403);
+  };
+  const recipeProjectInScope = (scope: ScopeBinding, owner: PromptOwner, projectRef: string) =>
+    scope.owners[owner]?.project === projectRef || scope.projects?.some((binding) => binding.owner === owner && binding.project_ref === projectRef) === true;
+  const validateRecipeProject = (scope: ScopeBinding, owner: unknown, projectRef: unknown) => {
+    if (!promptOwners.includes(owner as PromptOwner) || typeof projectRef !== "string" || !projectRef || !recipeProjectInScope(scope, owner as PromptOwner, projectRef)) throw new AuthError("scope_mismatch", 403);
   };
   const scoped = (s: Session, id: string | null): ScopeBinding => {
     if (id?.startsWith("project_")) return collaboration.scope(s, id);
@@ -378,6 +406,8 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           (r.headers.has("origin") && r.headers.get("origin") !== config.origin))
       )
         throw new AuthError("origin_denied", 403);
+      if (config.read_only && !readOnlyRequestAllowed(r.method, path))
+        throw new AuthError("read_only_run", 403);
       if (r.method === "GET" && path === "/health")
         return json({ status: "ok", service: "yeisme-control-center" });
       if (r.method === "POST" && path === "/auth/personal") {
@@ -396,7 +426,8 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           (body.password !== undefined && typeof body.password !== "string") ||
           (body.key !== undefined && typeof body.key !== "string") ||
           (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 80)) ||
-          Object.keys(body).some((k) => !["password", "key", "username"].includes(k))
+          typeof body.remember !== "undefined" && typeof body.remember !== "boolean" ||
+          Object.keys(body).some((k) => !["password", "key", "username", "remember"].includes(k))
         )
           throw new AuthError("invalid_login_request", 400);
         // A secret longer than a key or a password can be never matches anything, and the password check turns it away without any
@@ -406,7 +437,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         if (Buffer.byteLength(secretValue) > maxSecretBytes)
           throw new AuthError("invalid_login_request", 400);
         try {
-          const result = await auth.personalLogin(r, secretValue, body.username, clientAddress(info.peer, r.headers.get("x-forwarded-for")));
+          const result = await auth.personalLogin(r, secretValue, body.username, clientAddress(info.peer, r.headers.get("x-forwarded-for")), body.remember === true);
           audit.record(
             {
               actor: typeof body.username === "string" ? body.username : "owner",
@@ -418,6 +449,45 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           return json({ ok: true }, 200, { "Set-Cookie": result.cookie });
         } catch (e) {
           auditLogin(body.username, e);
+          throw e;
+        }
+      }
+      if (r.method === "POST" && path === "/auth/invite") {
+        const raw = await r.text();
+        if (raw.length > 2048) throw new AuthError("invalid_login_request", 400);
+        const body = jsonObject<Record<string, unknown>>(raw, "invalid_login_request");
+        if (typeof body.token !== "string" || !body.token.trim() || Object.keys(body).some((k) => k !== "token")) {
+          throw new AuthError("invalid_login_request", 400);
+        }
+        if (Buffer.byteLength(body.token) > maxSecretBytes) {
+          throw new AuthError("invalid_login_request", 400);
+        }
+        try {
+          const redeemed = auth.redeemPersonalInvite(
+            r,
+            body.token,
+            clientAddress(info.peer, r.headers.get("x-forwarded-for")),
+          );
+          audit.record(
+            {
+              actor: redeemed.invite.username,
+              action: "auth.invite_redeemed",
+              targetRef: redeemed.invite.id,
+              meta: { mode: "invite" },
+            },
+            "succeeded",
+          );
+          return json({ ok: true, username: redeemed.invite.username }, 200, { "Set-Cookie": redeemed.cookie });
+        } catch (e) {
+          audit.record(
+            {
+              actor: "(invite)",
+              action: "auth.invite_redeemed",
+              meta: { mode: "invite" },
+            },
+            e instanceof AuthError && e.status === 403 ? "denied" : "failed",
+            auditError(e),
+          );
           throw e;
         }
       }
@@ -477,12 +547,13 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           identity: session.issuer + "|" + session.subject,
           csrf: session.csrf,
           epoch: session.epoch,
-          scopes: [...p.scopes, ...collaboration.list(session).map((project) => collaboration.scope(session, project.id))].map(({ owners: bindings, collection, ...scope }) => ({
+          scopes: [...p.scopes, ...collaboration.list(session).map((project) => collaboration.scope(session, project.id))].map(({ owners: bindings, collection, read_context: _context, ...scope }) => ({
             ...scope,
             owners: [...Object.keys(bindings), ...Object.keys(collection || {})],
           })),
           mode: "live",
           task_connections: session.personal === true,
+          own_key: session.personal ? auth.ownKeyState(session) : undefined,
           collaboration_organizations: collaboration.organizations(session),
           shared_projects: collaboration.list(session),
         });
@@ -497,49 +568,174 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         if (wanted && !scopes.length) throw new AuthError("scope_not_found", 404);
         return json(withEpoch(session, observationStatus(services, identityOf(session), scopes.map((candidate) => candidate.id), wanted ?? undefined)));
       }
-      // Every account route is matched whole: the collection, and one username's revoke. Anything else under the prefix is unknown.
+      // A person resets their own key: any role, own account only, and only with the current key in hand.
+      if (path === "/account/rotate-key") {
+        if (r.method !== "POST") return methodNotAllowed(["POST"]);
+        if (!session.personal) throw new AuthError("personal_connection_required", 403);
+        auth.csrf(r, session);
+        const raw = await r.text();
+        if (raw.length > 2048) throw new AuthError("invalid_request", 400);
+        const body = jsonObject<Record<string, unknown>>(raw, "invalid_request");
+        if (typeof body.current_key !== "string" || Object.keys(body).some((key) => key !== "current_key")) throw new AuthError("invalid_request", 400);
+        const rotated = await audited({
+          actor: session.issuer + "|" + session.subject,
+          sessionId: session.id,
+          action: "account.key_rotated",
+          targetRef: session.subject,
+        }, () => auth.rotateOwnKey(session, body.current_key as string));
+        return json(rotated);
+      }
+      // Every account route is matched whole: the collection, one username, and its revoke, enable and rotate. Anything else under the prefix is unknown.
       const revoke = path.match(/^\/admin\/personal-users\/([^/]+)\/revoke$/);
+      const userAction = path.match(/^\/admin\/personal-users\/([^/]+)\/(enable|rotate)$/);
+      const userPath = path.match(/^\/admin\/personal-users\/([^/]+)$/);
       if (path === "/admin/personal-users" || revoke || path.startsWith("/admin/personal-users/")) {
         if (!session.personal || auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
         if (path === "/admin/personal-users") {
-          if (r.method === "GET") return json({ users: auth.listPersonalUsers() });
+          if (r.method === "GET") return json({ users: auth.listPersonalUsers(), management: auth.accountManagement(), scopes: auth.assignableScopes() });
           if (r.method !== "POST") return methodNotAllowed(["GET", "POST"]);
           auth.csrf(r, session);
           const raw = await r.text();
           if (raw.length > 4096) throw new AuthError("invalid_request", 400);
           const body = jsonObject<Record<string, any>>(raw, "invalid_request");
-          if (typeof body.username !== "string" || typeof body.name !== "string" || !["admin", "viewer"].includes(body.role) || !Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string") || Object.keys(body).some((key) => !["username", "name", "role", "scope_ids"].includes(key))) throw new AuthError("invalid_request", 400);
+          if (
+            typeof body.username !== "string" ||
+            typeof body.name !== "string" ||
+            !["admin", "viewer"].includes(body.role) ||
+            !Array.isArray(body.scope_ids) ||
+            body.scope_ids.some((id: unknown) => typeof id !== "string") ||
+            (body.issue_invite_ttl_hours !== undefined && (typeof body.issue_invite_ttl_hours !== "number" || !Number.isFinite(body.issue_invite_ttl_hours))) ||
+            Object.keys(body).some((key) => !["username", "name", "role", "scope_ids", "issue_invite_ttl_hours"].includes(key))
+          ) throw new AuthError("invalid_request", 400);
+          const actor = session.issuer + "|" + session.subject;
           const created = await audited({
-            actor: session.issuer + "|" + session.subject,
+            actor,
             sessionId: session.id,
             action: "admin.user_created",
             targetRef: body.username,
-          }, () => auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids }));
+          }, async () => {
+            if (auth.firstAccountLocksOutOwner()) throw new AuthError("owner_username_required", 409);
+            const res = await auth.createPersonalUser({ username: body.username, name: body.name, role: body.role, scope_ids: body.scope_ids });
+            if (body.issue_invite_ttl_hours !== undefined) {
+              const issued = auth.createPersonalInvite({
+                username: body.username,
+                label: "首次加入邀请",
+                ttlHours: body.issue_invite_ttl_hours,
+                createdBy: session.subject,
+              });
+              audit.record({ actor, sessionId: session.id, action: "admin.invite_created", targetRef: issued.invite.id, meta: { username: body.username } }, "succeeded");
+              return { ...res, invite: issued.invite, invite_token: issued.token };
+            }
+            return res;
+          });
           return json(created, 201);
+        }
+        const actor = session.issuer + "|" + session.subject;
+        if (userAction) {
+          if (r.method !== "POST") return methodNotAllowed(["POST"]);
+          auth.csrf(r, session);
+          const username = pathParam(userAction[1]);
+          if (userAction[2] === "enable") {
+            await audited({ actor, sessionId: session.id, action: "admin.user_enabled", targetRef: username }, () => auth.enablePersonalUser(username));
+            return json({ ok: true });
+          }
+          const rotated = await audited({ actor, sessionId: session.id, action: "admin.user_rotated", targetRef: username }, () => auth.rotatePersonalUserKey(username));
+          // The new key is in this response and nowhere else: `json` marks it no-store, and nothing logs it.
+          return json(rotated);
+        }
+        if (userPath) {
+          if (r.method !== "PATCH") return methodNotAllowed(["PATCH"]);
+          auth.csrf(r, session);
+          const username = pathParam(userPath[1]);
+          const raw = await r.text();
+          if (raw.length > 4096) throw new AuthError("invalid_request", 400);
+          const body = jsonObject<Record<string, any>>(raw, "invalid_request");
+          if (typeof body.if_match !== "string" || Object.keys(body).some((key) => !["name", "role", "scope_ids", "if_match"].includes(key))
+            || (body.name !== undefined && typeof body.name !== "string")
+            || (body.role !== undefined && !["admin", "viewer"].includes(body.role))
+            || (body.scope_ids !== undefined && (!Array.isArray(body.scope_ids) || body.scope_ids.some((id: unknown) => typeof id !== "string")))) throw new AuthError("invalid_request", 400);
+          const changed = Object.keys(body).filter((key) => key !== "if_match").sort().join(",");
+          const user = await audited({ actor, sessionId: session.id, action: "admin.user_updated", targetRef: username, meta: { fields: changed } }, () => auth.updatePersonalUser(session.subject, username, { name: body.name, role: body.role, scope_ids: body.scope_ids }, body.if_match));
+          return json({ user });
         }
         if (!revoke) throw new AuthError("not_found", 404);
         if (r.method !== "POST") return methodNotAllowed(["POST"]);
         auth.csrf(r, session);
         const username = pathParam(revoke[1]);
         await audited({
-          actor: session.issuer + "|" + session.subject,
+          actor,
           sessionId: session.id,
           action: "admin.user_revoked",
           targetRef: username,
-        }, () => auth.revokePersonalUser(username));
+        }, () => auth.revokePersonalUser(username, session.subject));
         return json({ ok: true });
+      }
+      const inviteRevoke = path.match(/^\/admin\/personal-invites\/([^/]+)\/revoke$/);
+      if (path === "/admin/personal-invites" || inviteRevoke || path.startsWith("/admin/personal-invites/")) {
+        if (!session.personal || auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
+        const actor = session.issuer + "|" + session.subject;
+        if (path === "/admin/personal-invites") {
+          if (r.method === "GET") {
+            const username = url.searchParams.get("username") || undefined;
+            if (username !== undefined && username.length > 80) throw new AuthError("invalid_request", 400);
+            return json({ invites: auth.listPersonalInvites(username) });
+          }
+          if (r.method !== "POST") return methodNotAllowed(["GET", "POST"]);
+          auth.csrf(r, session);
+          const raw = await r.text();
+          if (raw.length > 2048) throw new AuthError("invalid_request", 400);
+          const body = jsonObject<Record<string, unknown>>(raw, "invalid_request");
+          if (
+            typeof body.username !== "string" ||
+            !body.username ||
+            (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 120)) ||
+            (body.ttl_hours !== undefined && (typeof body.ttl_hours !== "number" || !Number.isFinite(body.ttl_hours))) ||
+            Object.keys(body).some((k) => !["username", "label", "ttl_hours"].includes(k))
+          ) {
+            throw new AuthError("invalid_request", 400);
+          }
+          const created = await audited(
+            { actor, sessionId: session.id, action: "admin.invite_created", targetRef: body.username },
+            async () =>
+              auth.createPersonalInvite({
+                username: body.username as string,
+                label: body.label as string | undefined,
+                ttlHours: body.ttl_hours as number | undefined,
+                createdBy: session.subject,
+              }),
+          );
+          return json({ invite: created.invite, invite_token: created.token }, 201);
+        }
+        if (!inviteRevoke) throw new AuthError("not_found", 404);
+        if (r.method !== "POST") return methodNotAllowed(["POST"]);
+        auth.csrf(r, session);
+        const inviteId = pathParam(inviteRevoke[1]);
+        const revoked = await audited(
+          { actor, sessionId: session.id, action: "admin.invite_revoked", targetRef: inviteId },
+          async () => auth.revokePersonalInvite(inviteId),
+        );
+        return json({ invite: revoked });
       }
       if (r.method === "GET" && path === "/audit") {
         if (auth.role(session) !== "admin")
           throw new AuthError("control_center_admin_required", 403);
         const before = url.searchParams.get("before"),
           limit = Number(url.searchParams.get("limit") || 50),
-          action = url.searchParams.get("action") || undefined;
+          action = url.searchParams.get("action") || undefined,
+          outcome = url.searchParams.get("outcome") || undefined,
+          actor = url.searchParams.get("actor") || undefined,
+          from = url.searchParams.get("from") || undefined,
+          to = url.searchParams.get("to") || undefined;
+        const day = /^\d{4}-\d{2}-\d{2}$/;
         if (
           (before !== null && !/^\d{1,16}$/.test(before)) ||
           ![25, 50, 100].includes(limit) ||
           (action !== undefined &&
-            !auditActions.includes(action as AuditAction))
+            !auditActions.includes(action as AuditAction)) ||
+          (outcome !== undefined && !["initiated", "succeeded", "denied", "failed", "unavailable"].includes(outcome)) ||
+          (actor !== undefined && actor.length > 320) ||
+          (from !== undefined && (!day.test(from) || Number.isNaN(Date.parse(from)))) ||
+          (to !== undefined && (!day.test(to) || Number.isNaN(Date.parse(to))))
         )
           throw new AuthError("invalid_query", 400);
         return json(
@@ -547,6 +743,10 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             before: before ? Number(before) : undefined,
             limit,
             action,
+            outcome,
+            actor,
+            from,
+            to,
           }),
         );
       }
@@ -598,6 +798,45 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         announceBatches(projectID, changed([stored], observed.rows));
         return json(withEpoch(session, { batch: observed.rows[0], coverage: observed.sources.some((source) => source.state !== "ready") ? "partial" : "complete", observed_at: new Date().toISOString(), sources: observed.sources }));
       }
+      const referenceBindingsRoute = path.match(/^\/projects\/([^/]+)\/reference-bindings$/);
+      if (r.method === "GET" && referenceBindingsRoute) {
+        const projectID = pathParam(referenceBindingsRoute[1]);
+        const project = collaboration.project(session, projectID);
+        const ownerParam = url.searchParams.get("owner") || "";
+        const kindParam = url.searchParams.get("kind") || "";
+        const q = url.searchParams.get("q") || "";
+        const cursorValue = url.searchParams.get("cursor") || "";
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit ? Number(rawLimit) : 20;
+        if (ownerParam && !referenceBindingOwners.includes(ownerParam as (typeof referenceBindingOwners)[number])) throw new AuthError("invalid_reference_owner", 400);
+        if (kindParam && !referenceBindingKinds.includes(kindParam as (typeof referenceBindingKinds)[number])) throw new AuthError("invalid_reference_kind", 400);
+        if (q.length > 200 || /[\x00-\x1f]/.test(q) || cursorValue.length > 1024 || /[\x00-\x1f]/.test(cursorValue) || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new AuthError("invalid_query", 400);
+        const selectedOwners = ownerParam ? [ownerParam as (typeof referenceBindingOwners)[number]] : [...referenceBindingOwners];
+        const sources = selectedOwners.flatMap<ReferenceBindingSource>((owner) => {
+          const bindings = project.bindings.filter((binding) => binding.owner === owner);
+          return bindings.length
+            ? bindings.map((binding) => ({ owner, project_ref: binding.project_ref, state: "needs_contract" as const, reason: "reference_binding_contract_not_configured" }))
+            : [{ owner, project_ref: null, state: "needs_contract" as const, reason: "reference_binding_project_not_bound" }];
+        });
+        return json(withEpoch(session, { schema_version: "yeisme.reference_binding.page.v1" as const, rows: [], next_cursor: null, coverage: "unknown" as const, availability: "needs_contract" as const, sources }));
+      }
+      const referenceBindingAccessRoute = path.match(/^\/projects\/([^/]+)\/reference-bindings\/([^/]+)\/access$/);
+      if (r.method === "POST" && referenceBindingAccessRoute) {
+        const projectID = pathParam(referenceBindingAccessRoute[1]);
+        collaboration.project(session, projectID);
+        const bindingRef = pathParam(referenceBindingAccessRoute[2]);
+        if (!bindingRef || bindingRef.length > 512 || /[\\/\x00-\x1f]/.test(bindingRef)) throw new AuthError("invalid_reference", 400);
+        auth.csrf(r, session);
+        const raw = await r.text();
+        if (raw.length > 2048) throw new AuthError("invalid_reference_access", 400);
+        const body = jsonObject<ReferenceBindingAccessRequest>(raw, "invalid_reference_access");
+        if (Object.keys(body).some((key) => !["purpose", "expected_revision", "expected_digest"].includes(key)) || !["thumbnail", "preview"].includes(body.purpose) || typeof body.expected_revision !== "string" || !body.expected_revision || body.expected_revision.length > 160 || !/^sha256:[a-f0-9]{64}$/.test(body.expected_digest)) throw new AuthError("invalid_reference_access", 400);
+        throw new AuthError("needs_contract", 422);
+      }
+      if (r.method === "GET") {
+        const bindingRead = projectCollectionRead(path, session, collaboration);
+        if (bindingRead) return json(withEpoch(session, bindingRead));
+      }
       const sharedRoute = path.match(/^\/projects\/([^/]+)(?:\/(members|bindings|folders|items|generation-batches))?$/);
       if (r.method === "GET" && sharedRoute) {
         const projectID = pathParam(sharedRoute[1]);
@@ -647,6 +886,100 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         return json(withEpoch(session, { ...page, next_cursor: page.next_cursor ? sign({ fp: filterFP, expires: Date.now() + 900000, cursors: { after: page.next_cursor } }) : null, next_source_cursor: Object.keys(observed.next_cursors || {}).length ? sign({ fp: sourceFP, expires: Date.now() + 900000, cursors: observed.next_cursors }) : null, coverage: project.bindings.length > 0 && !Object.keys(projectScope.owners).length ? "unknown" : observed.connections.every((c) => c.state === "ready") && !Object.keys(observed.next_cursors || {}).length && !url.searchParams.has("source_cursor") ? "complete" : "partial", sources: observed.connections }));
       }
       const scope = scoped(session, url.searchParams.get("scope"));
+      const collectionScope = collectionIndexScope(scope);
+      if (path === "/prompt-collections" && r.method === "GET") return json(promptCollectionsStore.list(scope.id));
+      if (path === "/prompts" && r.method === "GET") {
+        const owner = url.searchParams.get("owner") || "all";
+        if (owner !== "all" && !promptOwners.includes(owner as PromptOwner)) throw new AuthError("invalid_prompt_owner", 400);
+        const query: PromptQuery = {};
+        for (const key of ["q", "kind", "source", "tag", "archived", "cursor", "model", "from", "to"] as const) {
+          const value = url.searchParams.get(key) || "";
+          if (value.length > (key === "cursor" ? 1024 : 200) || /[\x00-\x1f]/.test(value)) throw new AuthError("invalid_query", 400);
+          if (value) query[key] = value;
+        }
+        if (owner === "all" && query.cursor) throw new AuthError("prompt_cursor_requires_owner", 400);
+        query.limit = 50;
+        const selected = owner === "all" ? promptOwners : [owner as PromptOwner];
+        const pages = await Promise.all(selected.map(async (source) => {
+          try {
+            const page = await readers.promptLibrary(source, session, scope, query);
+            if (!("rows" in page)) throw new AuthError("prompt_contract_invalid", 502);
+            return { rows: page.rows!, source: { owner: source, project: page.project, state: "ready", total: page.total, next_cursor: page.next_cursor, index_more: page.index_more, history_state: page.index_more ? "incomplete" as const : "complete" as const, can_write: page.can_write } };
+          } catch (error) {
+            const code = error instanceof AuthError ? error.code : "owner_unavailable";
+            return { rows: [], source: { owner: source, state: error instanceof AuthError && error.status === 403 ? "forbidden" : code === "needs_contract" || code === "source_not_configured" ? "needs_contract" : "unavailable", history_state: code === "needs_contract" || code === "source_not_configured" ? "needs_contract" as const : "unknown" as const, reason: code } };
+          }
+        }));
+        const collection = url.searchParams.get("collection");
+        const links = collection ? promptCollectionsStore.list(scope.id).links.filter(link => link.collection_id === collection) : null;
+        const rows = pages.flatMap(p => p.rows).filter(row => !links || links.some(link => link.owner === row.owner && link.project === row.project && link.id === row.id));
+        return json(withEpoch(session, { rows: rows.sort((a,b) => b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id)), sources: pages.map(p => p.source) }));
+      }
+      const promptReconcile = path.match(/^\/prompts\/operations\/([^/]+)\/reconcile$/);
+      if (promptReconcile && r.method === "POST") {
+        auth.csrf(r, session);
+        const ref = pathParam(promptReconcile[1]), record = actions.record(ref, identityOf(session), scope.id);
+        if (record.request.action !== "prompts.save" || !promptOwners.includes(record.request.owner as PromptOwner)) throw new AuthError("invalid_prompt_operation", 400);
+        authorizeAction(session, record.request.action, scope);
+        const result = await audited({ actor: identityOf(session), sessionId: session.id, scopeId: scope.id, action: "actions.receipt_read", owner: record.request.owner, targetRef: ref }, async () => readers.promptLibrary(record.request.owner as PromptOwner, session, scope, {}, "reconcile", record.request.idempotency_key));
+        if (!("summary" in result) || !result.summary) return json({ state: "unknown", reason: "original_operation_not_observed", preview_ref: ref });
+        return json(actions.reconcilePrompt(ref, scope.id, identityOf(session), result.summary.id));
+      }
+      const promptRead = path.match(/^\/prompts\/(eikona|sonora|scaena)\/([^/]+)\/(content:read|index)$/);
+      if (promptRead && r.method === "POST") {
+        auth.csrf(r, session);
+        const owner = promptRead[1] as PromptOwner, id = pathParam(promptRead[2]), indexing = promptRead[3] === "index";
+        const raw = await r.text();
+        if (raw.length > 1024) throw new AuthError("invalid_content_request", 400);
+        const body = jsonObject<{ version?: number }>(raw || "{}", "invalid_content_request");
+        if (Object.keys(body).some(k => k !== "version") || (body.version !== undefined && (!Number.isInteger(body.version) || body.version < 1))) throw new AuthError("invalid_content_request", 400);
+        const result = await audited({ actor: identityOf(session), sessionId: session.id, scopeId: scope.id, action: indexing ? "prompts.index" : "prompts.content_read", owner, targetRef: id, purpose: indexing ? "Index existing business prompts" : "Review prompt in library" }, async () => readers.promptLibrary(owner, session, scope, {}, indexing ? "index" : "content", indexing ? "" : id, { purpose: "Review prompt in library", version: body.version || 0 }));
+        return json(result);
+      }
+      if (path === "/prompt-recipes" && r.method === "GET") {
+        const owner = url.searchParams.get("owner") || undefined;
+        const kind = url.searchParams.get("kind") || undefined;
+        const state = url.searchParams.get("state") || undefined;
+        const source = url.searchParams.get("source") || undefined;
+        const tag = url.searchParams.get("tag") || undefined;
+        const collection = url.searchParams.get("collection") || undefined;
+        const q = url.searchParams.get("q") || undefined;
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit ? Number(rawLimit) : 20;
+        if ((owner && !promptOwners.includes(owner as PromptOwner)) || (kind && !["image", "video", "speech", "music", "sfx"].includes(kind)) || (state && !["draft", "active", "archived", "superseded", "blocked"].includes(state)) || (source && !["history", "owner_asset", "manual", "catalog"].includes(source)) || (q && (q.length > 200 || /[\x00-\x1f]/.test(q))) || (tag && (tag.length > 80 || /[\x00-\x1f]/.test(tag))) || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new AuthError("invalid_prompt_recipe_query", 400);
+        const query: PromptRecipeQuery = { ...(owner ? { owner: owner as PromptOwner } : {}), ...(kind ? { kind: kind as PromptRecipeQuery["kind"] } : {}), ...(state ? { state: state as PromptRecipeQuery["state"] } : {}), ...(source ? { source: source as PromptRecipeQuery["source"] } : {}), ...(tag ? { tag } : {}), ...(collection ? { collection } : {}), ...(q ? { q } : {}), limit };
+        const fp = createHash("sha256").update(JSON.stringify([identityOf(session), session.epoch, scope.id, query])).digest("hex");
+        const position = cursor(url.searchParams.get("cursor"), fp) as Record<string, string>;
+        const page = promptRecipesStore.list(scope.id, query, position.updated_at && position.id ? { updated_at: position.updated_at, id: position.id } : undefined);
+        return json(withEpoch(session, { schema_version: "yeisme.prompt_recipe.page.v1" as const, rows: page.rows, total: page.total, next_cursor: page.next ? sign({ fp, expires: Date.now() + 900000, cursors: page.next }) : null, coverage: "complete" as const }));
+      }
+      const recipeRoute = path.match(/^\/prompt-recipes\/([^/]+)$/);
+      if (recipeRoute && r.method === "GET") {
+        const recipe = promptRecipesStore.get(scope.id, pathParam(recipeRoute[1]));
+        return json(withEpoch(session, { recipe }));
+      }
+      const recipeVersions = path.match(/^\/prompt-recipes\/([^/]+)\/versions$/);
+      if (recipeVersions && r.method === "GET") return json(withEpoch(session, { rows: promptRecipesStore.versions(scope.id, pathParam(recipeVersions[1])) }));
+      const recipeUse = path.match(/^\/prompt-recipes\/([^/]+)\/use-preview$/);
+      if (recipeUse && r.method === "POST") {
+        auth.csrf(r, session);
+        const recipe = promptRecipesStore.get(scope.id, pathParam(recipeUse[1]));
+        const raw = await r.text();
+        if (raw.length > 2048) throw new AuthError("invalid_prompt_recipe_use", 400);
+        const body = jsonObject<{ target_owner?: PromptOwner; target_project_ref?: string; expected_revision?: number }>(raw || "{}", "invalid_prompt_recipe_use");
+        if (Object.keys(body).some((key) => !["target_owner", "target_project_ref", "expected_revision"].includes(key)) || !promptOwners.includes(body.target_owner as PromptOwner) || typeof body.target_project_ref !== "string" || !body.target_project_ref || !Number.isInteger(body.expected_revision)) throw new AuthError("invalid_prompt_recipe_use", 400);
+        const result: PromptRecipeUsePreview = { schema_version: "yeisme.prompt_recipe.use_preview.v1", recipe_ref: recipe.recipe_ref, recipe_revision: recipe.revision, owner: recipe.owner, project_ref: recipe.project_ref, owner_version: recipe.source.owner_version || null, prompt_ref: recipe.source.owner_prompt_ref || null, source_digest: recipe.source.source_digest || null, availability: "available", blockers: [] };
+        if (body.expected_revision !== recipe.revision) { result.availability = "blocked"; result.blockers.push("prompt_recipe_revision_conflict"); }
+        if (body.target_owner !== recipe.owner || body.target_project_ref !== recipe.project_ref) { result.availability = "blocked"; result.blockers.push("prompt_recipe_scope_mismatch"); }
+        if (!recipeProjectInScope(scope, recipe.owner, recipe.project_ref)) { result.availability = "blocked"; result.blockers.push("prompt_recipe_project_not_bound"); }
+        if (recipe.owner === "scaena") { result.availability = "needs_contract"; result.blockers.push("owner_prompt_contract_missing"); }
+        if (recipe.content_state !== "readable") { result.availability = recipe.content_state === "needs_contract" ? "needs_contract" : "blocked"; result.blockers.push(`prompt_recipe_content_${recipe.content_state}`); }
+        if (!result.prompt_ref) { result.availability = "blocked"; result.blockers.push("prompt_recipe_source_ref_missing"); }
+        if (!result.owner_version) { result.availability = "blocked"; result.blockers.push("prompt_recipe_source_version_missing"); }
+        if (!result.source_digest) { result.availability = "blocked"; result.blockers.push("prompt_recipe_source_digest_missing"); }
+        if (recipe.owner === "scaena" && !result.blockers.includes("prompt_recipe_revision_conflict") && !result.blockers.includes("prompt_recipe_scope_mismatch")) result.availability = "needs_contract";
+        return json(withEpoch(session, result));
+      }
       if (r.method === "GET" && path === "/creative-flow") {
         const episode_ref = url.searchParams.get("episode_ref") || undefined;
         const breakdown_ref = url.searchParams.get("breakdown_ref") || undefined;
@@ -662,7 +995,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         if (!Number.isInteger(limit) || limit < 1 || limit > dramaLimits.maxPage || q.length > 200 || (readMode && readMode !== "all") || (order && order !== "recent" && order !== "natural") || requested.length > dramaLimits.maxExtra) throw new AuthError("invalid_query", 400);
         // Task episode refs are owner-supplied text. One malformed ref must cost that episode, not the whole list.
         const extra = [...new Set(requested.filter(validDramaRef))];
-        const fp = createHash("sha256").update(JSON.stringify([session.id, session.epoch, scope.id, q, limit, order || "natural", extra, "drama_episodes.v1"])).digest("hex");
+        const fp = createHash("sha256").update(JSON.stringify([session.id, session.epoch, scope, q, limit, order || "natural", extra, "drama_episodes.v1"])).digest("hex");
         const offset = Number(cursor(url.searchParams.get("cursor"), fp).offset || 0);
         if (!Number.isInteger(offset) || offset < 0) throw new AuthError("cursor_invalid", 400);
         const page = await drama.episodes(scope, session, { q, limit, offset, read: readMode === "all" ? "all" : undefined, order: order === "recent" ? "recent" : undefined, extra });
@@ -678,6 +1011,66 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           refresh: url.searchParams.get("refresh") === "1",
           clientOrigins: { muweave: config.clients?.muweave?.enabled === false ? undefined : config.clients?.muweave?.origin },
         })));
+      }
+      if (r.method === "GET" && path === "/production") {
+        // One episode with episode_ref, the whole scope without; the same line the episode studio and project view draw.
+        const episodeRef = url.searchParams.get("episode_ref");
+        const scaenaRef = url.searchParams.get("scaena_episode_ref");
+        const { line } = await production.read(scope, session, { ...(episodeRef !== null ? { episode_ref: episodeRef } : {}), ...(scaenaRef !== null ? { scaena_episode_ref: scaenaRef } : {}) });
+        return json(withEpoch(session, line));
+      }
+      if (r.method === "GET" && path === "/episode-production") {
+        // Scaena's stored production summary for one episode, through the scope's observer task connection. Read-only.
+        const episodeRef = url.searchParams.get("episode_ref") || "";
+        const scaenaRef = url.searchParams.get("scaena_episode_ref");
+        if (!validDramaRef(episodeRef) || (scaenaRef !== null && !validDramaRef(scaenaRef))) throw new AuthError("invalid_reference", 400);
+        if (!session.personal) return json(withEpoch(session, { state: "unavailable", reason: "personal_connection_required" }));
+        return json(withEpoch(session, await episodeProduction.read(scope, episodeRef, scaenaRef || undefined, session)));
+      }
+      const episodeArtifactAccessRoute = path.match(/^\/episode-production\/artifacts\/([^/]+)\/access$/);
+      if (episodeArtifactAccessRoute) {
+        if (r.method !== "POST") return methodNotAllowed(["POST"]);
+        if (!session.personal) throw new AuthError("personal_connection_required", 403);
+        const artifactRef = pathParam(episodeArtifactAccessRoute[1]);
+        if (!artifactRef || artifactRef.length > 512 || /[\/\\\x00-\x1f\x7f-\x9f]/.test(artifactRef)) throw new AuthError("invalid_reference", 400);
+        auth.csrf(r, session);
+        const raw = await r.text();
+        if (raw.length > 4096) throw new AuthError("invalid_request", 400);
+        const body = jsonObject<Record<string, unknown>>(raw, "invalid_request");
+        const allowed = ["episode_ref", "connection", "expected_revision", "digest", "purpose"];
+        if (
+          Object.keys(body).some((key) => !allowed.includes(key)) ||
+          typeof body.episode_ref !== "string" || !validDramaRef(body.episode_ref) ||
+          typeof body.connection !== "string" || !body.connection || body.connection.length > 512 ||
+          typeof body.expected_revision !== "string" || !body.expected_revision || body.expected_revision.length > 512 ||
+          typeof body.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(body.digest) ||
+          !["preview", "download"].includes(body.purpose as string)
+        ) throw new AuthError("invalid_request", 400);
+        const connection = tasks.connections(scope).find((candidate) => candidate.id === body.connection && candidate.owner === "scaena" && candidate.enabled && candidate.allow_content !== false);
+        if (!connection) throw new AuthError("connection_forbidden", 403);
+        const target = {
+          connection: connection.id,
+          episode_ref: body.episode_ref,
+          artifact_ref: artifactRef,
+          expected_revision: body.expected_revision,
+          digest: body.digest,
+        } as const;
+        const granted = await audited({
+          actor: identityOf(session),
+          sessionId: session.id,
+          scopeId: scope.id,
+          owner: connection.owner,
+          targetRef: artifactRef,
+          purpose: body.purpose as string,
+          action: "episode.artifact_access",
+        }, () => media.issueEpisode(session, scope, target, body.purpose as "preview" | "download"));
+        return json(withEpoch(session, granted));
+      }
+      if (r.method === "GET" && path === "/task-reviews") {
+        // Eikona's review decision and counts for up to ten of this scope's tasks, through each task's observer connection. Read-only.
+        const keys = url.searchParams.getAll("task_key");
+        if (!session.personal) return json(withEpoch(session, { reviews: {}, reason: "personal_connection_required" }));
+        return json(withEpoch(session, { reviews: await taskReviews.readMany(scope, keys) }));
       }
       if (r.method === "GET" && path === "/owner-projects") {
         // Tool projects across every scope of this identity, with local names; no owner calls.
@@ -707,7 +1100,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         const limit = Number(url.searchParams.get("limit") || 50);
         const cursor = url.searchParams.get("cursor");
         if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor && !/^\d+$/.test(cursor))) throw new AuthError("invalid_query", 400);
-        const result = collectionStore.list(scope.id, {
+        const result = collectionStore.list(collectionScope, {
           recordKind: url.searchParams.get("record_kind") || undefined,
           collectionState: url.searchParams.get("collection_state") || undefined,
           sourceState: url.searchParams.get("source_state") || undefined,
@@ -718,18 +1111,18 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           limit,
           cursor: cursor ? Number(cursor) : 0,
         });
-        const localCoverage = collectionStore.coverage(scope.id);
+        const localCoverage = collectionStore.coverage(collectionScope);
         const connection = auctraConnection(config, scope, session);
-        const lastSync = connection.state === "target_missing" || connection.state === "binding_missing" ? undefined : collectionStore.cursor(scope.id, collectionFingerprint(config, scope));
+        const lastSync = connection.state === "target_missing" || connection.state === "binding_missing" ? undefined : collectionStore.cursor(collectionScope, collectionFingerprint(config, scope));
         return json(withEpoch(session, {
-          schema_version: "yeisme.auctra.collection.page.v1", owner: "auctra", scope: scope.id, observed_at: localCoverage.observed_at || new Date().toISOString(), coverage: config.collection?.auctra ? localCoverage.state : "unknown", rows: result.rows, total: result.total, ...(result.nextCursor !== undefined ? { next_cursor: String(result.nextCursor) } : {}),
+          schema_version: "yeisme.auctra.collection.page.v1", owner: "auctra", scope: scope.id, observed_at: localCoverage.observed_at || new Date().toISOString(), coverage: config.collection?.auctra ? localCoverage.state : "unknown", rows: result.rows.map((row) => ({ ...row, scope: scope.id })), total: result.total, ...(result.nextCursor !== undefined ? { next_cursor: String(result.nextCursor) } : {}),
           connection,
           ...(lastSync ? { last_sync: { at: lastSync.lastSuccessAt, complete: lastSync.coverage !== "partial", ...(lastSync.reason ? { reason: lastSync.reason } : {}) } } : {}),
         }));
       }
       const collectionRecordMatch = path.match(/^\/auctra\/collection\/records\/([^/]+)$/);
       if (r.method === "GET" && collectionRecordMatch) {
-        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.record.v1", owner: "auctra", scope: scope.id, observed_at: new Date().toISOString(), record: collectionStore.get(scope.id, pathParam(collectionRecordMatch[1])) }));
+        return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.record.v1", owner: "auctra", scope: scope.id, observed_at: new Date().toISOString(), record: collectionStore.get(collectionScope, pathParam(collectionRecordMatch[1])) }));
       }
       if (r.method === "POST" && path === "/auctra/collection/sync") {
         auth.csrf(r, session);
@@ -747,6 +1140,16 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           return synced;
         });
         return json(withEpoch(session, { schema_version: "yeisme.auctra.collection.sync.v1", sync_ref: "sync_" + randomBytes(12).toString("hex"), scope: scope.id, ...result }), 200);
+      }
+      if (r.method === "POST" && path === "/auctra/authoring") {
+        if (scope.id.startsWith("project_")) throw new AuthError("shared_collection_read_only", 403);
+        auth.csrf(r, session);
+        const raw = await r.text();
+        if (raw.length > 128 * 1024) throw new AuthError("invalid_request", 413);
+        const body = jsonObject<{ operation_id?: string; args?: Record<string, unknown> }>(raw || "{}", "invalid_request");
+        if (typeof body.operation_id !== "string" || !body.operation_id || !body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new AuthError("invalid_request", 400);
+        const result = await auctra.authoring(body.operation_id, body.args, scope, session);
+        return json(withEpoch(session, result), result.status === "success" ? 200 : 503);
       }
       const subject = session.issuer + "|" + session.subject;
       if (path === "/notifications" || path.startsWith("/notifications/")) {
@@ -801,16 +1204,25 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             if (!candidate || typeof candidate.task_key !== "string") continue;
             try { verified.push(await tasks.detail(candidate.task_key, scope)); } catch { verificationComplete = false; }
           }
-          const observed = verified.filter((task) => attentionStates.has(task.state)).map((task) => failureFact(scope.id, task));
+          const nowMs = services.clock();
+          const observed = verified.flatMap((task) => [
+            ...(attentionStates.has(task.state) ? [failureFact(scope.id, task)] : []),
+            ...(livenessFact(scope.id, task, nowMs) ? [livenessFact(scope.id, task, nowMs)!] : []),
+          ]);
           // Open reminders whose task the browser now lists as not failing: confirm with the owner before marking them
           // recovered, so a stale page can never silence a failure. At most 20 extra owner reads per sync.
           const present = Array.isArray(body.present_task_keys) ? body.present_task_keys.filter((key) => typeof key === "string").slice(0, 4000) : [];
-          const failing = new Set(body.tasks.map((task) => taskIdentityOf(String(task?.task_key || ""))));
+          const failing = new Set(body.tasks.filter((task) => attentionStates.has(String(task?.state || ""))).map((task) => taskIdentityOf(String(task?.task_key || ""))));
           const candidates = new Set(notifications.recoveryCandidates(scope.id, subject));
           const recovered: string[] = [];
           for (const key of present.filter((key) => candidates.has(taskIdentityOf(key)) && !failing.has(taskIdentityOf(key))).slice(0, 20)) {
             try {
               const task = await tasks.detail(key, scope);
+              const live = livenessFact(scope.id, task, nowMs);
+              if (live) observed.push(live);
+              // Recovery of a prior failure is independent from the local
+              // liveness reminder for a still-running task. The latter stays
+              // open until a later owner read is fresh or terminal.
               if (!attentionStates.has(task.state)) recovered.push(failureFact(scope.id, task).task_identity);
             } catch { verificationComplete = false; }
           }
@@ -820,6 +1232,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             presentTaskKeys: Array.isArray(body.present_task_keys) ? present : undefined,
             complete: false, // A browser page cannot establish complete owner coverage.
             recovered,
+            now: new Date(nowMs).toISOString(),
           });
           return json(withEpoch(session, { ...result, ...notificationPage(), owner_writes: 0, verification_complete: verificationComplete }));
         }
@@ -904,10 +1317,25 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         try { body = JSON.parse(raw) as ActionPreviewRequest; } catch { throw new AuthError("invalid_action_request", 400); }
         if (!body || body.scope_id !== scope.id || typeof body.owner !== "string" || typeof body.target_kind !== "string" || typeof body.target_ref !== "string" || typeof body.action !== "string" || typeof body.expected_revision !== "string" || typeof body.idempotency_key !== "string" || !body.input || typeof body.input !== "object") throw new AuthError("invalid_action_request", 400);
         const preview = await audited({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.preview", owner: body.owner, targetRef: body.target_ref, meta: { action: body.action, target_kind: body.target_kind } }, async () => {
-          authorizeAction(session, body.action);
+          authorizeAction(session, body.action, scope);
           if (isCollaborationAction(body.action)) collaboration.authorize(session, body.action, body.target_ref, body.input);
+          if (body.authorization_context !== undefined) throw new AuthError("invalid_action_request", 400);
+          if (body.action === "project.collection_binding.set") {
+            if (body.target_kind !== "project" || body.owner !== "control-center" || body.target_ref !== scope.id) throw new AuthError("scope_mismatch", 403);
+            if (String(collaboration.project(session, scope.id).revision) !== body.expected_revision) throw new AuthError("revision_conflict", 409);
+            body.authorization_context = collaboration.collectionBindingContext(session, body.target_ref, body.input.binding);
+          }
           if (body.action === "generation.batch.create") body.input.items = await generationBatches.verify(session, body.target_ref, body.input.items);
           if (body.action === "provider_runs.create" && scope.id.startsWith("project_")) throw new AuthError("project_generation_use_batch_contract", 403);
+          if (body.action === "prompts.save") {
+            if (!promptOwners.includes(body.owner as PromptOwner)) throw new AuthError("invalid_prompt_owner", 400);
+            const input = promptWrite(body.input, body.owner as PromptOwner);
+            if (body.expected_revision !== String(input.expected_version) || body.target_ref !== (input.id || "new")) throw new AuthError("prompt_conflict", 409);
+            body.input = { ...input };
+          }
+          if (body.action === "prompts.recipe.create" || body.action === "prompts.recipe.revise") {
+            validateRecipeProject(scope, body.input.owner, body.input.project_ref);
+          }
           if (body.action === "owner_project.connect") await checkToolProject(session, scope, body.input || {});
           if (body.action === "owner_project.disconnect") registeredIn(session, scope, body.input?.connection_id);
           return actions.preview(body, identityOf(session));
@@ -923,17 +1351,45 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         if (!body || body.scope_id !== scope.id || typeof body.preview_ref !== "string" || typeof body.preview_digest !== "string" || typeof body.idempotency_key !== "string") throw new AuthError("invalid_action_request", 400);
         const receipt = await audited({ actor: session.issuer + "|" + session.subject, sessionId: session.id, scopeId: scope.id, action: "actions.confirm", targetRef: body.preview_ref }, async (settle) => {
           const original = actions.record(body.preview_ref, identityOf(session), scope.id);
-          authorizeAction(session, original.request.action);
+          authorizeAction(session, original.request.action, scope);
+          if (original.request.action === "prompts.recipe.create" || original.request.action === "prompts.recipe.revise") {
+            validateRecipeProject(scope, original.request.input.owner, original.request.input.project_ref);
+          }
           if (isCollaborationAction(original.request.action)) collaboration.authorize(session, original.request.action, original.request.target_ref, original.request.input);
-          const local = isCollaborationAction(original.request.action) && !["generation.input.prepare", "generation.batch.submit", "generation.batch.reconcile"].includes(original.request.action);
+          const local = original.request.action.startsWith("prompts.collection.") || original.request.action.startsWith("prompts.recipe.") || (isCollaborationAction(original.request.action) && !["generation.input.prepare", "generation.batch.submit", "generation.batch.reconcile"].includes(original.request.action));
           if (original.request.action === "generation.batch.create") original.request.input.items = await generationBatches.verify(session, original.request.target_ref, original.request.input.items);
           const done = local ? actions.confirmLocal(body, (record) => {
+            if (record.request.action.startsWith("prompts.collection.")) {
+              const input = record.request.input;
+              if (record.request.action === "prompts.collection.set") {
+                if (!Array.isArray(input.links) || typeof input.remove !== "boolean") throw new AuthError("invalid_collection_link", 400);
+                for (const link of input.links as PromptLink[]) if (!link || !promptOwners.includes(link.owner) || scope.owners[link.owner]?.project !== link.project) throw new AuthError("scope_mismatch", 403);
+              }
+              const result = record.request.action === "prompts.collection.create" ? promptCollectionsStore.create(scope.id, input.name, record.request.idempotency_key) : promptCollectionsStore.set(scope.id, record.request.target_ref, input.links, input.remove === true);
+              return ActionService.succeeded(record, { owner_state: "updated", result_refs: [result] });
+            }
+            if (record.request.action.startsWith("prompts.recipe.")) {
+              const input = record.request.input;
+              const result = record.request.action === "prompts.recipe.create"
+                ? promptRecipesStore.create(scope.id, identityOf(session), input as unknown as PromptRecipeInput)
+                : record.request.action === "prompts.recipe.revise"
+                  ? promptRecipesStore.revise(scope.id, identityOf(session), record.request.target_ref, Number(input.expected_revision), input as unknown as PromptRecipeInput)
+                  : promptRecipesStore.archive(scope.id, record.request.target_ref, Number(input.expected_revision));
+              return ActionService.succeeded(record, { owner_state: "updated", result_refs: [result.recipe_ref] });
+            }
+
+            if (record.request.action === "project.collection_binding.set" && record.request.authorization_context !== collaboration.collectionBindingContext(session, record.request.target_ref, record.request.input.binding)) throw new AuthError("collection_binding_changed", 409);
             const result = collaboration.execute(session, record.request.action as import("../src/shared/collaboration").CollaborationAction, record.request.target_ref, record.request.expected_revision, record.request.input);
             announceProject(session, record, result);
             return ActionService.succeeded(record, { owner_state: "updated", result_refs: result });
           }, identityOf(session)) : await actions.confirm(body, async (record: PreviewRecord): Promise<ActionReceipt> => {
             if (record.preview.availability !== "available") return ActionService.unavailable(record, record.preview.blockers[0] || "action_unavailable");
             const input = record.request.input;
+            if (record.request.action === "prompts.save") {
+              const result = await readers.promptLibrary(record.request.owner as PromptOwner, session, scope, {}, "save", typeof input.id === "string" ? input.id : "", input, record.request.idempotency_key);
+              if (!("summary" in result) || !result.summary) throw new AuthError("prompt_contract_invalid", 502);
+              return ActionService.succeeded(record, { operation_ref: result.summary.id, owner_state: "saved", result_refs: [result.summary.id] });
+            }
             if (record.request.action === "generation.input.prepare") {
               const items = await generationBatches.prepare(session, record.request.target_ref, input, record.request.idempotency_key);
               return ActionService.succeeded(record, { generation_items: items, result_refs: items.map((v) => v.input_ref) });
@@ -965,16 +1421,17 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
               return ActionService.outcome(record, run.state === "unknown" ? "unknown" : run.state === "failed" ? "failed" : "succeeded", { owner_state: run.state, error_code: run.error_code || null, observed_at: run.observed_at, operation_ref: run.run_ref, result_refs: run.output_refs });
             }
             if (record.request.owner === "control-center" && record.request.action.startsWith("collection.record.")) {
+              if (scope.id.startsWith("project_")) collaboration.project(session, scope.id, "creator");
               const expected = String(input.expected_revision || "");
               const actor = session.issuer + "|" + session.subject;
               const recordRef = record.request.target_ref;
               const result = record.request.action === "collection.record.confirm"
-                ? collectionStore.confirm(scope.id, recordRef, expected, actor)
+                ? collectionStore.confirm(collectionScope, recordRef, expected, actor)
                 : record.request.action === "collection.record.archive"
-                  ? collectionStore.archive(scope.id, recordRef, expected, actor)
+                  ? collectionStore.archive(collectionScope, recordRef, expected, actor)
                   : record.request.action === "collection.record.labels.set"
-                    ? collectionStore.labels(scope.id, recordRef, expected, actor, Array.isArray(input.labels) ? input.labels.filter((value): value is string => typeof value === "string") : [])
-                    : collectionStore.note(scope.id, recordRef, expected, actor, typeof input.note === "string" ? input.note : "");
+                    ? collectionStore.labels(collectionScope, recordRef, expected, actor, Array.isArray(input.labels) ? input.labels.filter((value): value is string => typeof value === "string") : [])
+                    : collectionStore.note(collectionScope, recordRef, expected, actor, typeof input.note === "string" ? input.note : "");
               return ActionService.succeeded(record, { owner_state: result.collection_state, operation_ref: recordRef, result_refs: [recordRef] });
             }
             if (record.request.owner === "control-center" && record.request.action === "owner_project.connect") {
@@ -1013,7 +1470,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             }
             if (record.request.action === "admin.user.revoke") {
               if (typeof input.username !== "string") throw new AuthError("invalid_action_input", 400);
-              await auth.revokePersonalUser(input.username);
+              await auth.revokePersonalUser(input.username, session.subject);
               return ActionService.succeeded(record, { owner_state: "revoked", operation_ref: input.username });
             }
             return ActionService.unavailable(record, "owner_action_adapter_not_configured");
@@ -1044,6 +1501,47 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
         const observe = session.personal && url.searchParams.get("observe") === "1";
         const [observations, projections] = await Promise.all([observe ? tasks.observe(scope) : [], observe ? openTools.projections(scope) : []]);
         return json(withEpoch(session, serviceDirectory(config, scope, session, observations, connectionCatalog.inScope(scope), { configured: openTools.inScope(scope), projections })));
+      }
+      if (path.startsWith("/gateway/")) {
+        if (!session.personal) throw new AuthError("personal_connection_required", 403);
+        const connection = gatewayConnection(config, scope);
+        const monitor = new GatewayMonitorService(connection);
+        if (r.method === "GET" && path === "/gateway/monitor") return json(withEpoch(session, await monitor.snapshot()));
+        if (r.method === "GET" && path === "/gateway/sessions") return json(withEpoch(session, await monitor.sessions()));
+        if (r.method === "GET" && path === "/gateway/calls") {
+          const query = new URLSearchParams();
+          for (const key of ["before", "limit", "state", "backend", "tool", "session_ref"]) { const value = url.searchParams.get(key); if (value) query.set(key, value.slice(0, 160)); }
+          return json(withEpoch(session, await monitor.calls(query.toString())));
+        }
+        const callMatch = path.match(/^\/gateway\/calls\/([^/]+)$/);
+        if (r.method === "GET" && callMatch) return json(withEpoch(session, await monitor.callDetail(pathParam(callMatch[1]))));
+        if (r.method === "GET" && path === "/gateway/client-presets") return json(withEpoch(session, await monitor.presets()));
+        if (r.method === "GET" && path === "/gateway/events") {
+          const epoch = session.epoch;
+          const upstream = await monitor.events(url.searchParams.get("after_seq") || r.headers.get("Last-Event-ID") || undefined, r.signal);
+          const authorized = () => {
+            try { const current = auth.current(r); return current.id === session.id && current.epoch === epoch && gatewayConnection(config, scoped(current, scope.id)) === connection; }
+            catch { return false; }
+          };
+          return new Response(gatewayEventStream(upstream.body!, r.signal, authorized), { status: 200, headers: { "Cache-Control": "no-cache, no-store", Connection: "keep-alive", "Content-Type": "text/event-stream", "X-Accel-Buffering": "no" } });
+        }
+        if (path === "/gateway/plans") {
+          if (r.method !== "POST") return methodNotAllowed(["POST"]);
+          if (auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
+          auth.csrf(r, session);
+          const body = jsonObject<Record<string, unknown>>(await r.text(), "invalid_gateway_plan");
+          if (typeof body.action !== "string" || typeof body.target_ref !== "string" || typeof body.expected_revision !== "string" || typeof body.idempotency_key !== "string" || !body.input || typeof body.input !== "object" || Array.isArray(body.input)) throw new AuthError("invalid_gateway_plan", 400);
+          return json(withEpoch(session, await monitor.plan({ action: body.action, target_ref: body.target_ref, expected_revision: body.expected_revision, idempotency_key: body.idempotency_key, input: body.input })), 202);
+        }
+        const planMatch = path.match(/^\/gateway\/plans\/([^/]+)\/apply$/);
+        if (r.method === "POST" && planMatch) {
+          if (auth.role(session) !== "admin") throw new AuthError("control_center_admin_required", 403);
+          auth.csrf(r, session);
+          const body = jsonObject<Record<string, unknown>>(await r.text(), "invalid_gateway_apply");
+          if (typeof body.plan_digest !== "string" || typeof body.idempotency_key !== "string" || (body.approval_id !== undefined && typeof body.approval_id !== "string")) throw new AuthError("invalid_gateway_apply", 400);
+          return json(withEpoch(session, await monitor.apply(pathParam(planMatch[1]), body)), 202);
+        }
+        return methodNotAllowed(["GET", "POST"]);
       }
       if (r.method === "GET" && path === "/capabilities")
         return json(withEpoch(session, { scope: scope.id, capabilities: await providers.capabilities(scope) }));
@@ -1306,7 +1804,7 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
           return json(granted);
         }
         const t = path.match(
-          /^\/tasks\/([^/]+)(\/events|\/cancel|\/cancel-receipt)?$/,
+          /^\/tasks\/([^/]+)(\/events|\/cancel|\/cancel-receipt|\/prompt:read)?$/,
         );
         if (t) {
           const key = pathParam(t[1]);
@@ -1329,6 +1827,36 @@ export function createControlCenter(config: ServerConfig, deps: ControlCenterDep
             if (!/^[-a-zA-Z0-9_]{16,100}$/.test(receiptKey))
               throw new AuthError("invalid_query", 400);
             return json(await tasks.cancel(key, scope, "", receiptKey, true));
+          }
+          if (r.method === "POST" && t[2] === "/prompt:read") {
+            auth.csrf(r, session);
+            const raw = await r.text();
+            if (raw.length > 4096) throw new AuthError("invalid_request", 400);
+            let b;
+            try {
+              b = JSON.parse(raw);
+            } catch {
+              throw new AuthError("invalid_request", 400);
+            }
+            if (
+              !b ||
+              typeof b.capture_ref !== "string" ||
+              !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(b.capture_ref) ||
+              typeof b.purpose !== "string" ||
+              !b.purpose.trim() ||
+              b.purpose.trim().length > 200 ||
+              Object.keys(b).some((k) => !["capture_ref", "purpose"].includes(k))
+            )
+              throw new AuthError("invalid_request", 400);
+            const result = await audited({
+              actor: session.issuer + "|" + session.subject,
+              sessionId: session.id,
+              scopeId: scope.id,
+              action: "tasks.prompt_read",
+              targetRef: key,
+              purpose: b.purpose.trim(),
+            }, () => tasks.promptContent(key, scope, b.capture_ref, b.purpose.trim()));
+            return json(result);
           }
           if (r.method === "POST" && t[2] === "/cancel") {
             auth.csrf(r, session);

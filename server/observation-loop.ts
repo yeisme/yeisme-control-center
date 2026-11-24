@@ -2,7 +2,7 @@ import type { OpenToolKind, OpenToolProjection } from "../src/shared/open-tools"
 import type { TaskSnapshot } from "../src/task-observation";
 import type { ScopeBinding, ServerConfig, TaskConnection } from "./contracts";
 import type { ControlState } from "./db/control-state";
-import { attentionStates, failureFact, type FailureFact, type NotificationStore } from "./notifications";
+import { attentionStates, failureFact, livenessFact, type FailureFact, type NotificationStore } from "./notifications";
 import { observationBounds, observationSettings } from "./observation-config";
 import { advance, failed, restart, settle, startOfScan, type FirstPages, type ListMode, type RollingPosition } from "./observation-scan";
 import type { OpenToolService } from "./open-tools/service";
@@ -636,13 +636,20 @@ export class ObservationLoop {
     const entries = [...seen.values()];
     const candidates = new Set(notifications.recoveryCandidates(scopeId, recipient));
     const recent = entries.filter(({ task, failing }) => failing && Date.parse(task.updated_at || task.created_at || "") > floor);
+    const liveness = entries.flatMap(({ task }) => {
+      const fact = livenessFact(scopeId, task, nowMs);
+      return fact ? [fact] : [];
+    });
     return notifications.sync({
       scopeId,
       sessionId: backgroundSession,
       subject: recipient,
-      observed: recent.map((entry) => entry.fact),
+      observed: [...recent.map((entry) => entry.fact), ...liveness],
       presentTaskKeys: rows.map((task) => task.task_key!),
       complete: false,
+      // A stale running task can recover a prior failure while its independent
+      // liveness reminder remains open until the owner updates it. The store
+      // applies this identity to each reminder category independently.
       recovered: entries.filter(({ fact, failing }) => !failing && candidates.has(fact.task_identity)).map(({ fact }) => fact.task_identity),
       now: iso(nowMs),
     });

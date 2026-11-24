@@ -62,6 +62,18 @@ function slotEntries(config: ServerConfig, scope?: ScopeBinding, connections?: T
     const tool = config.open_tools?.[kind];
     if (!tool || (scope && !scope.open_tools?.includes(kind))) continue;
     entries.push({ id: `open_tool:${kind}`, owner: kind, label: tool.label || openToolNames[kind], enabled: tool.enabled !== false, target: tool as unknown as Record<string, unknown>, refKey: "credential_ref", ...lifecycle });
+    if (kind === "gateway" && text((tool as { management_credential_ref?: string }).management_credential_ref)) {
+      entries.push({
+        id: "open_tool:gateway:management",
+        owner: kind,
+        label: `${tool.label || openToolNames[kind]} 管理`,
+        enabled: tool.enabled !== false,
+        target: tool as unknown as Record<string, unknown>,
+        refKey: "management_credential_ref",
+        expiresKey: "management_credential_expires_at",
+        issuedKey: "management_credential_issued_at",
+      });
+    }
   }
   const bound = (owner: string) => !scope || !!(scope.owners as Record<string, unknown>)[owner];
   for (const owner of providerOwners) {

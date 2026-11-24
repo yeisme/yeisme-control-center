@@ -18,6 +18,9 @@ import { actionNames } from "../src/shared/action-contract";
  
 
 const actionDescriptors: ActionDescriptor[] = [
+ ...(["prompts.collection.create", "prompts.collection.set"] as const).map(action => ({ action, owner: "control-center" as const, target_kinds: ["prompt_collection"], risk_tier: "write" as const, availability: "available" as const })),
+ ...(["prompts.recipe.create", "prompts.recipe.revise", "prompts.recipe.archive"] as const).map(action => ({ action, owner: "control-center" as const, target_kinds: ["prompt_recipe"], risk_tier: "write" as const, availability: "available" as const })),
+ ...(["eikona", "sonora", "scaena"] as const).map(owner => ({ action: "prompts.save" as const, owner, target_kinds: ["prompt"], risk_tier: "write" as const, availability: "available" as const })),
   ...collaborationActions.map((action): ActionDescriptor => ({ action, owner: "control-center", target_kinds: ["organization", "project"], risk_tier: action === "generation.batch.submit" ? "paid" : "write", availability: "available" })),
   { action: "task.cancel", owner: "control-center", target_kinds: ["task"], risk_tier: "write", availability: "available" },
   { action: "provider_runs.create", owner: "control-center", target_kinds: ["provider_run"], risk_tier: "paid", availability: "available" },
@@ -43,6 +46,27 @@ const actionDescriptors: ActionDescriptor[] = [
   // Reuses a configured connection's credential for another owner project; the owner decides whether it is accepted.
   { action: "owner_project.connect", owner: "control-center", target_kinds: ["owner_project"], risk_tier: "admin", availability: "available" },
   { action: "owner_project.disconnect", owner: "control-center", target_kinds: ["owner_project"], risk_tier: "admin", availability: "available" },
+  // Gateway writes stay needs_contract until a management credential is configured and the confirm path calls plan/apply.
+  ...([
+    "gateway.backend.enable",
+    "gateway.backend.disable",
+    "gateway.backend.exposure.patch",
+    "gateway.group.profile.upsert",
+    "gateway.tools.refresh",
+    "gateway.runtime.reload",
+    "gateway.client.mode.set",
+    "gateway.approval.decide",
+    "gateway.token.issue",
+    "gateway.token.revoke",
+    "gateway.config.rollback",
+  ] as const).map((action): ActionDescriptor => ({
+    action,
+    owner: "gateway",
+    target_kinds: ["gateway"],
+    risk_tier: "admin",
+    availability: "needs_contract",
+    reason: "gateway_management_credential_not_configured",
+  })),
 ];
 
 interface PreviewRecord {
@@ -82,6 +106,7 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
     "team.create": ["name"], "team.members.set": ["team_id", "member_ids"],
     "project.create": ["name", "team_id", "admin_member_id", "bindings"], "project.update": ["name", "hidden", "generation_enabled", "budget_cap", "currency"],
     "project.members.set": ["grants"], "project.bindings.set": ["bindings"],
+    "project.collection_binding.set": ["binding"],
     "folder.create": ["name", "parent_id"], "folder.rename": ["name", "folder_id", "folder_revision"],
     "item.move": ["folder_id", "item_ids"],
     "generation.input.prepare": ["owner", "rows"],
@@ -90,6 +115,12 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
     "task.cancel": ["confirm", "expected_revision", "idempotency_key"],
     "provider_runs.create": ["mode", "owner", "modality", "model_ref", "scope_id", "project_ref", "prompt", "budget_cap", "idempotency_key", "trace_ref", "generation_mode", "references", "timeline", "output", "variant_count"],
     "provider_runs.reconcile": ["run_ref"],
+ "prompts.collection.create": ["name"],
+ "prompts.collection.set": ["links", "remove"],
+ "prompts.save": ["id", "title", "kind", "text", "tags", "archived", "expected_version", "source_ref"],
+ "prompts.recipe.create": ["owner", "project_ref", "title", "kind", "tags", "notes", "visibility", "source", "facets", "content_state"],
+ "prompts.recipe.revise": ["owner", "project_ref", "title", "kind", "tags", "notes", "visibility", "source", "facets", "content_state", "expected_revision"],
+ "prompts.recipe.archive": ["expected_revision"],
     "review.request_changes": ["reason", "version_ref"],
     "review.approve": ["version_ref", "reason"],
     "delivery.prepare": ["asset_refs", "reason"],
@@ -107,12 +138,24 @@ function sanitizeInput(action: ControlAction, input: unknown): Record<string, un
     "project.metadata.unhide": ["expected_revision"],
     "owner_project.connect": ["template_connection_id", "project_ref", "label"],
     "owner_project.disconnect": ["connection_id"],
+    "gateway.backend.enable": ["backend"],
+    "gateway.backend.disable": ["backend"],
+    "gateway.backend.exposure.patch": ["backend", "description", "timeout_seconds", "restart_policy", "idle_seconds", "namespace", "expose_tools", "hide_tools", "group_ids"],
+    "gateway.group.profile.upsert": ["group_id", "description"],
+    "gateway.tools.refresh": ["backend"],
+    "gateway.runtime.reload": [],
+    "gateway.client.mode.set": ["mode"],
+    "gateway.approval.decide": ["approval_ref", "decision"],
+    "gateway.token.issue": ["label", "scopes"],
+    "gateway.token.revoke": ["token_ref"],
+    "gateway.config.rollback": ["revision"],
   };
   const record = input as Record<string, unknown>;
   const strictRows = (key: string, fields: string[], maximum: number) => {
     if (record[key] === undefined) return;
     if (!Array.isArray(record[key]) || record[key].length > maximum || record[key].some((v) => !v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).some((k) => !fields.includes(k)))) throw new AuthError("invalid_action_input", 400);
   };
+  if (action === "project.collection_binding.set" && record.binding !== null && (!record.binding || typeof record.binding !== "object" || Array.isArray(record.binding) || Object.keys(record.binding).some((key) => !["owner", "source_scope", "project_ref"].includes(key)))) throw new AuthError("invalid_collection_binding", 400);
   if (action === "project.members.set") strictRows("grants", ["subject_type", "subject_id", "role"], 200);
   if (action === "project.bindings.set" || action === "project.create") strictRows("bindings", ["owner", "project_ref", "source_scope", "connection_ids"], 10);
   if (action === "generation.input.prepare") strictRows("rows", ["id", "prompt", "prompt_ref", "model_ref", "size", "aspect", "candidate_count", "references", "folder_id", "project_ref"], 50);
@@ -165,7 +208,7 @@ export class ActionService {
     // Bodies belong to owners; persist only the ref-based collaboration commands.
     const safe = !["provider_runs.create", "admin.user.create"].includes(input.action);
     if (safe) {
-      const persistedInput = input.action === "generation.input.prepare" ? { owner: normalizedInput.owner, input_digest: digest(normalizedInput) } : normalizedInput;
+      const persistedInput = (input.action === "generation.input.prepare" || input.action === "prompts.save") ? { owner: normalizedInput.owner, input_digest: digest(normalizedInput) } : normalizedInput;
       this.db.insert(actionRecords).values({ id: previewRef, context, key: idempotencyKey, requestDigest, request: JSON.stringify({ ...input, input: persistedInput }), preview: JSON.stringify({ ...preview, normalized_input: persistedInput }), createdAt: Date.now() }).run();
     }
     return preview;
@@ -197,6 +240,7 @@ export class ActionService {
     if (preview.receiptPromise) return preview.receiptPromise;
     if (preview.request.action === "generation.input.prepare" && !Array.isArray(preview.request.input.rows)) throw new AuthError("generation_input_session_expired", 410);
     if (stored?.started) return Promise.resolve({ ...ActionService.unavailable(preview, "action_reconcile_required"), state: "unknown" });
+    if (preview.request.action === "prompts.save" && !preview.request.input.title) throw new AuthError("prompt_input_session_expired", 410);
     if (stored) this.db.update(actionRecords).set({ started: true }).where(eq(actionRecords.id, stored.id)).run();
     preview.receiptPromise = execute(preview).then((receipt) => {
       preview.receiptRef = receipt.receipt_ref;
@@ -204,12 +248,25 @@ export class ActionService {
       this.receiptScopes.set(receipt.receipt_ref, preview.request.scope_id);
       this.receiptActors.set(receipt.receipt_ref, actor);
       if (stored) this.db.update(actionRecords).set({ receipt: JSON.stringify(receipt) }).where(eq(actionRecords.id, stored.id)).run();
+      if (preview.request.action === "prompts.save") this.previews.delete(input.preview_ref);
       return receipt;
     }).catch((error) => {
       preview.receiptPromise = undefined;
+      if (preview.request.action === "prompts.save") this.previews.delete(input.preview_ref);
       throw error;
     });
     return preview.receiptPromise;
+  }
+
+  reconcilePrompt(previewRef: string, scope: string, actor: string, promptID: string): ActionReceipt {
+    const record = this.record(previewRef, actor, scope);
+    const stored = this.db.select().from(actionRecords).where(eq(actionRecords.id, previewRef)).get();
+    if (record.request.action !== "prompts.save" || !stored?.started || (record.request.target_ref !== "new" && record.request.target_ref !== promptID)) throw new AuthError("prompt_reconcile_conflict", 409);
+    if (stored.receipt) { const previous = JSON.parse(stored.receipt) as ActionReceipt; if (previous.state === "succeeded") return previous; }
+    const receipt = ActionService.succeeded(record, { operation_ref: promptID, owner_state: "saved", result_refs: [promptID] });
+    this.db.update(actionRecords).set({ receipt: JSON.stringify(receipt) }).where(eq(actionRecords.id, previewRef)).run();
+    this.previews.delete(previewRef);
+    return receipt;
   }
 
   receipt(receiptRef: string, scopeId?: string, actor = "legacy"): ActionReceipt {

@@ -366,7 +366,7 @@ export function normalizeChannels(owner: CatalogOwner, raw: unknown): CatalogCha
       protocol: str(channel.protocol, 80),
       models: strings(channel.models, 40, 200),
       capabilities: strings(channel.capabilities, 20, 80),
-      status: (["ready", "available", "enabled"].includes(status) ? "ready" : ["blocked", "disabled", "unavailable"].includes(status) ? "blocked" : "unknown") as ChannelStatus,
+      status: (["ready", "available", "enabled"].includes(status) ? "ready" : status === "configured" ? "configured" : ["blocked", "disabled", "unavailable"].includes(status) ? "blocked" : "unknown") as ChannelStatus,
       observed_at: str(channel.observed_at, 40) === "unknown" ? null : str(channel.observed_at, 40),
       routing: routing ? { priority: num(routing.priority), weight: num(routing.weight), default: bool(routing.default), selection_mode: str(routing.selection_mode, 80) } : null,
       pricing: pricing(channel.pricing),
@@ -391,6 +391,8 @@ export function normalizeModels(owner: CatalogOwner, raw: unknown, source: strin
     if (seen.has(id)) return [];
     seen.add(id);
     const declared = ownerModelStatuses.includes(String(row.status) as ModelSnapshotStatus);
+    // Eikona says `readiness`, not `status`. Only its own "blocked" is a status fact; "ready" never becomes latest_ready.
+    const blockedByOwner = !declared && String(row.readiness || "").toLowerCase() === "blocked";
     const parameters = record(row.parameters) || record(row.supported_parameters) || {};
     return [{
       id,
@@ -408,8 +410,8 @@ export function normalizeModels(owner: CatalogOwner, raw: unknown, source: strin
       ratios: strings(row.supported_aspect_ratios || parameters.aspect_ratios || parameters.ratios, 16, 20),
       pricing: pricing(row.pricing_snapshot || row.pricing),
       readiness: str(row.readiness, 60),
-      status: declared ? (String(row.status) as ModelSnapshotStatus) : "unknown",
-      status_source: declared ? "owner" : "undeclared",
+      status: declared ? (String(row.status) as ModelSnapshotStatus) : blockedByOwner ? "unavailable" : "unknown",
+      status_source: declared ? "owner" : blockedByOwner ? "owner_readiness" : "undeclared",
       observed_at: str(row.captured_at || row.observed_at, 40),
       expires_at: str(row.expires_at, 40),
       digest: str(row.catalog_digest || row.snapshot_digest, 120),

@@ -5,6 +5,7 @@ import type { ControlDB } from "./db/client";
 import { notificationMuteRules, taskNotifications } from "./db/schema";
 import { taskIdentity, taskIdentityOf } from "./task-connections";
 import type { TaskSnapshot } from "../src/task-observation";
+import { projectTaskFreshness } from "../src/shared/task-freshness";
 
 /** Failure facts that open an in-app reminder. Owner state stays read-only. */
 export const attentionStates = new Set([
@@ -54,6 +55,7 @@ export interface FailureFact {
   title?: string;
   owner?: string;
   project?: string;
+  category?: "failure" | "operation";
 }
 
 /**
@@ -74,6 +76,17 @@ export function failureFact(scopeId: string, task: TaskSnapshot): FailureFact {
     owner: task.locator.owner,
     project: task.locator.project,
   };
+}
+
+/** A local liveness reminder from a successfully read owner snapshot. It never changes owner state. */
+export function livenessFact(scopeId: string, task: TaskSnapshot, now = Date.now()): FailureFact | null {
+  // Recompute against the caller's clock. A snapshot may have been projected
+  // during an earlier read (or with a different process clock), while the
+  // observation loop supplies its deterministic cycle time here.
+  const freshness = projectTaskFreshness(task, now).control_center_freshness;
+  if (freshness !== "stale" && freshness !== "expired") return null;
+  const base = failureFact(scopeId, task);
+  return { ...base, category: "operation", error_code: `task_liveness_${freshness}` };
 }
 
 export interface TaskNotification {
@@ -169,15 +182,11 @@ function clip(value: string | undefined, max: number) {
  * Stable identity of one failure version. Polling the same facts does not change it, and neither does a server
  * restart: it uses the task identity, not the signed task key, whose signature used to change with every process.
  */
-export function failureFingerprint(fact: Pick<FailureFact, "scope_id" | "task_identity" | "state" | "revision" | "native_state" | "error_code">) {
-  return [
-    fact.scope_id,
-    fact.task_identity,
-    fact.state,
-    fact.revision,
-    fact.native_state,
-    fact.error_code,
-  ].join("\u001f");
+export function failureFingerprint(fact: Pick<FailureFact, "scope_id" | "task_identity" | "category">) {
+  // One task keeps one failure reminder. Owner revision, native state and error
+  // code are display facts that can change between reads; they must not mint a
+  // fresh reminder and make the same failed run reappear repeatedly.
+  return [fact.scope_id, fact.task_identity, fact.category === "operation" ? "operation" : "failure"].join("\u001f");
 }
 
 /** How far a reminder has been dealt with. Rows of one failure version always show the furthest state. */
@@ -315,7 +324,7 @@ export class NotificationStore {
     const nowMs = Date.parse(nowIso);
     const seenFacts = new Set<string>();
     const facts = input.observed.filter((fact) => {
-      if (!attentionStates.has(fact.state) || !fact.task_key || !fact.task_identity || fact.scope_id !== input.scopeId) return false;
+      if ((!attentionStates.has(fact.state) && fact.category !== "operation") || !fact.task_key || !fact.task_identity || fact.scope_id !== input.scopeId) return false;
       const fingerprint = failureFingerprint(fact);
       if (seenFacts.has(fingerprint)) return false;
       seenFacts.add(fingerprint);
@@ -332,38 +341,55 @@ export class NotificationStore {
       .all();
     // Older restarts left several rows per failure version; the furthest-handled one stands for all of them.
     const byFingerprint = new Map<string, Row>();
+    const identityOf = (row: Row) => row.taskIdentity || taskIdentityOf(row.taskKey);
+    const identityKey = (category: string | undefined, identity: string) => `${category === "operation" ? "operation" : "failure"}\u001f${identity}`;
     for (const row of existing) {
-      const current = byFingerprint.get(row.failureFingerprint);
-      if (!current || prefer(row, current)) byFingerprint.set(row.failureFingerprint, row);
+      const keys = [row.failureFingerprint, identityKey(row.category, identityOf(row))];
+      for (const key of keys) {
+        const current = byFingerprint.get(key);
+        if (!current || prefer(row, current)) byFingerprint.set(key, row);
+      }
     }
     const rules = this.muteRuleRows(input.scopeId, input.subject);
     const inserted: string[] = [];
     const touched: string[] = [];
-    const seenTasks = new Set<string>();
+    // Failure and liveness facts share a task identity but represent different
+    // reminders. A stale liveness fact must not keep a prior owner failure
+    // open, and a failure fact must not make a liveness reminder disappear.
+    const seenFailureTasks = new Set<string>();
+    const seenOperationTasks = new Set<string>();
 
     for (const fact of facts) {
-      seenTasks.add(fact.task_identity);
+      if (fact.category === "operation") seenOperationTasks.add(fact.task_identity);
+      else seenFailureTasks.add(fact.task_identity);
       const fingerprint = failureFingerprint(fact);
-      const current = byFingerprint.get(fingerprint);
+      const current = byFingerprint.get(fingerprint) || byFingerprint.get(identityKey(fact.category, fact.task_identity));
       if (current) {
-        const priority = priorityFor(current.firstSeenAt, nowMs, current.priority as NotificationPriority);
-        this.db.update(taskNotifications).set({
-          lastSeenAt: nowIso,
-          presence: "live",
-          priority,
-          // The key's signature may differ after a restart; keep the link current.
-          taskKey: clip(fact.task_key, 4096),
-          taskIdentity: fact.task_identity,
-          recoveredAt: null,
-          title: clip(fact.title, 240) || current.title,
-          owner: clip(fact.owner, 64) || current.owner,
-          project: clip(fact.project, 200) || current.project,
-          taskState: fact.state,
-          nativeState: clip(fact.native_state, 120),
-          lastErrorCode: clip(fact.error_code, 120),
-          taskRevision: clip(fact.revision, 160),
-        }).where(eq(taskNotifications.id, current.id)).run();
-        touched.push(current.id);
+        const category = fact.category || "failure";
+        const duplicates = existing.filter((row) => (row.category || "failure") === category && identityOf(row) === fact.task_identity);
+        for (const row of duplicates) {
+          const priority = priorityFor(row.firstSeenAt, nowMs, row.priority as NotificationPriority);
+          this.db.update(taskNotifications).set({
+            lastSeenAt: nowIso,
+            presence: "live",
+            priority,
+            // The key's signature may differ after a restart; keep the link current.
+            taskKey: clip(fact.task_key, 4096),
+            taskIdentity: fact.task_identity,
+            failureFingerprint: fingerprint,
+            recoveredAt: null,
+            title: clip(fact.title, 240) || row.title,
+            owner: clip(fact.owner, 64) || row.owner,
+            project: clip(fact.project, 200) || row.project,
+            taskState: fact.state,
+            nativeState: clip(fact.native_state, 120),
+            lastErrorCode: clip(fact.error_code, 120),
+            taskRevision: clip(fact.revision, 160),
+            category,
+            targetPath: `/tasks?task=${encodeURIComponent(fact.task_key)}`,
+          }).where(eq(taskNotifications.id, row.id)).run();
+          touched.push(row.id);
+        }
         continue;
       }
       if (!opensReminder(true)) continue;
@@ -391,16 +417,18 @@ export class NotificationStore {
         firstSeenAt: nowIso,
         lastSeenAt: nowIso,
         lastErrorCode: clip(fact.error_code, 120),
+        category: fact.category || "failure",
+        targetPath: `/tasks?task=${encodeURIComponent(fact.task_key)}`,
         reopened: false,
       }).run();
       inserted.push(id);
     }
 
     const staled: string[] = [];
-    const identityOf = (row: Row) => row.taskIdentity || taskIdentityOf(row.taskKey);
     const canMarkAbsent = input.complete !== false && input.presentTaskKeys !== undefined;
     if (canMarkAbsent) for (const row of existing) {
-      if (row.category !== "failure" || seenTasks.has(identityOf(row)) || row.presence === "stale") continue;
+      const seen = row.category === "operation" ? seenOperationTasks : seenFailureTasks;
+      if ((row.category !== "failure" && row.category !== "operation") || seen.has(identityOf(row)) || row.presence === "stale") continue;
       if (present.has(identityOf(row))) {
         // Still projected, but no longer a failure fact. Keep the reminder and
         // stop counting it as live. Do not infer that the owner succeeded.
@@ -414,10 +442,11 @@ export class NotificationStore {
       staled.push(row.id);
     }
     // A task the owner now reports as not failing: its reminders stop counting, and stay listed as recovered.
-    const recoveredIdentities = new Set((input.recovered || []).filter((identity) => !seenTasks.has(identity)));
+    const recoveredIdentities = new Set(input.recovered || []);
     const recovered: string[] = [];
     for (const row of existing) {
-      if (row.category !== "failure" || row.recoveredAt || !recoveredIdentities.has(identityOf(row))) continue;
+      const seen = row.category === "operation" ? seenOperationTasks : seenFailureTasks;
+      if ((row.category !== "failure" && row.category !== "operation") || row.recoveredAt || seen.has(identityOf(row)) || !recoveredIdentities.has(identityOf(row))) continue;
       this.db.update(taskNotifications).set({ recoveredAt: nowIso }).where(eq(taskNotifications.id, row.id)).run();
       recovered.push(row.id);
     }
@@ -427,7 +456,7 @@ export class NotificationStore {
   /** Open failure reminders whose task may have recovered: worth one fresh owner read. */
   recoveryCandidates(scopeId: string, subject: string) {
     return this.list(scopeId, "", subject)
-      .filter((item) => (!item.category || item.category === "failure") && item.state === "unread" && !item.recovered_at)
+      .filter((item) => (!item.category || item.category === "failure" || item.category === "operation") && item.state === "unread" && !item.recovered_at)
       .map((item) => item.task_identity || taskIdentityOf(item.task_key));
   }
 

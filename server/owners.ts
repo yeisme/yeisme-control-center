@@ -1,3 +1,5 @@
+import { promptSummary, promptWrite, verifyPromptBody } from "./prompt-library";
+import type { PromptOwner, PromptQuery, PromptSummary } from "../src/shared/prompt-library";
 import { AuthError, boundedJSON, secret } from "./auth";
 import {
   owners,
@@ -235,6 +237,38 @@ export function businessText(v: any, direction: "input" | "output") {
   return texts.join("\n\n").slice(0, 65536);
 }
 export class OwnerReaders {
+  async promptLibrary(owner: PromptOwner, session: Session, scope: ScopeBinding, query: PromptQuery, operation: "list" | "content" | "save" | "index" | "reconcile" = "list", id = "", body?: unknown, key?: string) {
+    const { b } = this.binding(owner, session, scope);
+    if (id && !/^[a-zA-Z0-9._-]{1,160}$/.test(id)) throw new AuthError("invalid_reference", 400);
+    const base = owner === "scaena" ? `/api/v1/projects/${encodeURIComponent(b.project)}/control-center/prompts` : "/api/v1/control-center/prompts";
+    const params = new URLSearchParams(owner === "scaena" ? {} : { project_id: b.project });
+    for (const name of ["q", "kind", "source", "tag", "archived", "cursor", "limit", "model", "from", "to"] as const) if (query[name] !== undefined && query[name] !== "") params.set(name, String(query[name]));
+    if (operation === "index") params.set("index_history", "true");
+    let path = base + (operation === "reconcile" ? "/operations/" + encodeURIComponent(id) : id ? "/" + encodeURIComponent(id) : "");
+    let init: RequestInit = {};
+    if (operation === "content") { path += "/content:read"; init = { method: "POST", body: JSON.stringify(body) }; }
+    if (operation === "save") {
+      const input = promptWrite(body, owner);
+      if ((input.id || "") !== id || !key) throw new AuthError("invalid_prompt", 400);
+      init = { method: id ? "PATCH" : "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input) };
+    }
+    const raw = await this.request(owner, session, scope, path + "?" + params, init);
+    const data = raw.data || raw;
+    if (operation === "content") {
+      const summary = promptSummary(data.summary, owner, b.project);
+      if (summary.id !== id || (body && typeof body === "object" && "version" in body && Number(body.version) > 0 && summary.version !== body.version) || data.state !== "complete" || data.truncated !== false) throw new AuthError("prompt_contract_invalid", 502);
+      return { summary, text: verifyPromptBody(data.text, summary), state: "complete" as const, truncated: false as const };
+    }
+    if (operation === "reconcile" && data.state === "not_recorded") return { state: "not_recorded" as const };
+    if (operation === "save" || operation === "reconcile") {
+      const summary = promptSummary(data.summary, owner, b.project);
+      if (data.state !== "complete" || (operation === "save" && id && summary.id !== id)) throw new AuthError("prompt_contract_invalid", 502);
+      return { summary };
+    }
+    if (data.schema_version !== "yeisme.prompt_page.v1" || !Array.isArray(data.rows) || data.rows.length > 100 || !Number.isInteger(data.total) || data.total < 0) throw new AuthError("prompt_contract_invalid", 502);
+    return { rows: data.rows.map((row: unknown) => promptSummary(row, owner, b.project)) as PromptSummary[], project: b.project, total: data.total as number, next_cursor: typeof data.next_cursor === "string" ? data.next_cursor : undefined, index_more: data.index_more === true, can_write: data.can_write === true };
+  }
+
   /** Fixed owner batch routes only; callers cannot supply an outbound URL. */
   async imageBatch(operation: "input" | "plan" | "submit" | "reconcile" | "members" | "snapshot", s: Session, scope: ScopeBinding, body: Record<string, unknown>, key?: string, projectRef?: string) {
     // A shared project may bind several Eikona projects; the caller names the target, which must be one of them.
@@ -311,7 +345,7 @@ export class OwnerReaders {
         ...(init.headers || {}),
       },
       redirect: "error",
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(path.includes("index_history=true") ? 30000 : 6000),
     });
     if (!response.ok)
       throw new AuthError(

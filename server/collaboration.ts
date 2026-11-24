@@ -5,7 +5,9 @@ import type { ScopeBinding, ServerConfig, Session } from "./contracts";
 import type { ControlDB } from "./db/client";
 import { ConnectionCatalog } from "./connection-catalog";
 import { enabledUsers } from "./personal-users";
-import { collaborationOrganizations as organizations, collaborationMembers as members, collaborationTeams as teams, collaborationProjects as projects, collaborationFolders as folders, collaborationItems as items, collaborationBatches as batches, projectMetadata } from "./db/schema";
+import { collaborationOrganizations as organizations, collaborationMembers as members, collaborationTeams as teams, collaborationProjects as projects, collaborationFolders as folders, collaborationItems as items, collaborationBatches as batches, projectMetadata, projectCollectionBindings } from "./db/schema";
+import { auctraConnection } from "./auctra";
+import type { ProjectCollectionBinding, ProjectCollectionBindingView } from "../src/shared/collaboration";
 import { maxProjectBindings, type BindingOption, type CollaborationAction, type CollaborationMember, type CollaborationOrganization, type CollaborationTeam, type DirectoryPage, type DirectoryQuery, type GenerationBatch, type GenerationBatchItem, type ProjectBinding, type ProjectFolder, type ProjectGrant, type ProjectItem, type ProjectRole, type SharedProject } from "../src/shared/collaboration";
 import type { TaskSnapshot } from "../src/task-observation";
 import type { BatchPosition, BatchQuery } from "./generation-batches";
@@ -110,7 +112,48 @@ export class CollaborationService {
       result.projects.push({ owner: binding.owner, project_ref: binding.project_ref, connection_ids: reachable.connection_ids });
       result.connection_ids!.push(...reachable.connection_ids.filter((c) => !result.connection_ids!.includes(c)));
     }
+    const binding = this.collectionBinding(session, projectID);
+    if (binding.availability === "connected" && binding.binding) {
+      const source = this.auth.principal(session)!.scopes.find((s) => s.id === binding.binding!.source_scope)!;
+      result.collection = { auctra: { ...source.collection!.auctra! } };
+    }
+    result.read_context = stable(identityOf(session), String(session.epoch), String(project.revision), JSON.stringify(binding), JSON.stringify(result.collection || {}), JSON.stringify(this.config.collection?.auctra || null), JSON.stringify(result.projects));
     return result;
+  }
+  collectionBindingOptions(session: Session, projectID: string): ProjectCollectionBinding[] {
+    const project = this.project(session, projectID, "project_admin");
+    return this.collectionSources(session, project.organization_id);
+  }
+  private collectionSources(session: Session, organizationID: string): ProjectCollectionBinding[] {
+    const org = this.db.select().from(organizations).where(eq(organizations.id, organizationID)).get()!;
+    return (this.auth.principal(session)?.scopes || []).filter((scope) => scope.tenant === org.sourceTenant && scope.collection?.auctra)
+      .map((scope) => ({ owner: "auctra", source_scope: scope.id, project_ref: scope.collection!.auctra!.project }));
+  }
+  collectionBinding(session: Session, projectID: string): ProjectCollectionBindingView {
+    const project = this.project(session, projectID);
+    const row = this.db.select().from(projectCollectionBindings).where(eq(projectCollectionBindings.projectId, projectID)).get();
+    if (!row) return { binding: null, revision: project.revision, availability: "binding_missing", reason: "collection_binding_missing" };
+    const binding: ProjectCollectionBinding = { owner: "auctra", source_scope: row.sourceScope, project_ref: row.projectRef };
+    if (!this.collectionSources(session, project.organization_id).some((option) => option.source_scope === binding.source_scope && option.project_ref === binding.project_ref))
+      return { binding: null, revision: project.revision, availability: "forbidden", reason: "collection_source_denied" };
+    const source = this.auth.principal(session)!.scopes.find((scope) => scope.id === binding.source_scope)!;
+    const state = auctraConnection(this.config, source, session);
+    let availability: ProjectCollectionBindingView["availability"] = "no_credential";
+    if (state.state === "connected" || state.state === "target_missing") availability = state.state;
+    return { binding, revision: project.revision, availability, reason: state.reason };
+  }
+  collectionBindingContext(session: Session, projectID: string, raw: unknown): string {
+    const binding = this.normalizeCollectionBinding(session, projectID, raw);
+    const source = binding ? this.auth.principal(session)?.scopes.find((scope) => scope.id === binding.source_scope) : null;
+    return stable(projectID, JSON.stringify(binding), JSON.stringify(source?.collection?.auctra || null), JSON.stringify(this.config.collection?.auctra || null));
+  }
+  private normalizeCollectionBinding(session: Session, projectID: string, raw: unknown): ProjectCollectionBinding | null {
+    if (raw === null) return null;
+    const option = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    if (!option || Object.keys(option).some((key) => !["owner", "source_scope", "project_ref"].includes(key))) throw new AuthError("invalid_collection_binding", 400);
+    const match = this.collectionBindingOptions(session, projectID).find((entry) => entry.owner === option.owner && entry.source_scope === option.source_scope && entry.project_ref === option.project_ref);
+    if (!match) throw new AuthError("invalid_collection_binding", 400);
+    return match;
   }
   /** Tool projects a scope can read: its pinned owner projects, and the project of every connection it reads. */
   toolProjects(scope: ScopeBinding): { owner: string; project_ref: string; connection_ids: string[]; pinned: boolean; registered: boolean }[] {
@@ -246,6 +289,7 @@ export class CollaborationService {
       if (!p.generation_enabled || p.budget_cap <= 0 || !p.bindings.length) throw new AuthError("project_generation_disabled", 403);
     }
     if (action === "project.bindings.set") this.member(session, this.project(session, target).organization_id, "admin");
+    if (action === "project.collection_binding.set") this.normalizeCollectionBinding(session, target, input.binding);
   }
   execute(session: Session, action: CollaborationAction, target: string, expected: string, input: Record<string, unknown>): string[] {
     this.authorize(session, action, target, input);
@@ -325,6 +369,13 @@ export class CollaborationService {
       const ownMember = this.member(session, p.organization_id);
       if (ownMember.role !== "admin" && JSON.stringify(grants.filter((g) => g.subject_type === "member" && g.subject_id === ownMember.id)) !== JSON.stringify(p.grants.filter((g) => g.subject_type === "member" && g.subject_id === ownMember.id))) throw new AuthError("self_grant_change_denied", 403);
       updateProject({ grants: JSON.stringify(grants) }); this.auth.sessions.bumpAll(); return [p.id];
+    }
+    if (action === "project.collection_binding.set") {
+      const binding = this.normalizeCollectionBinding(session, target, input.binding);
+      if (binding) this.db.insert(projectCollectionBindings).values({ projectId: target, owner: "auctra", sourceScope: binding.source_scope, projectRef: binding.project_ref, revision: p.revision + 1, updatedAt: now, updatedBy: identityOf(session) })
+        .onConflictDoUpdate({ target: projectCollectionBindings.projectId, set: { sourceScope: binding.source_scope, projectRef: binding.project_ref, revision: p.revision + 1, updatedAt: now, updatedBy: identityOf(session) } }).run();
+      else this.db.delete(projectCollectionBindings).where(eq(projectCollectionBindings.projectId, target)).run();
+      updateProject({}); this.auth.sessions.bumpAll(); return [p.id];
     }
     if (action === "project.bindings.set") {
       const selected = this.normalizeBindings(session, p.organization_id, input.bindings);

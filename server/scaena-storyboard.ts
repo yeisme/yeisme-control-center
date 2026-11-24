@@ -122,9 +122,31 @@ function normalizeItem(value: unknown, fallbackObservedAt: string): ScaenaStoryb
   };
 }
 
-/** Structure only. Action summaries, candidate bodies, prompts and media bindings are deliberately not copied. */
+const readyFrameStates = new Set(["ready", "bound", "approved", "accepted", "available", "complete", "completed"]);
+
+/**
+ * Whether each shot has a keyframe bound, from the breakdown's `media` list. Only the state leaves this function: the
+ * candidate, representation and content refs, the media type and the digest stay here. Scaena omits an empty list, so
+ * no list means "not said" and no shot gets a state.
+ */
+function frameStates(raw: Record<string, unknown>): Map<string, "ready" | "pending"> | null {
+  if (!Array.isArray(raw.media) || !raw.media.length) return null;
+  const states = new Map<string, "ready" | "pending">();
+  for (const value of raw.media.slice(0, 4000)) {
+    if (!value || typeof value !== "object") continue;
+    const media = value as Record<string, unknown>;
+    const shot = refOf(media.shot_ref);
+    if (!shot) continue;
+    const ready = readyFrameStates.has(clean(media.status, 64).toLowerCase());
+    if (states.get(shot) !== "ready") states.set(shot, ready ? "ready" : "pending");
+  }
+  return states;
+}
+
+/** Structure only, plus two status flags per shot. Action summaries, candidate bodies, prompts and media bindings are deliberately not copied. */
 function outlineOf(raw: Record<string, unknown>, head: ScaenaStoryboardItem, olderAttempts: number, truncated: boolean): StoryboardOutline {
   const scenes: StoryboardOutlineScene[] = [];
+  const frames = frameStates(raw);
   for (const value of (Array.isArray(raw.scenes) ? raw.scenes : []).slice(0, 80)) {
     if (!value || typeof value !== "object") continue;
     const scene = value as Record<string, unknown>;
@@ -143,6 +165,8 @@ function outlineOf(raw: Record<string, unknown>, head: ScaenaStoryboardItem, old
         ...(label(shot.camera_angle, 32) ? { camera_angle: label(shot.camera_angle, 32) } : {}),
         ...(label(shot.camera_movement, 32) ? { camera_movement: label(shot.camera_movement, 32) } : {}),
         ...(count(shot.duration_ms) !== undefined ? { duration_ms: count(shot.duration_ms) } : {}),
+        ...(typeof shot.generation_ready === "boolean" ? { generation_ready: shot.generation_ready } : {}),
+        ...(frames ? { frame_state: frames.get(shot_ref) || "pending" } : {}),
       });
     }
     shots.sort((a, b) => a.order - b.order);

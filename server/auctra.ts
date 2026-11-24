@@ -54,6 +54,14 @@ export interface AuctraCollectionRecordProjection {
   blocker?: string;
 }
 
+export interface AuctraAuthoringResponse {
+  schema_version: string;
+  operation_id: string;
+  status: "success" | "failed";
+  data?: Record<string, unknown>;
+  error?: { code: string; message?: string; retryable?: boolean; blocker?: string; next_action?: string };
+}
+
 export interface AuctraCreativeFlowStage {
   stage: "screenplay" | "director_plan" | "creative_storyboard" | "production_handoff";
   owner: "auctra";
@@ -199,6 +207,22 @@ export class AuctraCollectionReader {
   }
   private async invoke(operationID: string, args: Record<string, unknown>, scope: ScopeBinding, session: Session) {
     return this.request(`/v1/operations/${encodeURIComponent(operationID)}:invoke`, { method: "POST", body: JSON.stringify({ operation_id: operationID, args: redact(args) }) }, scope, session, operationID.startsWith("collection.") ? "collection" : "flow");
+  }
+
+  async authoring(operationID: string, args: Record<string, unknown>, scope: ScopeBinding, session: Session): Promise<AuctraAuthoringResponse> {
+    const allowed = new Set([
+      "text.brief.create", "text.brief.show", "text.brief.list", "candidate.generate",
+      "review.queue", "work.candidate.list", "work.candidate.show", "work.candidate.diff",
+      "work.manuscript.writeback.status",
+    ]);
+    if (!allowed.has(operationID)) throw new AuthError("authoring_operation_not_allowed", 403);
+    try {
+      const data = envelopeData(await this.request(`/v1/operations/${encodeURIComponent(operationID)}:invoke`, { method: "POST", body: JSON.stringify({ operation_id: operationID, args: redact(args) }) }, scope, session, "flow"));
+      return { schema_version: "yeisme.auctra.authoring.v1", operation_id: operationID, status: "success", data };
+    } catch (error) {
+      const code = error instanceof AuthError ? error.code : "owner_unavailable";
+      return { schema_version: "yeisme.auctra.authoring.v1", operation_id: operationID, status: "failed", error: { code, retryable: code === "owner_unavailable" } };
+    }
   }
   async snapshot(scopeID: string, scope: ScopeBinding, session: Session, query: { cursor?: string; updated_after?: string; limit?: number; project_ref?: string } = {}): Promise<AuctraCollectionSnapshot> {
     try {
