@@ -13,6 +13,7 @@ import { ConfigSection, ConnectedToolsSection, ControlCenterSection, RenewSectio
 import { ShowcaseSection } from "./Showcase";
 import { showcaseRecord } from "./showcase";
 import { HeroStory } from "./HeroStory";
+import { FlowChapter } from "./FlowGuide";
 
 /**
  * The guide itself, with no router, session or server read: the signed-in page and the public page (no login) both
@@ -185,6 +186,8 @@ export function GuideContent({ location, nav, catalog, link, page = "guide" }: {
       <CallFlow />
       <NextSteps location={location} nav={guideNav} />
     </>
+    : location.chapter === "flow"
+      ? <FlowChapter />
     : location.chapter === "tools"
       ? toolPage ? <ToolPage tool={toolPage} catalog={catalog?.catalog ?? null} location={location} nav={guideNav} /> : <ToolsOverview catalog={catalog?.catalog ?? null} location={location} nav={guideNav} />
       : location.chapter === "cases"

@@ -4,7 +4,7 @@
  * the public page keeps it in its query string with the section as a real `#fragment`. Pure functions only, so the
  * sign-in redirect can use it without loading the guide.
  */
-export type GuideChapterId = "start" | "tools" | "cases" | "connect" | "help";
+export type GuideChapterId = "start" | "flow" | "tools" | "cases" | "connect" | "help";
 export type GuideClientId = "claude" | "codex";
 
 export interface GuideChapter { id: GuideChapterId; label: string; summary: string }
@@ -21,6 +21,7 @@ export interface GuideLocation {
 
 export const guideChapters: GuideChapter[] = [
   { id: "start", label: "开始", summary: "装好 CLI、体检环境、接进 Agent" },
+  { id: "flow", label: "流程", summary: "从一张图到一集漫剧：七站，人和 Agent 怎么分工" },
   { id: "tools", label: "工具", summary: "每个工具做什么、怎么装、怎么用" },
   { id: "cases", label: "案例", summary: "真实生成记录与 Agent 对话回放" },
   { id: "connect", label: "接入", summary: "Claude Code、Codex 与控制中心的配置" },
@@ -36,6 +37,12 @@ export const chapterOutlines: Record<GuideChapterId, GuideOutlineItem[]> = {
     { id: "guide-steps", label: "三步上手" },
     { id: "guide-flow", label: "调用约定" },
     { id: "guide-next", label: "接下来" },
+  ],
+  flow: [
+    { id: "guide-line", label: "七站制作线" },
+    { id: "guide-roles", label: "人和 Agent" },
+    { id: "guide-handoff", label: "交给 Agent" },
+    { id: "guide-agent-read", label: "Agent 读制作线" },
   ],
   tools: [
     { id: "guide-tools", label: "创作工具" },

@@ -17,6 +17,7 @@ import {
   MetricStrip,
   NoticeStack,
   PageToolbar,
+  Pager,
   Panel,
   Pill,
   SkeletonRows,
@@ -36,6 +37,10 @@ import { credentialReasonLabels, credentialStateLabels, credentialTone, type Cre
 import { FilterBar, matchesFacet } from "../../components/FilterBar";
 import { taskStateLabels } from "../../task-observation";
 import { DesktopSwitch, ObservationLine } from "./DeliveryLine";
+import { useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes } from "../../shared/pager";
+import { scrollBehavior } from "../../shared/motion/reduced";
 
 const groups: ReminderGroup[] = ["new", "open", "quiet", "archived"];
 
@@ -75,12 +80,14 @@ export default function RemindersPage() {
   const clock = reminders.now;
   const rows = useMemo(() => reminders.rows.filter((item) => reminderGroup(item, clock) === group && matchesFacet(item.owner, params.get("owner") || "") && matchesFacet(countsAsUnread(item, clock) ? "unread" : "read", params.get("read") || "") && item.title.toLocaleLowerCase().includes((params.get("q") || "").toLocaleLowerCase()) && (!params.get("from") || item.first_seen_at >= params.get("from")!) && (!params.get("to") || item.first_seen_at.slice(0, 10) <= params.get("to")!)), [reminders.rows, clock, group, params]);
   const counts = useMemo(() => Object.fromEntries(groups.map((id) => [id, reminders.rows.filter((item) => reminderGroup(item, clock) === id).length])) as Record<ReminderGroup, number>, [reminders.rows, clock]);
+  const { pageSize, setPageSize } = useListPreferences();
+  const paged = usePagedRows(rows, pageSize, [], { focusIndex: focus ? rows.findIndex((item) => item.id === focus) : undefined });
 
   useEffect(() => {
     const row = focusedRow.current;
     if (!focus || !row || scrolledFor.current === focus) return;
     scrolledFor.current = focus;
-    row.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    row.scrollIntoView({ block: "center", behavior: scrollBehavior() });
     row.focus({ preventScroll: true });
   });
 
@@ -174,7 +181,7 @@ export default function RemindersPage() {
     <h1 className="sr-only">提醒中心</h1>
     <PageToolbar
       foldMetrics
-      summary="同一次失败只提醒一次；revision、错误码或 owner 状态变化后，才会作为新失败重新出现。确认、免提醒和归档只写入控制中心数据库，不会改动 owner 任务。"
+      summary="同一次失败只提醒一次；版本、错误码或工具里的状态变了，才会当作新的失败再提醒。确认、免提醒和归档只记在控制中心，不会改动工具里的任务。"
       actions={<Button size="sm" variant="ghost" disabled={busy} onClick={() => reminders.refresh()} icon={<RefreshCw className="size-3.5" />}>重新观察</Button>}
       metrics={<div data-reminder-unread={reminders.unread}>
         <MetricStrip label="提醒概况" items={[
@@ -195,7 +202,15 @@ export default function RemindersPage() {
     <FilterBar placeholder="搜索通知与提醒" dates facets={[{ key: "owner", label: "来源", options: [...new Set(reminders.rows.map((v) => v.owner))].map((v) => ({ value: v, label: ownerLabel(v) })) }, { key: "read", label: "阅读状态", options: [{ value: "read", label: "已读" }, { value: "unread", label: "未读" }] }]} />
     <Tabs<ReminderGroup>
       value={group}
-      onChange={(value) => { setParams({ group: value }, { replace: true }); setSelected([]); }}
+      onChange={(value) => {
+        // Another group keeps the search and filters; only the page starts over.
+        const next = new URLSearchParams(params);
+        next.set("group", value);
+        next.delete("page");
+        next.delete("focus");
+        setParams(next, { replace: true });
+        setSelected([]);
+      }}
       label="提醒分组"
       className="flex flex-wrap items-center justify-between gap-x-3 gap-y-4"
       options={groups.map((id) => ({ id, label: reminderGroupLabels[id], count: counts[id] }))}
@@ -211,7 +226,7 @@ export default function RemindersPage() {
             ? <EmptyState icon={<CircleAlert />} title="提醒同步失败" body="控制中心没能读取提醒记录，这不代表没有失败。请稍后点击“重新观察”。" />
             : <EmptyState icon={<CircleAlert />} title={group === "new" ? "没有新的失败提醒" : "这一组是空的"} body="同一次失败不会因刷新或切换页面重复出现；revision、错误码或 owner 状态变化后，会作为新失败出现在这里。" />}
         </Panel> : <ul className="divide-y divide-line overflow-hidden rounded-card border border-line bg-panel shadow-panel" aria-label="提醒列表" onKeyDown={(event) => moveBetweenRows(event)}>
-          {rows.map((item) => {
+          {paged.rows.map((item) => {
             const checked = selected.includes(item.id);
             const focused = focus === item.id;
             const actions = rowActions(item);
@@ -273,7 +288,16 @@ export default function RemindersPage() {
             </li></ActionsContextMenu>;
           })}
         </ul>}
-        {reminders.hasMore && <div className="mt-3 flex justify-center"><Button size="sm" variant="ghost" disabled={reminders.syncing} onClick={reminders.loadMore}>加载更多提醒</Button></div>}
+        {(rows.length > 0 || reminders.hasMore) && <Pager
+          className="mt-3 rounded-card border border-line bg-panel shadow-panel"
+          window={paged}
+          onPage={paged.setPage}
+          noun="条提醒"
+          pageSize={pageSize}
+          pageSizes={pageSizes}
+          onPageSize={(value) => { setPageSize(value as typeof pageSize); paged.setPage(1); }}
+          more={reminders.hasMore ? { label: "加载更多提醒", loading: reminders.syncing, onMore: reminders.loadMore } : null}
+        />}
       </TabPanel>
     </Tabs>
     {rules.length > 0 && <section aria-labelledby="mute-rules-title" data-mute-rules className="rounded-card border border-line bg-panel p-4 shadow-panel">

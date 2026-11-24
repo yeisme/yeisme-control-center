@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useInspectorMode, useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes } from "../../shared/pager";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useOverlayParams } from "../../app/overlay-history";
 import { ArrowRight, Boxes, Clock3, Copy, Cpu, History, ListTree, PanelRightOpen, Plug, RefreshCw, Server, Sparkles, Waypoints, Wrench } from "../../icons";
@@ -7,10 +10,9 @@ import { api, isRouteUnavailable, type Epoch, type ProviderCapabilityProjection 
 import { useScopedRead, type ScopedRead } from "../../app/workspace";
 import { useObservationCache } from "../../app/observation-cache";
 import {
-  Button, Checkbox, DataTable, EmptyState, InlineNotice, KindBadge, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, SkeletonRows, StaleNotice,
+  Button, Checkbox, DataTable, EmptyState, InlineNotice, KindBadge, MetricStrip, NoticeStack, PageToolbar, Pager, Panel, Pill, ReadStateView, SearchField, SkeletonRows, StaleNotice,
   TabPanel, Tabs, ToggleGroup, Unknown, cx, mainColumn, narrowMainColumn, ownerLabel, type Column, type ItemAction, type MediaKind,
 } from "../../components/ui";
-import type { InspectorMode } from "../../components/InspectorShell";
 import { toolCatalogCacheKey, type CatalogAction, type CatalogChannel, type CatalogModel, type CatalogOwner, type CatalogServer, type CatalogTool, type ToolCatalog } from "../../shared/tool-catalog";
 import { formatRelative } from "../../shared/read-model/format";
 import {
@@ -23,10 +25,10 @@ import {
 } from "./catalog-view";
 import { CatalogInspector } from "./CatalogInspector";
 import { readinessMeta } from "./readiness";
+import { assetIntents, buildAssetPreflight, diagnoseMcpConnection, recommendSkillTemplate, type AssetIntent } from "../../shared/skill-template-experience";
 
 type CatalogRead = (ToolCatalog & Epoch) | { route_unavailable: true };
 
-const inspectorPreferenceKey = "yeisme.control.catalog.inspector-mode";
 const catalogOverlays = ["entry"] as const;
 const ownerKind: Record<CatalogOwner, MediaKind> = { eikona: "image", scaena: "video", sonora: "audio", aigora: "text", gateway: "text", auctra: "text" };
 const ownerOptions: { id: OwnerFilter; label: string }[] = [{ id: "all", label: "全部" }, { id: "eikona", label: "Eikona" }, { id: "scaena", label: "Scaena" }, { id: "sonora", label: "Sonora" }, { id: "gateway", label: "MCP Gateway" }];
@@ -40,7 +42,7 @@ export default function CapabilityHub() {
   const risk = parseRiskFilter(params.get("risk"));
   const query = params.get("q") || "";
   const forceRef = useRef(false);
-  const [inspectorMode, setInspectorMode] = useState<InspectorMode>(() => typeof window !== "undefined" && window.localStorage.getItem(inspectorPreferenceKey) === "floating" ? "floating" : "fixed");
+  const [inspectorMode, setInspectorMode] = useInspectorMode("catalog");
 
   const read = useScopedRead<CatalogRead>(async (scope, signal) => {
     const refresh = forceRef.current;
@@ -54,8 +56,8 @@ export default function CapabilityHub() {
   }, { isEmpty: (data) => !("route_unavailable" in data) && data.servers.every((server) => server.coverage === "needs_contract") });
   const routeMissing = !!read.data && "route_unavailable" in read.data;
   const catalog = read.data && !("route_unavailable" in read.data) ? read.data : null;
-  const fallback = useScopedRead((scope, signal) => api.capabilities(scope, signal), { enabled: routeMissing, isEmpty: (data) => data.capabilities.length === 0 });
-  const usage = useScopedRead((scope, signal) => api.usage(scope, signal), { enabled: !!catalog });
+  const fallback = useScopedRead((scope, signal) => api.capabilities(scope, signal), { cacheKey: "capabilities", enabled: routeMissing, isEmpty: (data) => data.capabilities.length === 0 });
+  const usage = useScopedRead((scope, signal) => api.usage(scope, signal), { cacheKey: "usage", enabled: !!catalog });
   const cache = useObservationCache();
   useEffect(() => { if (catalog) cache.put(toolCatalogCacheKey, catalog, 5 * 60_000, 30 * 60_000); }, [cache, catalog]);
 
@@ -75,7 +77,8 @@ export default function CapabilityHub() {
     <h1 className="sr-only">模型与工具</h1>
     <PageToolbar
       foldMetrics
-      summary="跨 owner 的只读目录：模型、渠道、MCP 工具与动作。目录登记不等于可调用，控制中心不会调用任何条目。"
+      lead="能用的模型和工具。"
+      summary="各个工具登记的模型、渠道、MCP 工具和动作，只读。登记了不等于能调用，控制中心不会调用其中任何一项。"
       metrics={metrics && <MetricStrip label="目录概况" items={[
         { label: "服务", value: `${metrics.readableServers}/${metrics.servers}`, hint: metrics.pendingServers ? `+${metrics.pendingServers} ${needsContractLabel}` : undefined },
         { label: "最新可用模型", value: metrics.latestReady, hint: `共 ${metrics.models}${metrics.historical ? ` · 历史 ${metrics.historical}` : ""}`, tone: metrics.latestReady ? "success" : "neutral" },
@@ -124,7 +127,7 @@ export default function CapabilityHub() {
       catalog={catalog}
       usage={usage.data?.rows || []}
       mode={inspectorMode}
-      onModeChange={(mode) => { setInspectorMode(mode); window.localStorage.setItem(inspectorPreferenceKey, mode); }}
+      onModeChange={setInspectorMode}
       onClose={() => update({ entry: null })}
       onNavigate={(target) => navigate(target)}
     />}
@@ -156,15 +159,89 @@ function ServerCard({ server, onOpen }: { server: CatalogServer; onOpen: () => v
   </button>;
 }
 
+const intentOptions: { id: AssetIntent; label: string }[] = [
+  { id: "image", label: "图像" },
+  { id: "video", label: "视频" },
+  { id: "audio", label: "音频" },
+  { id: "episode", label: "剧集" },
+  { id: "collection", label: "收集" },
+];
+
+const diagnosisTone = {
+  forbidden: "danger",
+  invocation_ready: "success",
+  degraded: "warning",
+  unavailable: "warning",
+  needs_contract: "review",
+  discovery_ready: "info",
+  invocation_unverified: "info",
+  protocol_ready: "info",
+  transport_ready: "info",
+  unconfigured: "neutral",
+} as const;
+
+function mcpDiagnosisFromCatalog(catalog: ToolCatalog) {
+  const gateway = catalog.servers.find((server) => server.owner === "gateway");
+  const mcpServers = catalog.servers.filter((server) => server.transport === "mcp");
+  const anyReady = mcpServers.some((server) => server.coverage === "readable" || server.coverage === "partial");
+  const anyProtocol = mcpServers.some((server) => !!server.protocol_version);
+  const anyForbidden = mcpServers.some((server) => server.coverage === "forbidden");
+  return diagnoseMcpConnection({
+    configured: Boolean(gateway || mcpServers.length > 0),
+    transport: anyReady || mcpServers.some((server) => server.freshness !== "unknown"),
+    protocol: anyProtocol || anyReady,
+    tools: catalog.tools.length,
+    schemaValid: anyReady && catalog.tools.length > 0,
+    invocation: anyForbidden ? "forbidden" : "unverified",
+    degraded: mcpServers.some((server) => server.coverage === "partial" || server.coverage === "unavailable"),
+  });
+}
+
+function AssetPreflightPanel({ catalog }: { catalog: ToolCatalog }) {
+  const [intent, setIntent] = useState<AssetIntent>("image");
+  const copy = useCopy();
+  const diagnosis = useMemo(() => mcpDiagnosisFromCatalog(catalog), [catalog]);
+  const preflight = useMemo(() => buildAssetPreflight(intent, recommendSkillTemplate(intent, [], []), null), [intent]);
+  const summaryJson = useMemo(() => JSON.stringify(preflight, null, 2), [preflight]);
+
+  return <Panel
+    title="Skills 与模板 Preflight"
+    eyebrow="只读版本确认与 MCP 阶段诊断；当前没有已发布的模板 owner 合同"
+    actions={<Button size="sm" variant="secondary" icon={<Copy className="size-3.5" />} onClick={() => void copy(summaryJson, "Preflight 摘要")}>复制 Preflight 摘要</Button>}
+  >
+    <div data-asset-preflight className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <ToggleGroup<AssetIntent> value={intent} onChange={setIntent} options={intentOptions} label="选择资产意图" />
+        <div className="flex flex-wrap items-center gap-2 text-2xs" data-mcp-diagnosis-stage={diagnosis.stage}>
+          <Pill size="sm" tone={diagnosisTone[diagnosis.stage]}>{diagnosis.label}</Pill>
+          <span className="text-muted">{diagnosis.detail}</span>
+        </div>
+      </div>
+      <div className="rounded-[10px] border border-line bg-panel-soft p-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-body-sm font-semibold text-ink">意图：{intentOptions.find((item) => item.id === intent)?.label ?? intent}</span>
+            <Pill size="sm" tone="review">{preflight.availability}</Pill>
+          </div>
+          <span className="font-mono text-2xs text-muted">provider_calls={preflight.provider_calls} · durable_writes={preflight.durable_writes}</span>
+        </div>
+        <p className="mt-2 text-body-sm text-ink-soft">{preflight.next_action}</p>
+        <p className="mt-1 text-2xs text-muted">MCP 建议：{diagnosis.next_action}（支持意图：{assetIntents.join(" / ")}）</p>
+      </div>
+    </div>
+  </Panel>;
+}
+
 function Overview({ catalog, onOpen, onTab }: { catalog: ToolCatalog; onOpen: (ref: string) => void; onTab: (tab: CatalogTab) => void }) {
   const providers = catalog.servers.filter((server) => server.transport === "mcp");
   const pending = catalog.servers.filter((server) => server.coverage === "needs_contract");
   const highlights = latestHighlights(catalog);
   const risks = (["read_only", "remote_query", "mutation", "paid_external", "human_gate", "unknown"] as const).map((tier) => ({ tier, count: catalog.actions.filter((action) => action.risk === tier).length })).filter((item) => item.count > 0);
   const maxRisk = Math.max(1, ...risks.map((item) => item.count));
-  return <div className="space-y-5">
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{providers.map((server) => <ServerCard key={server.id} server={server} onOpen={() => onOpen(entryRef("server", server.owner, server.id))} />)}</div>
-    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+  return <div className="min-w-0 space-y-5">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{providers.map((server) => <ServerCard key={server.id} server={server} onOpen={() => onOpen(entryRef("server", server.owner, server.id))} />)}</div>
+    <AssetPreflightPanel catalog={catalog} />
+    <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
       <Panel title="最新上线" eyebrow="owner 声明的最新模型与控制中心观察到的新增、变更" actions={<Button size="sm" variant="ghost" onClick={() => onTab("changes")}>全部动态</Button>}>
         {highlights.length ? <ul className="divide-y divide-line">{highlights.map((item) => <li key={item.ref}>
           <button type="button" data-catalog-row={item.ref} onClick={() => onOpen(item.ref)} className="flex w-full items-center gap-3 px-5 py-2.5 text-left transition-colors hover:bg-panel-soft">
@@ -302,36 +379,32 @@ const actionColumns: Column<CatalogAction>[] = [
   { id: "gates", header: "确认 / 幂等", priority: 3, align: "end", cell: (action) => <span className="whitespace-nowrap text-2xs text-muted">{action.requires_confirm === null ? "—" : action.requires_confirm ? "需确认" : "免确认"} / {action.requires_idempotency === null ? "—" : action.requires_idempotency ? "需幂等键" : "无"}</span> },
 ];
 
-const collapsedActionRows = 12;
-
 function ToolsView({ catalog, query, owner, risk, selected, onOpen }: { catalog: ToolCatalog; query: string; owner: OwnerFilter; risk: RiskFilter; selected: string | null; onOpen: (ref: string) => void }) {
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const tools = filterTools(catalog.tools, { query, owner });
   const actions = filterActions(catalog.actions, { query, owner, risk });
   const rowMenu = useCatalogActions(onOpen);
   const owners = [...new Set([...tools.map((tool) => tool.owner), ...actions.map((action) => action.owner)])];
-  const filtering = !!query.trim() || risk !== "all";
   if (!owners.length) return <Panel><EmptyState compact icon={<Wrench />} title="没有匹配的工具或动作" /></Panel>;
   return <div className="space-y-5">{owners.map((item) => {
     const ownerTools = risk === "all" ? tools.filter((tool) => tool.owner === item) : [];
     const allActions = actions.filter((action) => action.owner === item);
-    // Real owners publish hundreds of actions; keep the selected row visible when collapsing.
-    const showAll = filtering || expanded.has(item) || allActions.findIndex((action) => entryRef("action", action.owner, action.id) === selected) >= collapsedActionRows;
-    const ownerActions = showAll ? allActions : allActions.slice(0, collapsedActionRows);
-    const hidden = allActions.length - ownerActions.length;
     return <Panel key={item} title={<span className="flex items-center gap-2"><KindBadge kind={ownerKind[item]} size="sm" />{ownerLabel(item)}</span>} eyebrow={`${ownerTools.length} 个 MCP 工具 · ${allActions.length} 个动作`} bodyClassName="p-0">
       {ownerTools.length > 0 && <DataTable label={`${ownerLabel(item)} MCP 工具`} columns={toolColumns} rows={ownerTools} rowKey={(tool) => entryRef("tool", tool.owner, tool.id)} rowAttributes={(tool) => ({ "data-catalog-row": entryRef("tool", tool.owner, tool.id) })} rowLabel={(tool) => `查看工具 ${tool.name}`} selectedKey={selected} onRowClick={(tool) => onOpen(entryRef("tool", tool.owner, tool.id))} rowActions={(tool) => rowMenu(entryRef("tool", tool.owner, tool.id), tool.name, "工具名")} />}
-      {ownerActions.length > 0 && <div className={cx(ownerTools.length > 0 && "border-t border-line")}>
-        <DataTable label={`${ownerLabel(item)} 动作`} columns={actionColumns} rows={ownerActions} rowKey={(action) => entryRef("action", action.owner, action.id)} rowAttributes={(action) => ({ "data-catalog-row": entryRef("action", action.owner, action.id) })} rowLabel={(action) => `查看动作 ${action.name}`} selectedKey={selected} onRowClick={(action) => onOpen(entryRef("action", action.owner, action.id))} rowActions={(action) => rowMenu(entryRef("action", action.owner, action.id), action.name, "动作名")} />
-        {(hidden > 0 || (expanded.has(item) && !filtering && allActions.length > collapsedActionRows)) && <div className="border-t border-line px-5 py-2.5">
-          <Button size="sm" variant="ghost" aria-expanded={hidden === 0} onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(item)) next.delete(item); else next.add(item); return next; })}>
-            {hidden > 0 ? `显示全部 ${allActions.length} 个动作` : "收起动作列表"}
-          </Button>
-        </div>}
-      </div>}
-      {!ownerActions.length && risk === "all" && <p className="border-t border-line px-5 py-3 text-2xs text-muted">owner 没有返回动作注册表，或当前凭据不能读取。</p>}
+      {allActions.length > 0 && <OwnerActions owner={item} actions={allActions} selected={selected} onOpen={onOpen} rowMenu={rowMenu} divided={ownerTools.length > 0} />}
+      {!allActions.length && risk === "all" && <p className="border-t border-line px-5 py-3 text-2xs text-muted">owner 没有返回动作注册表，或当前凭据不能读取。</p>}
     </Panel>;
   })}</div>;
+}
+
+/** Real owners publish hundreds of actions: each owner's list pages on its own (`<owner>-page`), on the selected row's page. */
+function OwnerActions({ owner, actions, selected, onOpen, rowMenu, divided }: { owner: string; actions: ToolCatalog["actions"]; selected: string | null; onOpen: (ref: string) => void; rowMenu: ReturnType<typeof useCatalogActions>; divided: boolean }) {
+  const { pageSize, setPageSize } = useListPreferences();
+  const selectedIndex = selected ? actions.findIndex((action) => entryRef("action", action.owner, action.id) === selected) : -1;
+  const paged = usePagedRows(actions, pageSize, [], { prefix: `${owner}-`, focusIndex: selectedIndex >= 0 ? selectedIndex : undefined });
+  return <div className={cx(divided && "border-t border-line")}>
+    <DataTable label={`${ownerLabel(owner)} 动作`} columns={actionColumns} rows={paged.rows} rowKey={(action) => entryRef("action", action.owner, action.id)} rowAttributes={(action) => ({ "data-catalog-row": entryRef("action", action.owner, action.id) })} rowLabel={(action) => `查看动作 ${action.name}`} selectedKey={selected} onRowClick={(action) => onOpen(entryRef("action", action.owner, action.id))} rowActions={(action) => rowMenu(entryRef("action", action.owner, action.id), action.name, "动作名")} />
+    {actions.length > pageSize && <Pager window={paged} onPage={paged.setPage} noun="个动作" pageSize={pageSize} pageSizes={pageSizes} onPageSize={(value) => { setPageSize(value as typeof pageSize); paged.setPage(1); }} />}
+  </div>;
 }
 
 function ChangesView({ catalog, onOpen }: { catalog: ToolCatalog; onOpen: (ref: string) => void }) {

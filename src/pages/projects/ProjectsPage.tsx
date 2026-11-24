@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import { useInspectorMode } from "../../app/preferences";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Dialog } from "radix-ui";
 import { ArrowLeft, ArrowRight, Check, CircleAlert, Clock3, Copy, Eye, FolderKanban, FolderPlus, Images, Link2, ListTodo, Pencil, Plug, Send, Unplug } from "../../icons";
@@ -58,9 +59,10 @@ import { closeProjectTask, selectProjectResult, selectProjectTab, selectProjectT
 import { taskIsActive, taskNeedsAttention, taskStageLabels, taskStateLabels } from "../../task-observation";
 import { AudioQueue, audioTrackFrom, useAudioPlayer } from "../../app/audio-player";
 import { MediaViewer, visualSlides } from "../../components/MediaViewer";
-import { TaskDetail, type TaskInspectorMode } from "../tasks/TaskDetail";
+import { TaskDetail } from "../tasks/TaskDetail";
 import SharedProjects from "./SharedProjects";
 import { ConnectToolProjectDialog, DisconnectToolProjectDialog, type DisconnectTarget } from "./ToolProjectDialogs";
+import { usePageEnter } from "../../app/use-page-enter";
 
 type Tab = "overview" | "tasks" | "assets" | "review" | "delivery";
 type ProjectFilter = "all" | "hidden";
@@ -241,10 +243,10 @@ function RenameDialog({ project, open, onOpenChange, onSave, saving, error }: {
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fade-in fixed inset-0 z-40 backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
+        <Dialog.Overlay className="fade-in fixed inset-0 z-sheet-scrim backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
         <Dialog.Content
           aria-describedby={undefined}
-          className="pop-in fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none"
+          className="pop-in fixed left-1/2 top-1/2 z-sheet w-[min(420px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none"
         >
           <Dialog.Title className="text-title-sm font-semibold">重命名项目</Dialog.Title>
           <Dialog.Description className="mt-1 text-body-sm text-muted">名称只保存在当前 Control Center 范围。</Dialog.Description>
@@ -282,7 +284,7 @@ export default function ProjectsPage() {
     return value;
   });
   return (
-    <Tabs<Catalog> value={catalog} onChange={select} label="项目类型" listClassName="mb-4" options={[{ id: "shared", label: "共享项目" }, { id: "tools", label: "工具项目" }]}>
+    <Tabs<Catalog> value={catalog} onChange={select} label="项目类型" listClassName="mb-4" options={[{ id: "shared", label: "项目" }, { id: "tools", label: "工具项目" }]}>
       <TabPanel value="shared">{catalog === "shared" && <SharedProjects />}</TabPanel>
       <TabPanel value="tools">{catalog === "tools" && <OwnerProjectsPage />}</TabPanel>
     </Tabs>
@@ -295,9 +297,9 @@ function OwnerProjectsPage() {
   const notify = useToast();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const metadata = useScopedRead((currentScope, signal) => api.projectMetadata(currentScope, signal));
-  const owned = useScopedRead((currentScope, signal) => api.ownerProjects(currentScope, signal));
-  const shared = useScopedRead((_currentScope, signal) => api.sharedProjects({}, signal));
+  const metadata = useScopedRead((currentScope, signal) => api.projectMetadata(currentScope, signal), { cacheKey: "project-metadata" });
+  const owned = useScopedRead((currentScope, signal) => api.ownerProjects(currentScope, signal), { cacheKey: "owner-projects" });
+  const shared = useScopedRead((_currentScope, signal) => api.sharedProjects({}, signal), { cacheKey: "shared-projects" });
   // Tool projects belong to a personal or team scope; a shared project's scope only borrows them.
   const home = session?.scopes.find((s) => !s.id.startsWith("project_"));
   useEffect(() => { if (scopeId.startsWith("project_") && home) setScope(home.id); }, [scopeId, home?.id]);
@@ -632,7 +634,7 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
 }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const [inspectorMode, setInspectorMode] = useState<TaskInspectorMode>(() => typeof window !== "undefined" && window.localStorage.getItem("yeisme.control.tasks.inspector-mode") === "floating" ? "floating" : "fixed");
+  const [inspectorMode, setInspectorMode] = useInspectorMode();
   const stats = useMemo(() => projectStats(project), [project]);
   const results = useMemo(() => collectResults(project.tasks), [project.tasks]);
   const review = useMemo(() => project.tasks.filter(taskNeedsReview), [project.tasks]);
@@ -658,17 +660,16 @@ function ProjectDetail({ project, tab, selectedTaskKey, onTab, onBack, onTaskSel
     if (params.get("result")) next.set("result", key);
     setParams(next, { replace: true });
   };
-  const changeInspectorMode = useCallback((mode: TaskInspectorMode) => {
-    setInspectorMode(mode);
-    window.localStorage.setItem("yeisme.control.tasks.inspector-mode", mode);
-  }, []);
+  const changeInspectorMode = setInspectorMode;
   const closeTask = useCallback((open: boolean) => {
     if (!open) onTaskClose();
   }, [onTaskClose]);
 
+  const enter = usePageEnter(!selectedTask);
   return (
     <div
-      className={cx(!selectedTask && "page-enter", "space-y-5", selectedTask && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")}
+      className={cx(!selectedTask && enter.className, "space-y-5", selectedTask && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")}
+      onAnimationEnd={enter.onAnimationEnd}
       data-page="project-detail"
     >
       <h1 className="sr-only">{projectTitle(project)}</h1>

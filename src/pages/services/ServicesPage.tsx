@@ -6,7 +6,7 @@ import { api, errorCode, type ServiceDirectoryEntry } from "../../shared/api/con
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import type { ConnectionObservation } from "../../task-observation";
 import type { ServiceConnectionProjection } from "../../service-directory";
-import { ActionsContextMenu, Button, CoverageChip, Dot, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SkeletonRows, StaleNotice, cx, useToast, type ItemAction, type Tone } from "../../components/ui";
+import { ActionsContextMenu, Button, CoverageChip, Dot, EmptyState, Field, InlineNotice, Input, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SkeletonRows, StaleNotice, Textarea, cx, useToast, type ItemAction, type Tone } from "../../components/ui";
 import { formatRelative } from "../../shared/read-model/format";
 import { freshnessLabels, labelFrom, reasonLabel } from "../../shared/read-model/labels";
 import { connectionStateLabel, connectionTone } from "../../shared/read-model/tasks";
@@ -32,7 +32,7 @@ export default function ServicesPage() {
   const navigate = useNavigate();
   const copy = useCopy();
   const [params] = useSearchParams();
-  const read = useScopedRead((scope, signal) => api.services(scope, signal), { isEmpty: (data) => data.services.length === 0 });
+  const read = useScopedRead((scope, signal) => api.services(scope, signal), { cacheKey: "services", isEmpty: (data) => data.services.length === 0 });
   const services = read.data?.services || [];
   const integrated = services.filter((service) => service.integration !== "not_integrated");
   const connections = integrated.flatMap((service) => service.connections.map((connection) => ({ service, connection })));
@@ -47,7 +47,8 @@ export default function ServicesPage() {
     <h1 className="sr-only">服务与连接</h1>
     <PageToolbar
       foldMetrics
-      summary="owner 观测连接的传输、授权、合同与内容证据，以及服务目录；只读，不接受浏览器提交的地址或凭据。"
+      lead="各个工具现在能不能读。"
+      summary="每条连接的传输、授权、接口和内容四项能不能读，以及服务目录。这里只看，不接受在浏览器里填写地址或凭据。"
       actions={<Button size="sm" onClick={read.reload} icon={<RefreshCw className="size-3.5" />}>重新观测</Button>}
       metrics={read.data ? <MetricStrip label="服务概况" items={[
         { label: "连接可读", value: `${readyCount}/${connections.length}`, tone: connections.length > 0 && readyCount < connections.length ? "warning" : undefined },
@@ -75,7 +76,7 @@ export default function ServicesPage() {
       {openTools.length > 0 && <section aria-label="开放工具" className="space-y-3">
         <h2 className="text-title-sm font-semibold text-ink">开放工具<span className="ml-2 text-2xs font-normal text-muted tabular">{openTools.length} 个</span></h2>
         <div className="grid gap-3 md:grid-cols-2">
-          {openTools.map(({ service, tool }) => <OpenToolCard key={service.id} name={service.name} purpose={service.purpose} tool={tool} credential={credentialOf(`open_tool:${tool.tool}`)} now={now} onQueue={() => navigate("/")} onCatalog={tool.tool === "gateway" ? () => navigate("/capabilities?tab=tools&owner=gateway") : undefined} />)}
+          {openTools.map(({ service, tool }) => <OpenToolCard key={service.id} name={service.name} purpose={service.purpose} tool={tool} credential={credentialOf(`open_tool:${tool.tool}`)} now={now} onQueue={() => navigate("/")} onMonitor={tool.tool === "gateway" ? () => navigate("/agents") : undefined} onCatalog={tool.tool === "gateway" ? () => navigate("/capabilities?tab=tools&owner=gateway") : undefined} />)}
         </div>
       </section>}
 
@@ -91,6 +92,10 @@ export default function ServicesPage() {
 const collectionStateLabels: Record<string, string> = { active: "待确认", confirmed: "已确认", archived: "已归档" };
 const collectionStateTone = (state: string): Tone => state === "confirmed" ? "success" : state === "archived" ? "neutral" : "warning";
 const recordKindLabels: Record<string, string> = {
+  project_summary: "项目总览",
+  material: "素材",
+  scene_plan: "场景卡",
+  context_pack: "上下文包",
   screenplay: "剧本",
   director_plan: "导演计划",
   creative_storyboard: "创意分镜",
@@ -110,6 +115,11 @@ function AuctraCollectionPanel() {
   const [syncing, setSyncing] = useState(false);
   // One local metadata change at a time: a second click on a row in flight would only race its own revision.
   const [busyRef, setBusyRef] = useState<string | null>(null);
+  const [briefTitle, setBriefTitle] = useState("第001章写作 Brief");
+  const [briefBody, setBriefBody] = useState("");
+  const [briefRef, setBriefRef] = useState("");
+  const [authoringState, setAuthoringState] = useState<"idle" | "saving" | "generating">("idle");
+  const [authoringMessage, setAuthoringMessage] = useState<string | null>(null);
   const anchor = useRef<HTMLDivElement>(null);
   const collection = useScopedRead((scope, signal) => api.auctraCollection(scope, { limit: 50 }, signal), { isEmpty: (data) => data.rows.length === 0 });
   const connection = collection.data?.connection;
@@ -160,8 +170,32 @@ function AuctraCollectionPanel() {
     { id: "copy", label: "复制记录引用", icon: <Copy className="size-4" />, group: "copy", run: () => void copy(row.record_ref, "记录引用") },
   ];
   const rows = collection.data?.rows || [];
+  const typeCounts = rows.reduce<Record<string, number>>((counts, row) => { counts[row.record_kind] = (counts[row.record_kind] || 0) + 1; return counts; }, {});
   const lastSync = collection.data?.last_sync;
   const emptyRecords = <EmptyState compact title="还没有收集记录" body={connected ? "点击“同步记录”从 Auctra 拉取当前授权范围的脱敏记录。" : "连接 Auctra 并同步之后，记录会出现在这里。"} />;
+  const projectRef = connection?.project_ref || "";
+  const createBrief = async () => {
+    if (!session?.csrf || !projectRef || !briefBody.trim() || authoringState !== "idle") return;
+    setAuthoringState("saving"); setAuthoringMessage(null);
+    try {
+      const result = await api.auctraAuthoring(scopeId, { operation_id: "text.brief.create", args: { project_ref: projectRef, title: briefTitle.trim() || "写作 Brief", body: briefBody.trim(), idempotency_key: createIdempotencyKey("auctra-brief") } }, session.csrf);
+      if (result.status !== "success" || !result.data?.brief_ref) throw new Error(result.error?.code || "owner_unavailable");
+      setBriefRef(String(result.data.brief_ref)); setAuthoringMessage(`Brief 已创建：${result.data.brief_ref}`);
+    } catch (error) { setAuthoringMessage(`Brief 没有创建：${blockerLabel(errorCode(error))}`); }
+    finally { setAuthoringState("idle"); }
+  };
+  const generateCandidate = async () => {
+    if (!session?.csrf || !briefRef || authoringState !== "idle") return;
+    setAuthoringState("generating"); setAuthoringMessage(null);
+    try {
+      const result = await api.auctraAuthoring(scopeId, { operation_id: "candidate.generate", args: { brief_ref: briefRef, project_ref: projectRef, runtime_profile: "pi", idempotency_key: createIdempotencyKey("auctra-candidate") } }, session.csrf);
+      if (result.status !== "success") throw new Error(result.error?.code || "owner_unavailable");
+      const candidate = result.data?.candidate_ref ? `候选 ${result.data.candidate_ref}` : "候选已提交";
+      const review = Array.isArray(result.data?.pending_review_refs) ? ` · 待审阅 ${result.data.pending_review_refs.join(", ")}` : "";
+      setAuthoringMessage(`${candidate}${review}。正文未被覆盖。`);
+    } catch (error) { setAuthoringMessage(`候选没有生成：${blockerLabel(errorCode(error))}`); }
+    finally { setAuthoringState("idle"); }
+  };
   return <div ref={anchor} id="auctra-collection" className="scroll-mt-20"><Panel title="Auctra 文本创作记录收集" bodyClassName="p-5" actions={<Button size="sm" variant="secondary" disabled={!connected || syncing} title={connected ? undefined : universeGapText(connection?.reason)} onClick={() => void sync()} icon={<RefreshCw className="size-3.5" />}>{syncing ? "同步中…" : "同步记录"}</Button>}>
     <div className="space-y-3">
       <p className="text-body-sm text-muted">Control Center 只保存 refs、状态、摘要、时间和本地管理元数据；正文、路径和提示词留在 Auctra。剧集制作的剧集列表来自这里的剧本类记录。</p>
@@ -170,6 +204,7 @@ function AuctraCollectionPanel() {
       {collection.data && connected && <div className="flex flex-wrap items-center gap-2">
         <CoverageChip state={collection.data.coverage === "stale" ? "expired" : collection.data.coverage} />
         <Pill tone="neutral">{collection.data.total} 条记录</Pill>
+        {(["scene_plan", "material", "context_pack", "review", "run"] as const).filter((kind) => typeCounts[kind]).map((kind) => <Pill key={kind} tone={kind === "review" ? "review" : "neutral"}>{recordKindLabels[kind]} {typeCounts[kind]}</Pill>)}
         {connection?.project_ref && <span className="font-mono text-2xs text-muted">{connection.project_ref}</span>}
         {lastSync && <span className="text-2xs text-muted">上次同步 {formatRelative(lastSync.at)}{lastSync.complete ? "" : ` · 没有读完（${blockerLabel(lastSync.reason || "collection_partial")}）`}</span>}
       </div>}
@@ -180,6 +215,15 @@ function AuctraCollectionPanel() {
           return <ActionsContextMenu key={row.record_ref} actions={recordActions(row)}><li data-collection-record={row.record_ref} aria-busy={busy || undefined} className="flex flex-wrap items-center gap-3 px-3 py-2.5"><div className="min-w-0 flex-1"><p className="truncate text-body-sm font-medium text-ink">{name}</p><p className="truncate text-2xs text-muted">{labelFrom(recordKindLabels, row.record_kind, readable(row.record_kind, "类型未提供"))} · {readable(row.status, "状态未提供")} · {labelFrom(freshnessLabels, row.source_state)}</p></div><Pill tone={collectionStateTone(row.collection_state)}>{collectionStateLabels[row.collection_state] || row.collection_state}</Pill>{row.collection_state !== "confirmed" && row.collection_state !== "archived" && <Button size="sm" variant="ghost" aria-label={`确认「${name}」`} onClick={() => void manage(row, "collection.record.confirm")}>确认</Button>}{row.collection_state !== "archived" && <Button size="sm" variant="ghost" aria-label={`归档「${name}」`} onClick={() => void manage(row, "collection.record.archive")}>归档</Button>}</li></ActionsContextMenu>;
         })}</ul> : emptyRecords}
       </ReadStateView>
+      {connected && <div className="mt-5 rounded-control border border-line bg-panel-soft p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-body-sm font-semibold text-ink">Auctra 写作编排 Demo</h3><p className="mt-1 text-2xs text-muted">Brief、候选和 Review 仍由 Auctra 持有；这里仅发送 typed refs 并显示回执。</p></div>{briefRef && <Pill tone="success">Brief 已就绪</Pill>}</div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <Field label="Brief 标题"><Input value={briefTitle} onChange={(event) => setBriefTitle(event.target.value)} maxLength={240} /></Field>
+          <Field label="目标项目"><Input value={projectRef} readOnly /></Field>
+          <Field label="写作要求" className="md:col-span-2" hint="内容会直接交给 Auctra brief owner；Control Center 不保存正文。"><Textarea value={briefBody} onChange={(event) => setBriefBody(event.target.value)} placeholder="例如：严格按 CP-01 与 ch001 场景卡，先写候选稿并保留章末钩子。" maxLength={100000} /></Field>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2"><Button size="sm" disabled={!projectRef || !briefBody.trim() || authoringState !== "idle"} onClick={() => void createBrief()}>{authoringState === "saving" ? "创建中…" : "创建 Brief"}</Button><Button size="sm" variant="secondary" disabled={!briefRef || authoringState !== "idle"} onClick={() => void generateCandidate()}>{authoringState === "generating" ? "生成中…" : "生成候选"}</Button>{authoringMessage && <span className="text-2xs text-muted">{authoringMessage}</span>}</div>
+      </div>}
     </div>
   </Panel></div>;
 }

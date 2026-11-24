@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowRight, CheckCircle2, CircleAlert, CircleDashed, Clock3, Eye, KeyRound, LockKeyhole, Route, ShieldQuestion } from "../../icons";
+import { ArrowRight, Bot, CheckCircle2, CircleAlert, CircleDashed, Clock3, Eye, KeyRound, LockKeyhole, Route, ShieldQuestion } from "../../icons";
 import { api, errorCode } from "../../shared/api/control-center-client";
 import type { WorkQueueAction, WorkQueueItem, WorkQueueKind, WorkQueueLink, WorkQueuePreviewState, WorkQueuePriority } from "../../shared/work-queue";
 import type { ActionOwner, ControlAction } from "../../shared/action-contract";
@@ -134,13 +134,15 @@ export function WorkStatePill({ state, kind }: { state: string; kind?: WorkQueue
   return <Pill tone={tone} icon={workStateIcons[tone]}>{known ? connection : workQueueReasonLabel(state)}</Pill>;
 }
 
-export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, onNavigate }: {
+export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, onNavigate, onHandOff }: {
   item: WorkQueueItem | null;
   open: boolean;
   mode: TaskInspectorMode;
   onModeChange: (mode: TaskInspectorMode) => void;
   onClose: () => void;
   onNavigate: (target: string) => void;
+  /** Opens "交给 Agent" for this item; the brief is copy only. */
+  onHandOff?: (item: WorkQueueItem) => void;
 }) {
   const { scopeId, session } = useWorkspace();
   const notify = useToast();
@@ -184,6 +186,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
   const ownerLinks = item.safe_links.filter((link) => link.kind === "owner");
   const reason = workQueueReasonLabel(item.attention_reason, item.kind);
   return <TaskInspectorFrame
+    itemKey={item.work_ref}
     open={open}
     mode={mode}
     maximized={maximized}
@@ -197,7 +200,7 @@ export function WorkQueueInspector({ item, open, mode, onModeChange, onClose, on
     icon={<span className="grid size-8 place-items-center rounded-control bg-panel-soft text-info"><Eye className="size-4" /></span>}
     reference={<CopyRef value={item.source_ref} label="来源引用" />}
     sections={[{ id: "overview", label: "概况" }, { id: "flow", label: "流程链" }, { id: "evidence", label: "证据" }, { id: "actions", label: "动作" }, { id: "handoff", label: "交接" }]}
-    footer={<div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="ghost" onClick={onClose}>关闭</Button><span className="ml-auto flex items-center gap-1.5 text-2xs text-muted"><LockKeyhole className="size-3" />只读观察；Preview 不会 Confirm</span></div>}
+    footer={<div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="ghost" onClick={onClose}>关闭</Button>{onHandOff && <Button size="sm" variant="secondary" icon={<Bot className="size-3.5" />} onClick={() => onHandOff(item)}>交给 Agent</Button>}<span className="ml-auto flex items-center gap-1.5 text-2xs text-muted"><LockKeyhole className="size-3" />只读观察；Preview 不会 Confirm</span></div>}
   >
     <div className="space-y-5">
       {item.preview_state === "needs_contract" && <InlineNotice tone="warning">Owner 尚未提供可执行合同。当前只展示安全引用和恢复边界。</InlineNotice>}

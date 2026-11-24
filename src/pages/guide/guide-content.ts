@@ -1,4 +1,5 @@
 import type { CatalogOwner } from "../../shared/tool-catalog";
+import type { ProductionStationId } from "../../shared/production-line";
 
 /**
  * Static guide copy for the CLI and MCP tools. Every command is copied from the owner's own README or
@@ -178,10 +179,60 @@ export const faqs: { q: string; a: string }[] = [
   { q: "生成会花钱吗？谁来确认？", a: "会。Eikona 用 --max-cost-usd 设上限，Scaena 还要 --confirm，Sonora 的音乐生成要审批引用。Agent 走到这一步会停下来等你，不能替你跳过。" },
   { q: "为什么 Agent 里看不到某个动作？", a: "紧凑接口只列 search 和 execute，具体动作要先 search。也可能是已发布的二进制还没有 mcp 命令，用对应工具的 mcp doctor 检查。" },
   { q: "stdio 和 HTTP 怎么选？", a: "只在自己电脑上用就选 stdio，Agent 直接启动本机命令；团队共享或跨机器用 HTTP /mcp，配一个 Bearer 令牌。" },
-  { q: "在 Agent 里发起的任务，控制中心看得到吗？", a: "连到控制中心已接入的同一服务和项目时看得到，进度和结果出现在任务中心与资源库。本机 stdio 的记录留在本机工具里。" },
-  { q: "控制中心为什么不再提供 AI 创作？", a: "生成要用到凭据、费用确认和审阅，这些都由各工具自己把关。控制中心专心看任务和结果；共享项目的批量生成仍在项目页里。" },
+  { q: "在 Agent 里发起的任务，控制中心看得到吗？", a: "连到控制中心已接入的同一服务和项目时看得到，进度和结果出现在对应项目的主页（资产、任务）和「动态」里；音频播放后，播放器会画出这段声音的波形和电平，并标出静音和削波。本机 stdio 的记录留在本机工具里。" },
+  { q: "控制中心为什么不再提供 AI 创作？", a: "生成要用到凭据、费用确认和审阅，这些都由各工具自己把关。控制中心专心看任务和结果；批量生成在「剧集 → 批量生成」里，按项目进行。" },
   { q: "页面上的样例是真的吗？花了多少钱？", a: "是 2026-10-29 实际调用生成的。图片每张 $0.005 到 $0.017；两段视频由 Scaena 发起，服务端不记录 Provider 费用，每段请求上限 $2；两句配音在免费额度内，$0；配乐 12 KIE credits。两段 Agent 录制自身的模型费用另算，写在回放末尾。" },
   { q: "样例里的人是真人吗？", a: "不是。画面、视频和声音全部由 AI 生成，人物是虚构的；视频请求里声明了 synthetic_virtual_person。你发布 AI 生成的内容时，也要标明是 AI 生成。" },
   { q: "调用失败了，Agent 会自己重试吗？", a: "不该盲目重试。花钱的调用失败后，先读错误和运行记录。两段回放里，Codex 遇到 402 就停下来问你；Claude Code 换写法之前先做了一次 dry run。" },
   { q: "怎么像回放那样录下一段 Agent 对话？", a: "Claude Code 用 claude -p 加 --output-format stream-json --verbose，Codex 用 codex exec --json；追问分别用 --resume <session-id> 和 codex exec resume <session-id>。完整命令在「配置示例」里。" },
 ];
+
+/**
+ * 流程: per station, what only a person decides, what an agent may run, which tool does the work, and how far the
+ * control center reads it today. "Today" is the state of the contracts, not of anyone's project: the page itself shows
+ * what was actually read.
+ */
+export interface FlowStationCopy { human: string; agent: string; tools: string; today: string; ready: "yes" | "partly" | "no" }
+export const flowStations: Record<ProductionStationId, FlowStationCopy> = {
+  story: { human: "定剧本、批导演计划", agent: "读剧本和计划，列出要你拍板的问题", tools: "Auctra", today: "已接通", ready: "yes" },
+  look: { human: "锁定角色、场景和风格", agent: "出定妆和场景参考，只 dry run", tools: "Eikona · Scaena", today: "待接通：参考绑定还没有读取接口；Scaena 提供按集摘要后，显示整个项目的参考数", ready: "no" },
+  board: { human: "审分镜", agent: "读分镜，核对拆解和剧本版本", tools: "Auctra → Scaena", today: "已接通，含每镜「可生成」「画面已绑定」", ready: "yes" },
+  frames: { human: "每镜挑一张", agent: "出关键帧候选：先报价，你确认后再提交", tools: "Eikona", today: "已接通；Scaena 记录了绑定的任务才归入这一集；待挑选按 Eikona 自己的审阅记录，它还没开放时按任务状态", ready: "partly" },
+  motion: { human: "挑动态版本", agent: "图生视频预览，在 Scaena 发起", tools: "Scaena", today: "只观察", ready: "partly" },
+  sound: { human: "定音色、听台词", agent: "试听配音和配乐，只 dry run", tools: "Sonora", today: "只观察；Scaena 记下这一集的 Sonora 资源后，对应任务才归入这一集", ready: "partly" },
+  cut: { human: "审片、交付", agent: "拉片质检；在 Scaena 侧导出草稿", tools: "Scaena · Anatomia · DriveBridge", today: "部分：Scaena 提供按集摘要后，可看到剪辑、审阅和合成预览的记录；交付仍待接通", ready: "partly" },
+};
+
+export const flowRoles = {
+  human: [
+    { title: "挑选", body: "哪张图、哪个版本留下" },
+    { title: "花钱", body: "任何会产生费用的提交" },
+    { title: "锁定", body: "角色、风格和分镜定稿" },
+    { title: "交付", body: "审片，然后交出去" },
+  ],
+  agent: [
+    { title: "读取", body: "剧本、分镜、任务和结果的状态" },
+    { title: "报价", body: "会花钱的步骤只做 dry run，把报价带回来" },
+    { title: "出候选", body: "在你给的范围里准备参数和候选" },
+    { title: "回查", body: "结果未知的只查原操作，不重新提交" },
+    { title: "整理与质检", body: "列问题、拉片、核对版本" },
+  ],
+};
+
+export const handoffSteps = [
+  { title: "点「交给 Agent」", body: "剧集工作室的每一站、每个镜头，今天页的待决定，任务详情里都有。说明里只有引用，没有正文、地址和密钥。" },
+  { title: "复制一段说明，贴给任何 Agent", body: "说明是一段中文：目标、引用、步骤、规则和做完的标准。点「复制给 Agent 的说明」，贴进你常用的 Agent 对话里就行。" },
+  { title: "回到 Studio 做决定", body: "说明最后写着去哪里看结果。挑哪张、花不花钱，仍然由你在页面或工具里确认。" },
+];
+
+/** Placeholders only; the key is read from a 0600 file so it never lands on a command line or in shell history. */
+export const agentReadSteps: GuideCommand[] = [
+  { command: "export YEISME_CONTROL_ORIGIN='<控制中心地址>'", note: "只在当前 shell 注入地址；后面的命令都从这个变量读取，不把真实地址写进脚本" },
+  { command: `umask 077; jq -n --arg username '<用户名>' --rawfile key '<密钥文件>' '{username: $username, key: ($key | rtrimstr("\\n"))}' | curl -sS -c '<cookie 文件>' -H 'Origin: '"$YEISME_CONTROL_ORIGIN" -H 'Content-Type: application/json' --data-binary @- "$YEISME_CONTROL_ORIGIN/api/control-center/v1/auth/personal"`, note: "登录一次，会话存进 cookie 文件。登录有次数限制，失败了先查原因，不要循环重试" },
+  { command: "curl -sS -b '<cookie 文件>' \"$YEISME_CONTROL_ORIGIN/api/control-center/v1/session\"", note: "这个账号能读哪些范围（scopes[].id），以及退出时要用的 csrf" },
+  { command: "curl -sS -b '<cookie 文件>' \"$YEISME_CONTROL_ORIGIN/api/control-center/v1/production?scope=<范围>&episode_ref=<集引用>\"", note: "一集的七站：状态、计数、结果引用、等人的决定、下一步谁来做" },
+  { command: "curl -sS -b '<cookie 文件>' \"$YEISME_CONTROL_ORIGIN/api/control-center/v1/production?scope=<范围>\"", note: "不带集引用就是整个项目。15 秒内重复读拿到的是同一份，轮询别比这更快" },
+  { command: `curl -sS -b '<cookie 文件>' -X POST -H 'Origin: '"$YEISME_CONTROL_ORIGIN" -H 'X-CSRF-Token: <csrf>' "$YEISME_CONTROL_ORIGIN/api/control-center/v1/auth/logout" && rm '<cookie 文件>'`, note: "用完退出，删掉 cookie 文件" },
+];
+
+export const agentAccountCommand: GuideCommand = { command: "bun scripts/personal-config.ts user <配置文件> add <用户名> viewer <显示名> --key-file <新密钥文件>", note: "管理员在控制中心那台机器上运行；密钥写进新建的 0600 文件，不显示在终端" };

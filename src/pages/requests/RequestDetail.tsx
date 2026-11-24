@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { PromptLibraryLink } from "../../components/PromptLibraryLink";
+import { useEffect, useRef, useState } from "react";
 import { BookOpen, LoaderCircle, LockKeyhole, Paperclip } from "../../icons";
 import { api, errorCode, type AttachmentReadResult, type ContentRead, type Owner, type RequestObservationsPage, type RequestProjection } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
@@ -27,7 +28,8 @@ export function RequestDetail({ owner, id, initial, onClose }: { owner: Owner; i
   const [record, setRecord] = useState<RequestProjection | null>(initial || null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
-  const [process, setProcess] = useState<{ page: RequestObservationsPage | null; status: "idle" | "loading" | "ready" | "unavailable"; error: string | null }>({ page: null, status: "idle", error: null });
+  const [process, setProcess] = useState<{ page: RequestObservationsPage | null; status: "idle" | "loading" | "ready" | "stale" | "unavailable"; error: string | null }>({ page: null, status: "idle", error: null });
+  const processController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (initial) return;
@@ -38,17 +40,25 @@ export function RequestDetail({ owner, id, initial, onClose }: { owner: Owner; i
 
   const loadProcess = async () => {
     if (!record || process.status === "loading") return;
+    processController.current?.abort();
+    const controller = new AbortController();
+    processController.current = controller;
     setProcess((current) => ({ ...current, status: "loading", error: null }));
     try {
-      const result = await cache.read(`request-observation:${scopeId}:${owner}:${id}`, () => api.requestObservations(scopeId, owner, id), 10_000, 60_000);
-      setProcess({ page: result.data, status: "ready", error: null });
+      const result = await cache.read(`request-observation:${scopeId}:${owner}:${id}`, (signal) => api.requestObservations(scopeId, owner, id, undefined, signal), 10_000, 60_000, controller.signal);
+      if (controller.signal.aborted) return;
+      setProcess({ page: result.data, status: result.stale ? "stale" : "ready", error: null });
     } catch (failure) {
+      if (controller.signal.aborted) return;
       setProcess((current) => ({ ...current, status: "unavailable", error: errorCode(failure) }));
+    } finally {
+      if (processController.current === controller) processController.current = null;
     }
   };
 
   useEffect(() => {
     if (tab === "process" && record && process.status === "idle") void loadProcess();
+    return () => processController.current?.abort();
   }, [tab, record, process.status]);
 
   return <DetailSheet
@@ -69,7 +79,7 @@ export function RequestDetail({ owner, id, initial, onClose }: { owner: Owner; i
       ]} />
       {tab === "overview" && <Overview record={record} />}
       {tab === "process" && <ProcessTimeline observation={process.page?.observation || record.process} events={process.page?.events} loading={process.status === "loading"} error={process.status === "unavailable" ? process.error : null} onRetry={() => void loadProcess()} />}
-      {tab === "content" && <ContentTab record={record} />}
+      {tab === "content" && <><PromptLibraryLink owner={record.owner} source={record.id}/><ContentTab record={record} /></>}
       {tab === "execution" && <Execution record={record} />}
     </div>}
   </DetailSheet>;

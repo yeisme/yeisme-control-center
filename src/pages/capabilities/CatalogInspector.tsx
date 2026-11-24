@@ -7,7 +7,7 @@ import type { CatalogChange, SchemaSummary, ToolCatalog } from "../../shared/too
 import { formatFullTime, formatMoney, formatRelative } from "../../shared/read-model/format";
 import {
   availabilityLabels, availabilityTone, capabilityLabels, catalogCoverageLabels, catalogCoverageTone, changeLabels, changeTone, channelStatusLabels, channelStatusTone,
-  domainLabels, entryKindLabels, freshnessLabels, labelFrom, laneLabels, modelStatusLabels, modelStatusTone, reasonLabel, riskLabels, riskTone,
+  domainLabels, entryKindLabels, freshnessLabels, labelFrom, laneLabels, modelReadinessLabels, modelStatusLabels, modelStatusTone, reasonLabel, riskLabels, riskTone,
 } from "../../shared/read-model/labels";
 import { entryRef, guideTarget, type CatalogEntry } from "./catalog-view";
 
@@ -99,8 +99,8 @@ export function CatalogInspector({ entry, catalog, usage, mode, onModeChange, on
           { label: "模型引用", value: <span className="font-mono text-xs">{value.model_ref}</span>, wide: true },
           { label: "Provider", value: value.provider || <Unknown /> },
           { label: "渠道", value: value.channel || <Unknown /> },
-          { label: "状态来源", value: value.status_source === "owner" ? "owner 声明" : "owner 未声明（不推断为最新）" },
-          { label: "就绪度", value: value.readiness || <Unknown /> },
+          { label: "状态来源", value: value.status_source === "owner" ? "owner 声明" : value.status_source === "owner_readiness" ? "owner 就绪度为不可用" : "owner 未声明（不推断为最新）" },
+          { label: "就绪度", value: value.readiness ? modelReadinessLabels[value.readiness] || value.readiness : <Unknown /> },
           { label: "观察于", value: value.observed_at ? formatRelative(value.observed_at) : <Unknown /> },
           { label: "快照到期", value: value.expires_at ? formatFullTime(value.expires_at) : <Unknown /> },
         ]} />
@@ -269,6 +269,7 @@ export function CatalogInspector({ entry, catalog, usage, mode, onModeChange, on
     label="目录条目"
     ariaLabel="目录条目详情"
     dataAttribute="data-catalog-inspector"
+    itemKey={entryRef(kind, value.owner, value.id)}
     header={header}
     meta={<p className="mt-2 flex min-w-0 items-center gap-1.5 text-2xs text-muted"><FileJson className="size-3 shrink-0" /><span className="truncate font-mono">{entryRef(kind, value.owner, value.id)}</span></p>}
     sections={sections}

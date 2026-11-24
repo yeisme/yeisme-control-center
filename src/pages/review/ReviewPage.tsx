@@ -9,6 +9,7 @@ import {
   MetricStrip,
   NoticeStack,
   PageToolbar,
+  Pager,
   Panel,
   Pill,
   PopoverContent,
@@ -33,6 +34,9 @@ import { taskNeedsReview } from "../../shared/read-model/review";
 import type { DramaEpisodesResponse } from "../../shared/drama";
 import { dramaOwnerNames, dramaStageLabels } from "../../shared/read-model/drama";
 import { StageNode } from "../drama/StageRail";
+import { useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes } from "../../shared/pager";
 
 type Tab = "review" | "delivery";
 
@@ -123,6 +127,8 @@ export default function ReviewPage() {
   const [params, setParams] = useSearchParams();
   const tab = (params.get("tab") === "delivery" ? "delivery" : "review") as Tab;
   const queue = useMemo(() => tasks.rows.filter(taskNeedsReview), [tasks.rows]);
+  const { pageSize, setPageSize } = useListPreferences();
+  const paged = usePagedRows(queue, pageSize, []);
   const exports = useMemo(() => tasks.rows.filter((task) => task.provider_recovery?.export_status), [tasks.rows]);
   const reviewEmptyTitle = tasks.status === "empty" || tasks.status === "ready" ? "审阅数据未提供" : tasks.status === "forbidden" ? "无权读取审阅状态" : "审阅来源不可用";
   const reviewEmptyBody = tasks.status === "empty" || tasks.status === "ready"
@@ -135,7 +141,8 @@ export default function ReviewPage() {
     <h1 className="sr-only">审阅与交付</h1>
     <PageToolbar
       foldMetrics
-      summary="审阅与交付只读展示 owner 返回的状态。采用、修改意见和交付发送都是 owner 写操作，需要独立授权合同，当前保持禁用。"
+      lead={tasks.status === "loading" ? "正在找等你挑的结果…" : queue.length ? `${queue.length} 个任务的结果等你挑选。` : "现在没有等你挑的结果。"}
+      summary="挑选和交付的状态从各个工具读来。采用、提修改意见和交付要由工具开放写入接口，开放之前这里只能看，不能点。"
       actions={<FactsPopover />}
       metrics={tasks.status !== "loading" && <MetricStrip label="审阅概况" items={[
         { label: "待审阅", value: queue.length, tone: queue.length > 0 ? "review" : "neutral" },
@@ -156,8 +163,8 @@ export default function ReviewPage() {
         {!(stageReviews.data && "route_unavailable" in stageReviews.data) && <StageReviews read={stageReviews} onOpen={(episode) => navigate(`/drama?episode=${encodeURIComponent(episode)}`)} />}
         <Panel title="待审阅" actions={<span className="text-meta text-muted">来自任务观察批次</span>} bodyClassName="p-0">
           <ReadStateView status={tasks.status === "empty" ? "ready" : tasks.status} error={tasks.error} onRetry={tasks.refresh} skeleton={<SkeletonRows rows={4} />}>
-            {queue.length === 0 ? <EmptyState icon={<CheckCircle2 />} title={reviewEmptyTitle} body={reviewEmptyBody} /> : <ul className="divide-y divide-line">
-              {queue.map((task) => <li key={task.task_key} className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-5 py-3.5">
+            {queue.length === 0 ? <EmptyState icon={<CheckCircle2 />} title={reviewEmptyTitle} body={reviewEmptyBody} /> : <><ul className="divide-y divide-line">
+              {paged.rows.map((task) => <li key={task.task_key} className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-5 py-3.5">
                 <KindBadge kind={taskKind(task)} size="sm" />
                 <span className="min-w-0 flex-1 basis-48">
                   <span className="block truncate text-body-sm font-medium">{task.title}</span>
@@ -172,7 +179,8 @@ export default function ReviewPage() {
                   <Button size="sm" variant="ghost" onClick={() => navigate(`/tasks?task=${encodeURIComponent(task.task_key || "")}`)}>查看结果<ArrowRight className="size-3.5" /></Button>
                 </div>
               </li>)}
-            </ul>}
+            </ul>
+            <Pager window={paged} onPage={paged.setPage} noun="个待审阅任务" pageSize={pageSize} pageSizes={pageSizes} onPageSize={(value) => { setPageSize(value as typeof pageSize); paged.setPage(1); }} /></>}
           </ReadStateView>
         </Panel>
         </div>

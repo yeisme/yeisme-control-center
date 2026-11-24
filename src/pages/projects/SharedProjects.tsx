@@ -1,15 +1,17 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, errorCode } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { useCollaborationAction } from "../../app/collaboration-action";
-import { ActionsContextMenu, ActionsMenu, Button, Checkbox, CopyRef, DetailSheet, EmptyState, Field, Input, InlineNotice, PageToolbar, Pill, ReadStateView, Select, SkeletonRows, ownerLabel, useToast, type ItemAction } from "../../components/ui";
-import { ArrowLeft, Copy, Eye, FolderKanban, Link2, ListTodo, Pencil, Plus, Sparkles, UsersRound, Wallet } from "../../icons";
+import { ActionsContextMenu, ActionsMenu, Button, Checkbox, DetailSheet, EmptyState, Field, Input, InlineNotice, PageToolbar, ReadStateView, Select, SkeletonRows, ownerLabel, useToast, type ItemAction } from "../../components/ui";
+import { Copy, Eye, FolderKanban, Link2, ListTodo, Pencil, Plus, Sparkles, UsersRound, Wallet } from "../../icons";
 import { FilterBar } from "../../components/FilterBar";
 import { copyReference } from "../../shared/clipboard";
 import { maxProjectBindings, projectRoleLabels, type BindingOption, type CollaborationMember, type CollaborationTeam, type ProjectBinding, type ProjectGrant, type ProjectRole, type SharedProject } from "../../shared/collaboration";
-import { BindingPicker, bindingKey, bindingSummary, useToolProjectNames } from "./BindingPicker";
-import { ProjectFiles } from "../assets/ProjectFiles";
+import { BindingPicker, bindingKey, useToolProjectNames } from "./BindingPicker";
+import { NewProjectTile, SharedProjectCard } from "./SharedProjectCard";
+import { ProjectHome } from "./ProjectHome";
+import { NewProjectWizard } from "./NewProjectWizard";
 
 type Form = "organization" | "project" | "rename" | "members" | "bindings" | "policy" | null;
 export default function SharedProjects() {
@@ -59,6 +61,8 @@ export default function SharedProjects() {
     if (form === "policy") return action.prepare("project.update", target.id, target.revision, { generation_enabled: generation, budget_cap: Number(budget), currency });
   };
   const orgAdmin = organizations.data?.rows.find((o) => o.id === org)?.role === "admin";
+  const [wizard, setWizard] = useState(false);
+  const canWizard = !!organizations.data && (organizations.data.rows.some((o) => o.role === "admin") || (!organizations.data.rows.length && organizations.data.can_create));
   // A tool project handed over from the tool-projects page, to bind to an existing shared project or a new one.
   const pending: ProjectBinding | null = params.get("bindOwner") && params.get("bindProject") && params.get("bindScope") ? { owner: params.get("bindOwner")!, project_ref: params.get("bindProject")!, source_scope: params.get("bindScope")!, connection_ids: [] } : null;
   const pendingTenantOk = !pending || !params.get("bindTenant") || organizations.data?.rows.find((o) => o.id === org)?.source_tenant === params.get("bindTenant");
@@ -86,34 +90,44 @@ export default function SharedProjects() {
   };
   const menu = (p: SharedProject) => <ActionsMenu actions={actions(p)} label={`项目操作：${p.name}`} />;
   return <div className="page-enter space-y-4" data-page="shared-projects">
-    <h1 className="sr-only">共享项目</h1>
-    <PageToolbar summary="共享项目 · 分配给组织成员与团队" actions={<>
-      {organizations.data?.can_create && <Button size="sm" variant="secondary" onClick={() => openForm("organization")}>创建组织</Button>}
-      {orgAdmin && <Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => openForm("project")}>创建项目</Button>}
-    </>} />
+    <h1 className="sr-only">项目</h1>
+    {!project && <PageToolbar summary="项目 · 资产、产出、制作线和工具连接都在项目里" actions={<>
+      {organizations.data?.can_create && !!organizations.data.rows.length && <Button size="sm" variant="ghost" onClick={() => openForm("organization")}>创建组织</Button>}
+      {canWizard && !!organizations.data?.rows.length && <Button size="sm" variant="primary" data-new-project icon={<Plus className="size-4" />} onClick={() => setWizard(true)}>新建项目</Button>}
+    </>} />}
     {manualCopy && <InlineNotice tone="warning">浏览器未允许复制，请手动选择：<input aria-label="手动复制项目引用" readOnly value={manualCopy} className="mt-2 w-full rounded border border-line bg-panel px-2 py-1 font-mono text-xs" onFocus={(e) => e.target.select()} /></InlineNotice>}
     <ReadStateView status={organizations.status} error={organizations.error} onRetry={organizations.reload} skeleton={<SkeletonRows rows={3} />}>
-      {organizations.data?.rows.length === 0 ? <EmptyState icon={<FolderKanban />} title="创建第一个协作组织" body="项目、团队和成员按组织隔离。可先创建空项目，再关联已获准的 owner 项目。" action={organizations.data?.can_create ? <Button onClick={() => openForm("organization")}>创建组织</Button> : undefined} /> : <>
-        <div className="flex flex-wrap items-center gap-3"><label className="inline-flex items-center gap-2 text-sm">组织<Select value={org} onChange={(e) => selectOrganization(e.target.value)}>{organizations.data?.rows.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</Select></label><Button size="sm" variant="ghost" onClick={() => navigate(`/team?organization=${org}&tab=collaboration`)}>管理成员与团队</Button></div>
+      {organizations.data?.rows.length === 0 ? <EmptyState icon={<FolderKanban />} title="新建第一个项目" body="项目把工具里的任务和成果收在一起：有哪些资产、做出了哪些视频和音频，打开项目就能看到。" action={organizations.data?.can_create ? <Button data-new-project icon={<Plus className="size-4" />} onClick={() => setWizard(true)}>新建项目</Button> : undefined} /> : <>
+        {!project && <div className="flex flex-wrap items-center gap-3"><label className="inline-flex items-center gap-2 text-sm">组织<Select value={org} onChange={(e) => selectOrganization(e.target.value)}>{organizations.data?.rows.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</Select></label><Button size="sm" variant="ghost" onClick={() => navigate(`/admin?tab=organizations&organization=${encodeURIComponent(org)}`)}>管理成员与团队</Button></div>}
         {pending && !project && <InlineNotice tone={pendingTenantOk ? "info" : "warning"} actions={<>{orgAdmin && pendingTenantOk && <Button size="sm" variant="primary" onClick={() => bindTo()}>用它新建共享项目</Button>}<Button size="sm" variant="ghost" onClick={clearPending}>取消</Button></>}>
           {pendingTenantOk ? `选择要关联「${ownerLabel(pending.owner)} · ${pending.project_ref}」的共享项目，或用它新建一个。` : `当前组织的授权来源不包含「${ownerLabel(pending.owner)} · ${pending.project_ref}」，请切换组织。`}
         </InlineNotice>}
-        {project ? <>
-          <ActionsContextMenu actions={actions(project)}><div className="flex items-center gap-3" data-shared-project-header><Button variant="ghost" size="sm" icon={<ArrowLeft className="size-4" />} onClick={() => patch("sharedProject", null)}>项目列表</Button><h2 className="min-w-0 flex-1 truncate text-lg font-semibold">{project.name}</h2>{menu(project)}</div></ActionsContextMenu>
-          <div className="flex flex-wrap items-center gap-2"><Pill>{projectRoleLabels[project.role]}</Pill><CopyRef value={project.id} label="项目引用" onCopyFailed={setManualCopy} onCopySucceeded={() => setManualCopy("")} /><Button size="sm" variant="primary" disabled={project.role === "viewer"} onClick={() => { setScope(project.id); navigate(`/creation?sharedProject=${project.id}`); }}>创建生成批次</Button></div>
-          <ToolProjectsSection project={project} onManage={project.role === "project_admin" ? () => openForm("bindings", project) : undefined} />
-          <ProjectFiles project={project} />
-        </> : <>
-          <FilterBar placeholder="搜索共享项目" facets={[{ key: "hidden", label: "可见性", options: [{ value: "1", label: "已隐藏" }] }, { key: "role", label: "项目角色", options: Object.entries(projectRoleLabels).map(([value, label]) => ({ value, label })) }, { key: "owner", label: "工具", options: [...new Set((listing.data?.rows || []).flatMap((item) => item.bindings.map((binding) => binding.owner)))].map((value) => ({ value, label: ownerLabel(value) })) }]} />
+        {project ? <ProjectHome
+          project={project}
+          actions={actions(project)}
+          onBack={() => setParams((current) => { const next = new URLSearchParams(current); for (const key of ["sharedProject", "tab", "kind", "folder", "batch"]) next.delete(key); return next; })}
+          onManage={(next) => openForm(next, project)}
+          onChanged={() => setTick((v) => v + 1)}
+        /> : <>
+          <FilterBar placeholder="搜索项目" facets={[{ key: "hidden", label: "可见性", options: [{ value: "1", label: "已隐藏" }] }, { key: "role", label: "项目角色", options: Object.entries(projectRoleLabels).map(([value, label]) => ({ value, label })) }, { key: "owner", label: "工具", options: [...new Set((listing.data?.rows || []).flatMap((item) => item.bindings.map((binding) => binding.owner)))].map((value) => ({ value, label: ownerLabel(value) })) }]} />
           <ReadStateView status={listing.status} error={listing.error} onRetry={listing.reload} skeleton={<SkeletonRows rows={4} />}>
             {(() => {
               const ready = listing.status === "ready" || listing.status === "stale";
               const rows = ready ? (listing.data?.rows || []).filter((p) => (!params.get("role") || params.get("role")!.split(",").includes(p.role)) && (!params.get("owner") || p.bindings.some((binding) => params.get("owner")!.split(",").includes(binding.owner)))) : [];
               const filtered = Boolean(q || params.get("role") || params.get("owner"));
-              const emptyBody = filtered ? "尝试清除搜索、角色或 owner 筛选。" : hidden === "1" ? "隐藏项目会保留在当前组织，可随时取消隐藏。" : "创建项目后，可分配给本组织成员或团队。";
-              return <div className="divide-y divide-line rounded-control border border-line bg-panel">{rows.map((p) => <ActionsContextMenu key={p.id} actions={actions(p)}><div data-shared-project={p.id} className="flex items-center gap-3 px-4 py-3">
-                <FolderKanban className="size-5 shrink-0 text-muted" /><button className="min-w-0 flex-1 text-left" onClick={() => patch("sharedProject", p.id)}><span className="block truncate font-medium">{p.name}</span><span className="text-xs text-muted">{bindingSummary(p.bindings)} · {projectRoleLabels[p.role]}</span></button>{pending && pendingTenantOk && p.role === "project_admin" && <Button size="sm" variant="secondary" disabled={pendingBound(p) || p.bindings.length >= maxProjectBindings} onClick={() => bindTo(p)}>{pendingBound(p) ? "已关联" : "关联到这里"}</Button>}{menu(p)}
-              </div></ActionsContextMenu>)}{ready && !rows.length && <EmptyState compact title={filtered ? "没有匹配的项目" : hidden === "1" ? "暂无已隐藏项目" : "暂无共享项目"} body={emptyBody} />}</div>;
+              const emptyBody = filtered ? "尝试清除搜索、角色或工具筛选。" : hidden === "1" ? "隐藏项目会保留在当前组织，可随时取消隐藏。" : "创建项目后，可分配给本组织成员或团队。";
+              return <>
+                <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="项目">
+                  {rows.map((p) => <li key={p.id} className="min-w-0"><ActionsContextMenu actions={actions(p)}><SharedProjectCard
+                    project={p}
+                    onOpen={() => patch("sharedProject", p.id)}
+                    menu={menu(p)}
+                    extra={pending && pendingTenantOk && p.role === "project_admin" ? <Button size="sm" variant="secondary" disabled={pendingBound(p) || p.bindings.length >= maxProjectBindings} onClick={() => bindTo(p)}>{pendingBound(p) ? "已关联" : "关联到这里"}</Button> : undefined}
+                  /></ActionsContextMenu></li>)}
+                  {rows.length > 0 && !filtered && hidden !== "1" && orgAdmin && <li className="min-w-0"><NewProjectTile onClick={() => setWizard(true)} /></li>}
+                </ul>
+                {ready && !rows.length && <EmptyState compact title={filtered ? "没有匹配的项目" : hidden === "1" ? "暂无已隐藏项目" : "还没有项目"} body={emptyBody} action={!filtered && hidden !== "1" && orgAdmin ? <Button icon={<Plus className="size-4" />} onClick={() => setWizard(true)}>新建项目</Button> : undefined} />}
+              </>;
             })()}
           </ReadStateView>
         </>}
@@ -134,18 +148,13 @@ export default function SharedProjects() {
       </div>
       {action.preview && <InlineNotice tone="info" className="mt-4">变更已校验。{form === "members" ? `新增 ${grants.filter((g) => !target?.grants.some((v) => v.subject_type === g.subject_type && v.subject_id === g.subject_id)).length} 项，移除 ${target?.grants.filter((g) => !grants.some((v) => v.subject_type === g.subject_type && v.subject_id === g.subject_id)).length || 0} 项，角色变化 ${grants.filter((g) => target?.grants.some((v) => v.subject_type === g.subject_type && v.subject_id === g.subject_id && v.role !== g.role)).length} 项。` : "确认后保存当前变更。"}</InlineNotice>}
     </DetailSheet>
+    {organizations.data && <NewProjectWizard
+      open={wizard}
+      onOpenChange={setWizard}
+      organizations={organizations.data.rows}
+      organization={org}
+      canCreateOrganization={organizations.data.can_create}
+      onCreated={(id, bound) => { setWizard(false); setTick((v) => v + 1); toast("项目已创建", "success"); setParams((current) => { const next = new URLSearchParams(current); next.set("sharedProject", id); next.delete("organization"); if (!bound) next.set("tab", "connections"); else next.delete("tab"); return next; }); }}
+    />}
   </div>;
-}
-
-/** The tool projects a shared project reads, grouped by tool, with local names where they exist. */
-function ToolProjectsSection({ project, onManage }: { project: SharedProject; onManage?: () => void }) {
-  const names = useToolProjectNames();
-  const owners = [...new Set(project.bindings.map((b) => b.owner))];
-  return <section aria-label="工具项目" data-tool-projects className="rounded-control border border-line bg-panel p-4">
-    <div className="flex items-center gap-2"><h3 className="flex-1 text-body-sm font-semibold">工具项目</h3>{onManage && <Button size="sm" variant="ghost" onClick={onManage}>管理关联</Button>}</div>
-    {project.bindings.length ? <dl className="mt-3 grid gap-x-4 gap-y-2 sm:grid-cols-[max-content_1fr]">{owners.map((owner) => <Fragment key={owner}>
-      <dt className="text-meta text-muted">{ownerLabel(owner)}</dt>
-      <dd className="flex min-w-0 flex-wrap gap-1.5">{project.bindings.filter((b) => b.owner === owner).map((b) => <Pill key={bindingKey(b)} size="sm" title={b.project_ref}>{names.get(bindingKey(b)) || b.project_ref}</Pill>)}</dd>
-    </Fragment>)}</dl> : <p className="mt-2 text-body-sm text-muted">尚未关联工具项目。项目成员与文件夹可以管理；生成和成果读取要等关联后才可用。</p>}
-  </section>;
 }

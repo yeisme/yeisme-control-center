@@ -30,8 +30,8 @@ function Shell({ open, onOpenChange, title, description, children }: { open: boo
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fade-in fixed inset-0 z-40 backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
-        <Dialog.Content className="pop-in fixed left-1/2 top-1/2 z-50 w-[min(480px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none">
+        <Dialog.Overlay className="fade-in fixed inset-0 z-sheet-scrim backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
+        <Dialog.Content className="pop-in fixed left-1/2 top-1/2 z-sheet w-[min(480px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none">
           <Dialog.Title className="text-title-sm font-semibold">{title}</Dialog.Title>
           <Dialog.Description className="mt-1 text-body-sm text-muted">{description}</Dialog.Description>
           {children}

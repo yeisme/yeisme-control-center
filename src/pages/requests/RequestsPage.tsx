@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useOverlayParams } from "../../app/overlay-history";
-import { ChevronDown, Clock3, Copy, FileText, Info, LoaderCircle, LockKeyhole, PanelRightOpen, RefreshCw, SlidersHorizontal } from "../../icons";
+import { ChevronDown, Clock3, Copy, FileText, Info, LockKeyhole, PanelRightOpen, RefreshCw, SlidersHorizontal } from "../../icons";
 import { linkActions, useCopy } from "../../app/item-actions";
 import { api, errorClassOf, errorCode, isAbort, type Coverage, type Owner, type RequestPage, type RequestProjection, type RequestQuery, type RequestSummaryResponse } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
 import { recentTarget, useRememberRecent } from "../../app/recent";
 import { useObservationCache } from "../../app/observation-cache";
 import { coverageLabels, defaultRequestQuery, type CoverageState } from "../../request-visibility";
-import { ActionsContextMenu, Button, CoverageChip, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, SearchField, Select, SkeletonBlock, StaleNotice, TaskStatePill, ToggleGroup, coverageTone, cx, moveBetweenRows, ownerLabel, type ItemAction, type Metric, type Tone } from "../../components/ui";
+import { ActionsContextMenu, Button, CoverageChip, EmptyState, InlineNotice, MetricStrip, NoticeStack, PageToolbar, Pager, Panel, Pill, ReadStateView, SearchField, Select, SkeletonBlock, StaleNotice, TaskStatePill, ToggleGroup, coverageTone, cx, moveBetweenRows, ownerLabel, type ItemAction, type Metric, type Tone } from "../../components/ui";
 import { readStatusLabels, statusForFailure, type ReadStatus } from "../../shared/read-model/read-state";
 import { reasonLabel } from "../../shared/read-model/labels";
 import { formatCount, formatFullTime, formatRelative } from "../../shared/read-model/format";
 import { RequestDetail } from "./RequestDetail";
+import { useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes } from "../../shared/pager";
 
 type Window = "24h" | "3d" | "7d";
 const windows: { id: Window; label: string; hours: number }[] = [
@@ -82,6 +85,7 @@ export default function RequestsPage() {
   const [list, setList] = useState<ListState>({ status: "loading", rows: [], coverage: [], error: null, observedAt: null, loadingMore: false, pages: 0 });
   const [summary, setSummary] = useState<{ status: ReadStatus; data: RequestSummaryResponse | null; error: string | null }>({ status: "loading", data: null, error: null });
   const [tick, setTick] = useState(0);
+  const loadMoreController = useRef<AbortController | null>(null);
   const identity = `${scopeId}|${generation}|${queryKey}|${tick}`;
   const identityRef = useRef(identity);
   identityRef.current = identity;
@@ -93,8 +97,11 @@ export default function RequestsPage() {
       if (value && value !== "all") next.set(key, value);
       else next.delete(key);
     }
+    // A new window, source or search is a new list; opening a request keeps the page it was opened from.
+    if (Object.keys(patch).some((key) => key !== "request")) next.delete("page");
     writeOverlay(next);
   };
+  const { pageSize, setPageSize } = useListPreferences();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -112,40 +119,49 @@ export default function RequestsPage() {
     if (cachedList) setList({ status: cachedList.stale ? "stale" : cachedList.data.rows.length ? "ready" : "empty", rows: cachedList.data.rows, coverage: cachedList.data.coverage, next: cachedList.data.next_cursor, error: null, observedAt: new Date().toISOString(), loadingMore: false, pages: 1 });
     const cachedSummary = cache.peek<RequestSummaryResponse>(summaryKey);
     if (cachedSummary) setSummary({ status: cachedSummary.stale ? "stale" : "ready", data: cachedSummary.data, error: null });
-    cache.read(listKey, () => api.requests(scopeId, query, controller.signal), 10_000, 60_000).then(({ data: page }) => {
+    cache.read(listKey, (signal) => api.requests(scopeId, query, signal), 10_000, 60_000, controller.signal).then(({ data: page, stale }) => {
       if (identityRef.current !== requested) return;
       noteEpoch(page.epoch);
-      setList({ status: page.rows.length ? "ready" : "empty", rows: page.rows, coverage: page.coverage, next: page.next_cursor, error: null, observedAt: new Date().toISOString(), loadingMore: false, pages: 1 });
+      setList({ status: stale ? "stale" : page.rows.length ? "ready" : "empty", rows: page.rows, coverage: page.coverage, next: page.next_cursor, error: null, observedAt: new Date().toISOString(), loadingMore: false, pages: 1 });
     }).catch((error) => {
       const code = fail(error);
       if (code) setList((current) => ({ ...current, status: statusForFailure(errorClassOf(error), code, current.rows.length > 0), error: code }));
     });
-    cache.read(summaryKey, () => api.requestSummary(scopeId, query, controller.signal), 10_000, 60_000).then(({ data }) => {
+    cache.read(summaryKey, (signal) => api.requestSummary(scopeId, query, signal), 10_000, 60_000, controller.signal).then(({ data, stale }) => {
       if (identityRef.current !== requested) return;
-      setSummary({ status: "ready", data, error: null });
+      setSummary({ status: stale ? "stale" : "ready", data, error: null });
     }).catch((error) => {
       const code = fail(error);
       if (code) setSummary((current) => ({ status: statusForFailure(errorClassOf(error), code, current.data !== null), data: current.data, error: code }));
     });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      loadMoreController.current?.abort();
+    };
   }, [identity]);
 
   const loadMore = useCallback(async () => {
     if (!list.next || list.loadingMore) return;
     const requested = identityRef.current;
+    const cursor = list.next;
+    const controller = new AbortController();
+    loadMoreController.current?.abort();
+    loadMoreController.current = controller;
     setList((current) => ({ ...current, loadingMore: true }));
     try {
-      const page = await api.requests(scopeId, { ...query, cursor: list.next });
-      if (identityRef.current !== requested) return;
+      const page = await api.requests(scopeId, { ...query, cursor }, controller.signal);
+      if (controller.signal.aborted || identityRef.current !== requested || list.next !== cursor) return;
       setList((current) => {
         const seen = new Set(current.rows.map((row) => row.owner + ":" + row.id));
         return { ...current, rows: [...current.rows, ...page.rows.filter((row) => !seen.has(row.owner + ":" + row.id))], coverage: page.coverage, next: page.next_cursor, loadingMore: false, pages: current.pages + 1 };
       });
     } catch (error) {
-      if (identityRef.current !== requested) return;
+      if (controller.signal.aborted || identityRef.current !== requested) return;
       // A changed filter or epoch invalidates the signed cursor; restart from the first page once.
       if (errorClassOf(error) === "conflict") { setTick((value) => value + 1); return; }
       setList((current) => ({ ...current, loadingMore: false, error: errorCode(error) }));
+    } finally {
+      if (loadMoreController.current === controller) loadMoreController.current = null;
     }
   }, [list.next, list.loadingMore, scopeId, query]);
 
@@ -153,7 +169,11 @@ export default function RequestsPage() {
   useRememberRecent(selected ? { key: `request:${selected.owner}:${selected.id}`, kind: "request", label: selected.title || selected.id, meta: `${ownerLabel(selected.owner)} · 请求`, target: recentTarget("/requests", params) } : null);
   const [selectedOwner, ...selectedIdParts] = (selectedKey || "").split(":");
   const delegationMissing = list.coverage.length > 0 && list.coverage.every((item) => item.reason === "delegation_unavailable" || item.reason === "source_not_configured");
-  const refresh = () => setTick((value) => value + 1);
+  const refresh = () => {
+    cache.invalidate(`requests:${scopeId}:${queryKey}`);
+    cache.invalidate(`request-summary:${scopeId}:${queryKey}`);
+    setTick((value) => value + 1);
+  };
   const batchCount = (state: string) => list.rows.filter((row) => row.state === state).length;
   const failed = batchCount("failed");
   const undetermined = batchCount("unknown");
@@ -165,12 +185,13 @@ export default function RequestsPage() {
     { label: "执行中", value: running, tone: running ? "info" : "neutral" },
   ];
   const batchLoading = list.status === "loading" && list.rows.length === 0;
+  const paged = usePagedRows(list.rows, pageSize, requestOverlays);
 
   return <div className="page-enter space-y-5" data-page="requests">
     <h1 className="sr-only">请求记录</h1>
     <PageToolbar
       foldMetrics
-      summary="先核对各来源的汇总，再用时间窗与筛选读取请求批次；请求正文需说明用途后按需读取，并写入审计。"
+      summary="先看各个来源的汇总，再按时间和条件读取请求；请求正文要先说明用途才会读取，并记进审计。"
       metrics={batchLoading ? <SkeletonBlock className="h-[50px] w-72 max-w-full rounded-control" /> : list.rows.length > 0 ? <MetricStrip label="当前批次概况" items={batchMetrics} /> : undefined}
       meta={list.observedAt ? <span className="inline-flex items-center gap-1.5 text-2xs text-muted"><Clock3 className="size-3.5" />读取于 {formatRelative(list.observedAt)}</span> : undefined}
       actions={<Button size="sm" onClick={refresh} icon={<RefreshCw className="size-3.5" />}>刷新</Button>}
@@ -224,16 +245,21 @@ export default function RequestsPage() {
         {list.rows.length === 0 ? <EmptyState icon={<FileText />} title="当前批次没有请求" body={list.coverage.some((item) => item.state !== "complete") ? "部分来源没有完整返回，空列表不代表没有请求，请查看上方来源覆盖。" : "所选时间窗内没有记录。"} /> : <>
           <RequestListHeader />
           <ul className="divide-y divide-line" aria-label="请求列表" onKeyDown={(event) => moveBetweenRows(event)}>
-            {list.rows.map((row, index) => <RequestRow key={row.owner + ":" + row.id} row={row} index={index} selected={selectedKey === row.owner + ":" + row.id} onOpen={() => update({ request: row.owner + ":" + row.id })} actions={[
+            {paged.rows.map((row, index) => <RequestRow key={row.owner + ":" + row.id} row={row} index={index} selected={selectedKey === row.owner + ":" + row.id} onOpen={() => update({ request: row.owner + ":" + row.id })} actions={[
               { id: "open", label: "打开详情", icon: <PanelRightOpen />, group: "open", run: () => update({ request: row.owner + ":" + row.id }) },
               ...linkActions(`/requests?request=${encodeURIComponent(row.owner + ":" + row.id)}`, copy),
               { id: "copy-ref", label: "复制请求引用", icon: <Copy />, group: "link", run: () => void copy(row.id, "请求引用") },
             ]} />)}
           </ul>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-3 text-meta text-muted">
-            <span className="tabular">当前批次 {list.rows.length} 条（{list.pages} 页，按来源分批）</span>
-            {list.next && <Button size="sm" variant="ghost" disabled={list.loadingMore} onClick={() => void loadMore()} icon={list.loadingMore ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : <ChevronDown className="size-3.5" />}>加载下一批</Button>}
-          </div>
+          <Pager
+            window={paged}
+            onPage={paged.setPage}
+            noun={`条已读取请求（${list.pages} 批，按来源分批）`}
+            pageSize={pageSize}
+            pageSizes={pageSizes}
+            onPageSize={(value) => { setPageSize(value as typeof pageSize); paged.setPage(1); }}
+            more={list.next ? { label: "读取下一批", loading: list.loadingMore, onMore: loadMore } : null}
+          />
         </>}
       </ReadStateView>
     </Panel>

@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api/control-center-client";
 import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { useCollaborationAction } from "../../app/collaboration-action";
-import { Button, Checkbox, CopyRef, DetailSheet, EmptyState, Field, Input, InlineNotice, Panel, ReadStateView, Select, SkeletonRows, ToggleGroup, kindOf, ownerLabel } from "../../components/ui";
+import { Button, Checkbox, CopyRef, DetailSheet, EmptyState, Field, Input, InlineNotice, Panel, ReadStateView, Select, SkeletonRows, ToggleGroup, KindBadge, cx, kindOf, ownerLabel, type MediaKind } from "../../components/ui";
 import { resultAction } from "../../shared/read-model/tasks";
 import { FolderClosed, Plus, Images } from "../../icons";
 import { FilterBar } from "../../components/FilterBar";
@@ -34,6 +34,7 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
   const action = useCollaborationAction(() => { setForm(null); setChecked([]); setTick((n) => n + 1); });
   const player = useAudioPlayer();
   const preview = useMediaPreview({ previewKey, resolve: useCallback((key: string) => previewTarget?.key === key ? previewTarget : null, [previewTarget]), onPreviewKeyChange: useCallback((key: string | null) => setPreviewKey(key), []) });
+  const viewing = useRef(preview.status); viewing.current = preview.status;
   const selectedTask = useScopedRead((_s, signal) => api.projectItemTask(project.id, selected!.id, signal), { enabled: !!selected, key: selected?.id || "" });
   const patch = (values: Record<string, string | null>) => setParams((current) => { const next = new URLSearchParams(current); for (const [key, value] of Object.entries(values)) if (value) next.set(key, value); else next.delete(key); next.delete("cursor"); return next; });
   const currentFolder = folders.data?.rows.find((f) => f.id === folder);
@@ -47,6 +48,8 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
     setPreviewError("");
     if (!stepping) preview.close();
     const task = await api.projectItemTask(project.id, item.id);
+    // A step that lands after the viewer was closed must not open it again.
+    if (stepping && viewing.current === "closed") return;
     const artifact = task.results.find((a) => a.ref === item.artifact_ref);
     if (!artifact) throw Error("成果已缺失或版本已变化，请刷新目录。");
     const target: PreviewTarget = { key: item.id, task, result: artifact, kind: kindOf(artifact.mime) };
@@ -79,15 +82,15 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
       <div className="min-w-0 space-y-3">
         <nav aria-label="文件夹路径" className="flex flex-wrap items-center gap-1 text-sm"><Button variant="ghost" size="sm" onClick={() => patch({ folder: null, batch: null })}>成果</Button>{folderPath.map((f) => <span key={f.id}>/ <button className="hover:underline" onClick={() => patch({ folder: f.id })}>{f.name}</button></span>)}{folder === "unfiled" && " / 未整理"}{currentFolder && canEdit && <Button size="sm" variant="ghost" onClick={() => { action.reset(); setForm("rename"); setName(currentFolder.name); }}>重命名文件夹</Button>}</nav>
         <FilterBar placeholder="搜索成果名称" dates facets={[{ key: "kind", label: "类型", options: [{ value: "image", label: "图片" }, { value: "video", label: "视频" }, { value: "audio", label: "音频" }] }, { key: "owner", label: "来源", options: [...new Set(project.bindings.map((b) => b.owner))].map((owner) => ({ value: owner, label: ownerLabel(owner) })) }]} />
-        {files.data?.coverage !== "complete" && <InlineNotice tone="neutral">成果目录来自 owner 可读取的任务投影；当前覆盖不完整，未返回的成果不计为零。</InlineNotice>}
+        {files.data?.coverage !== "complete" && <InlineNotice tone="neutral">有工具这次没有读完，这里只列出已读到的成果；没读到的不算作零。</InlineNotice>}
         {checked.length > 0 && canEdit && <Button size="sm" onClick={() => { action.reset(); setForm("move"); }}>移动 {checked.length} 项引用</Button>}
         <ReadStateView status={files.status} error={files.error} onRetry={() => { if (files.error?.includes("cursor")) patch({ cursor: null, source_cursor: null }); else files.reload(); }} skeleton={<SkeletonRows rows={5} />}>
           {children.length > 0 && !params.get("q") && <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">{children.map((f) => <FolderTile key={f.id} project={project.id} folder={f} tick={tick} subfolders={folders.data?.rows.filter((r) => r.parent_id === f.id).length || 0} onSelect={() => setSelected(null)} onOpen={() => patch({ folder: f.id })} />)}</div>}
           <div className={view === "grid" ? "grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" : "divide-y divide-line rounded-control border border-line"}>
-            {rows.map((item) => <article key={item.id} className={view === "grid" ? "min-w-0 rounded-control border border-line bg-panel p-2" : "flex min-w-0 items-center gap-3 bg-panel p-3"}>
-              <button className={view === "grid" ? "block aspect-[4/3] w-full overflow-hidden rounded-control bg-panel-soft" : "size-12 shrink-0"} aria-label={`查看成果 ${item.name}`} onClick={() => setSelected(item)}><ItemThumbnail project={project.id} item={item} /></button>
-              <button className="block min-w-0 flex-1 py-2 text-left" onClick={() => setSelected(item)}><span className="block truncate text-sm font-medium">{item.name}</span><span className="text-xs text-muted">{ownerLabel(item.owner)} · {({ image: "图片", video: "视频", audio: "音频" } as Record<string, string>)[item.mime.split("/")[0]] || "文件"}</span></button>
-              <div className="flex items-center justify-between gap-1">{canEdit && <Checkbox label={`选择 ${item.name}`} checked={checked.includes(item.id)} onChange={(v) => setChecked((list) => v ? [...list, item.id] : list.filter((id) => id !== item.id))} />}<Button size="sm" variant="ghost" aria-label={`${kindOf(item.mime) === "audio" ? "播放" : "预览"} ${item.name}`} onClick={() => void openPreview(item).catch((error) => setPreviewError(error instanceof Error ? error.message : "预览暂不可用"))}>{kindOf(item.mime) === "audio" ? "播放" : "预览"}</Button></div>
+            {rows.map((item) => <article key={item.id} className={view === "grid" ? "group min-w-0 overflow-hidden rounded-tile border border-line/70 bg-panel shadow-card transition-[border-color,box-shadow,transform] duration-200 ease-out hover:border-line-strong hover:shadow-raised motion-safe:hover:-translate-y-0.5" : "flex min-w-0 items-center gap-3 bg-panel p-3"}>
+              <button className={view === "grid" ? "block aspect-[16/10] w-full overflow-hidden border-b border-line/60 bg-panel-sunken" : "size-12 shrink-0 overflow-hidden rounded-control"} aria-label={`查看成果 ${item.name}`} onClick={() => setSelected(item)}><ItemThumbnail project={project.id} item={item} /></button>
+              <button className={cx("block min-w-0 flex-1 text-left", view === "grid" ? "px-3 pb-1 pt-2.5" : "py-2")} onClick={() => setSelected(item)}><span className="block truncate text-sm font-medium">{item.name}</span><span className="text-xs text-muted">{ownerLabel(item.owner)} · {({ image: "图片", video: "视频", audio: "音频" } as Record<string, string>)[item.mime.split("/")[0]] || "文件"}</span></button>
+              <div className={cx("flex items-center justify-between gap-1", view === "grid" && "px-2 pb-2")}>{canEdit && <Checkbox label={`选择 ${item.name}`} checked={checked.includes(item.id)} onChange={(v) => setChecked((list) => v ? [...list, item.id] : list.filter((id) => id !== item.id))} />}<Button size="sm" variant="ghost" aria-label={`${kindOf(item.mime) === "audio" ? "播放" : "预览"} ${item.name}`} onClick={() => void openPreview(item).catch((error) => setPreviewError(error instanceof Error ? error.message : "预览暂不可用"))}>{kindOf(item.mime) === "audio" ? "播放" : "预览"}</Button></div>
             </article>)}
           </div>
           {!rows.length && !children.length && <EmptyState icon={<Images />} title="当前目录没有可显示的成果" body="生成结果会按原任务引用归入目录；缺少授权或来源暂不可用时保留明确状态。" />}
@@ -107,12 +110,29 @@ export function ProjectFiles({ project }: { project: SharedProject }) {
     <MediaViewer controller={preview} slides={viewerSlides} onNavigate={stepViewer} onDetails={viewerDetails} />
   </section>;
 }
-function ItemThumbnail({ project, item }: { project: string; item: ProjectItem }) {
+export function ItemThumbnail({ project, item }: { project: string; item: ProjectItem }) {
   const host = useRef<HTMLSpanElement>(null); const [visible, setVisible] = useState(false);
   useEffect(() => { if (!host.current || typeof IntersectionObserver === "undefined") { setVisible(true); return; } const observer = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) { setVisible(true); observer.disconnect(); } }, { rootMargin: "160px" }); observer.observe(host.current); return () => observer.disconnect(); }, []);
   const task = useScopedRead((_s, signal) => api.projectItemTask(project, item.id, signal), { key: item.id, enabled: visible });
   const artifact = task.data?.results.find((r) => r.ref === item.artifact_ref);
-  return <span ref={host} className="block size-full">{task.data && artifact ? <TaskThumbnail task={task.data} result={artifact} size="lg" className="size-full" /> : <span className="grid size-full place-items-center text-muted"><Images className="size-6" /></span>}</span>;
+  const placeholder = <ItemPlaceholder item={item} />;
+  return <span ref={host} className="block size-full">{task.data && artifact ? <TaskThumbnail task={task.data} result={artifact} frameless className="size-full" fallback={placeholder} /> : placeholder}</span>;
+}
+
+const placeholderTones: Record<MediaKind, string> = {
+  image: "from-kind-image-soft to-kind-image/25",
+  video: "from-kind-video-soft to-kind-video/25",
+  audio: "from-kind-audio-soft to-kind-audio/25",
+  text: "from-kind-text-soft to-kind-text/25",
+};
+
+/** A result without a picture yet: its kind's tint and its name, so a row of them still reads as distinct results. */
+export function ItemPlaceholder({ item }: { item: ProjectItem }) {
+  const kind = kindOf(item.mime);
+  return <span data-item-placeholder={kind} className={cx("relative block size-full min-h-0 bg-linear-to-br", placeholderTones[kind])}>
+    <KindBadge kind={kind} size="sm" className="absolute left-2 top-2 bg-panel/70" />
+    <span className="absolute inset-x-2 bottom-1.5 truncate text-left text-[11px] leading-tight text-ink-soft max-[480px]:hidden">{item.name}</span>
+  </span>;
 }
 
 // The accessible name stays the folder name; the count line is its description.

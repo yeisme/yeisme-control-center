@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ArrowRight, Clapperboard, Columns3, Copy, Plug, RefreshCw } from "../../icons";
+import { ArrowRight, Clapperboard, Columns3, Copy, Plug, RefreshCw, Workflow } from "../../icons";
 import { useScopedRead } from "../../app/workspace";
 import { InspectorShell } from "../../components/InspectorShell";
 import { OwnerLinkRow } from "../../components/OwnerLinkRow";
@@ -32,10 +32,12 @@ function SourceChip({ source }: { source?: { state: string; reason?: string } })
   return <CoverageChip state={source?.state || "unknown"} reason={source?.reason && blockerLabel(source.reason)} />;
 }
 
-export function EpisodeInspector({ episode, title, origin, scaenaOverride, onScaenaOverride, tasks, mode, maximized, onModeChange, onMaximize, onClose, onNavigate }: {
+export function EpisodeInspector({ episode, title, origin, scaenaOverride, onScaenaOverride, tasks, mode, maximized, onModeChange, onMaximize, onClose, onNavigate, onStudio, initialSection }: {
   episode: string;
   title: string;
   origin: EpisodeOrigin;
+  /** The section to open at (`chain` when a stage decision opened the panel). */
+  initialSection?: string | null;
   scaenaOverride?: string;
   onScaenaOverride: (value: string) => void;
   scopeLabel: string;
@@ -46,6 +48,8 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
   onMaximize: () => void;
   onClose: () => void;
   onNavigate: (to: string) => void;
+  /** Opens this episode's production line and shot board. */
+  onStudio?: () => void;
 }) {
   const [nonce, setNonce] = useState(0);
   const [draft, setDraft] = useState(scaenaOverride || "");
@@ -84,6 +88,7 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
   const footer = <div className="flex flex-wrap items-center gap-2">
     <Button size="sm" variant="ghost" onClick={onClose}>关闭</Button>
     <Button size="sm" className="ml-auto" disabled={read.status === "loading"} icon={<RefreshCw className="size-3.5" />} onClick={() => { refresh.current = true; setNonce((value) => value + 1); }}>重新读取</Button>
+    {onStudio && <Button size="sm" variant="primary" icon={<Workflow className="size-3.5" />} onClick={onStudio}>进入制作线</Button>}
   </div>;
 
   return <InspectorShell
@@ -96,6 +101,8 @@ export function EpisodeInspector({ episode, title, origin, scaenaOverride, onSca
     label="剧集"
     ariaLabel="剧集详情"
     dataAttribute="data-drama-inspector"
+    itemKey={episode}
+    initialSection={initialSection}
     header={header}
     meta={meta}
     sections={sections}

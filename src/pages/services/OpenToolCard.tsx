@@ -38,7 +38,7 @@ function RunRow({ run }: { run: OpenToolOperation }) {
 }
 
 /** One open tool on the services page: health checks, then runs, backends and usage as the tool reports them. */
-export function OpenToolCard({ name, purpose, tool, credential, now, onQueue, onCatalog }: { name: string; purpose: string; tool: OpenToolProjection; credential?: CredentialStatus; now: number; onQueue: () => void; onCatalog?: () => void }) {
+export function OpenToolCard({ name, purpose, tool, credential, now, onQueue, onCatalog, onMonitor }: { name: string; purpose: string; tool: OpenToolProjection; credential?: CredentialStatus; now: number; onQueue: () => void; onCatalog?: () => void; onMonitor?: () => void }) {
   const tone = stateTone[tool.state];
   const reason = tool.state !== "ready" && tool.reason ? reasonLabel(tool.reason) : null;
   const counts = tool.operations.counts;
@@ -74,6 +74,7 @@ export function OpenToolCard({ name, purpose, tool, credential, now, onQueue, on
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5"><Clock3 className="size-3.5 shrink-0" /><span className="truncate">{tool.freshness === "stale" ? `显示 ${formatRelative(tool.observed_at)} 的读数` : `观察于 ${formatRelative(tool.observed_at)}`}</span></span>
         <span className="flex shrink-0 items-center gap-1">
+          {onMonitor && <Button size="sm" variant="ghost" onClick={onMonitor}>实时监控</Button>}
           {onCatalog && <Button size="sm" variant="ghost" onClick={onCatalog}>工具目录</Button>}
           <Button size="sm" variant="ghost" onClick={onQueue}>工作台<ArrowRight className="size-3.5" /></Button>
         </span>

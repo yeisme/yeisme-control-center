@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useInspectorMode } from "../../app/preferences";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Clock3, Copy, Eye, FolderKanban, LoaderCircle, PanelRightOpen, Play, RefreshCw, SlidersHorizontal } from "../../icons";
+import { Clock3, Copy, Eye, FolderKanban, LoaderCircle, PanelRightOpen, Play, RefreshCw } from "../../icons";
 import { linkActions, useCopy } from "../../app/item-actions";
 import { api, errorCode, type TaskConnectionState, type TaskSnapshot } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
@@ -8,22 +9,33 @@ import { recentTarget, useRememberRecent } from "../../app/recent";
 import { taskTime, useTasks } from "../../app/tasks-context";
 import { useMediaPreview } from "../../components/media-preview";
 import { SourceStatusLine } from "../../components/SourceStatusLine";
-import { useOverlayParams } from "../../app/overlay-history";
-import { Button, DataTable, fillMainColumn, Dot, EmptyState, InlineNotice, NoticeAction, NoticeStack, PageToolbar, Panel, Progress, ReadStateView, SearchField, Select, SkeletonRows, TaskStatePill, ToggleGroup, cx, ownerLabel, useToast, type Column, type ItemAction } from "../../components/ui";
+import { liveQuery, useOverlayParams } from "../../app/overlay-history";
+import { Button, DataTable, fillMainColumn, Dot, EmptyState, InlineNotice, NoticeAction, NoticeStack, PageToolbar, Pager, Panel, Progress, ReadStateView, SkeletonRows, TaskStatePill, ToggleGroup, cx, ownerLabel, sortByColumn, useToast, type Column, type ItemAction } from "../../components/ui";
 import { formatFullTime, formatRelative } from "../../shared/read-model/format";
 import { collectResults, connectionStateLabel, connectionTone, inView, resultAction, stageLabel, taskInProgress, ownerModality, type TaskView } from "../../shared/read-model/tasks";
-import { filterTasks, progressLabel, taskIsActive, taskNeedsAttention, taskStateLabels, type TaskFilters } from "../../task-observation";
+import { progressLabel, promptCaptureForTask, taskIsActive, taskNeedsAttention, taskStateLabels, type TaskFilters } from "../../task-observation";
+import { compileTaskFilters, extractTaskQuery, rankByQuery, windowLabel, type QueryKey, type QueryVocabulary } from "../../shared/task-query";
+import { facetCounts } from "../../shared/facets";
+import { SavedViews } from "../../components/SavedViews";
+import { QueryScope } from "../../components/QueryScope";
+import type { QuerySuggestion, QuerySupport } from "../../components/QueryInput";
+import { kindLabel } from "../../components/ui/Kind";
 import { taskTarget } from "../../task-links";
 import { TaskDetail, taskFamilyLabel } from "./TaskDetail";
 import { kindOf } from "../../components/ui/Kind";
 import { PromptCaptureSummary, promptFromTask, promptStateLabel } from "../../components/PromptCaptureSummary";
 import { FilterBar } from "../../components/FilterBar";
 import { TaskThumbnail } from "../../components/TaskThumbnail";
-import { pageSizes, useListPreferences, type ListDensity, type PageSize } from "../../app/list-preferences";
+import { useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes, stepWithin, type PageSize } from "../../shared/pager";
+import { formatSort, parseSort, type SortState } from "../../shared/list-sort";
 import { readErrorMessage } from "../../shared/read-model/read-state";
 import { AudioQueue, audioTrackFrom, useAudioPlayer } from "../../app/audio-player";
 import { AudioPlayButton } from "../../components/AudioDock";
 import { MediaViewer, viewerSlide, visualSlides } from "../../components/MediaViewer";
+import { usePageEnter } from "../../app/use-page-enter";
+import { projectTaskFreshness, taskFreshnessLabel } from "../../shared/task-freshness";
 
 const views: { id: TaskView; label: string }[] = [
   { id: "all", label: "全部" },
@@ -48,7 +60,6 @@ const laneMessage = (label: string, lane: TaskLane) => lane.status === "needs_co
     : `${label}：${readErrorMessage(lane.error)}`;
 
 type InspectorMode = "fixed" | "floating";
-const inspectorPreferenceKey = "yeisme.control.tasks.inspector-mode";
 const taskOverlays = ["task", "preview"] as const;
 
 export default function TasksPage() {
@@ -56,16 +67,16 @@ export default function TasksPage() {
   const { scopeId } = useWorkspace();
   const navigate = useNavigate();
   const notify = useToast();
-  const { pageSize, density, page: listPage, setPage, setPageSize, setDensity, resetPage } = useListPreferences();
-  const listKey = "tasks";
+  const { pageSize, density, setPageSize, setDensity } = useListPreferences();
   const [params, setParams] = useSearchParams();
   const [, writeOverlay] = useOverlayParams(taskOverlays);
   const view = (views.some((item) => item.id === params.get("view")) ? params.get("view") : "all") as TaskView;
   const selectedKey = params.get("task");
-  const [showFilters, setShowFilters] = useState(() => ["owner", "connection", "state", "results", "prompt"].some((key) => params.get(key)));
   const [resolved, setResolved] = useState<TaskSnapshot | null>(null);
   const [resolving, setResolving] = useState(false);
-  const [inspectorMode, setInspectorMode] = useState<InspectorMode>(() => typeof window !== "undefined" && window.localStorage.getItem(inspectorPreferenceKey) === "floating" ? "floating" : "fixed");
+  const resolvedKey = useRef<string | null>(null);
+  const [resolveRetry, setResolveRetry] = useState(0);
+  const [inspectorMode, setInspectorMode] = useInspectorMode();
 
   const filters: TaskFilters = {
     text: params.get("q") || "",
@@ -74,22 +85,25 @@ export default function TasksPage() {
     project: params.get("project") || "",
     state: params.get("state") || "",
     family: params.get("family") || "",
-    modality: "",
+    modality: params.get("kind") || "",
     results: params.get("results") || "",
     prompt: params.get("prompt") || "",
     from: params.get("from") || "",
     through: params.get("to") || "",
+    episode: params.get("episode") || "",
+    updated: params.get("upd") || "",
   };
 
   const update = useCallback((patch: Record<string, string | null>, history: "push" | "replace" = "replace", resetPagination = false) => {
-    const next = new URLSearchParams(params);
+    // From the address as it is now: two quick changes (a held ] key) build on each other, not on the last render.
+    const next = new URLSearchParams(liveQuery(params));
     for (const [key, value] of Object.entries(patch)) {
       if (value) next.set(key, value);
       else next.delete(key);
     }
+    if (resetPagination) next.delete("page");
     writeOverlay(next, history);
-    if (resetPagination) resetPage(listKey);
-  }, [listKey, params, resetPage, writeOverlay]);
+  }, [params, writeOverlay]);
 
   // Legacy owner deep link `#/tasks?connection&project&family&ref` resolves the original task once.
   const legacy = useMemo(() => taskTarget("#/tasks?" + params.toString()), [params]);
@@ -109,7 +123,45 @@ export default function TasksPage() {
     return () => controller.abort();
   }, [legacy, scopeId, setParams, notify]);
 
-  const filtered = useMemo(() => filterTasks(tasks.rows, filters).filter((task) => inView(task, view)), [tasks.rows, view, filters.text, filters.connection, filters.owner, filters.project, filters.state, filters.family, filters.results, filters.prompt, filters.from, filters.through]);
+  // Notification links carry the signed task key directly. If that task is outside the first observed page,
+  // read the original task once so the Inspector opens instead of leaving the person to search manually.
+  useEffect(() => {
+    if (!selectedKey || legacy || tasks.status === "loading") {
+      if (!selectedKey) { resolvedKey.current = null; setResolved(null); }
+      return;
+    }
+    if (tasks.rows.some((task) => task.task_key === selectedKey) || resolvedKey.current === selectedKey) return;
+    const controller = new AbortController();
+    resolvedKey.current = selectedKey;
+    setResolving(true);
+    api.task(scopeId, selectedKey, controller.signal)
+      .then((task) => setResolved(task))
+      .catch((error) => { if (!controller.signal.aborted) { resolvedKey.current = null; notify(`无法定位原任务（${errorCode(error)}），可重新读取或返回任务中心。`, "warning"); } })
+      .finally(() => { if (!controller.signal.aborted) setResolving(false); });
+    return () => controller.abort();
+  }, [legacy, notify, resolveRetry, scopeId, selectedKey, tasks.rows, tasks.status]);
+
+  // The words `工具:` and `连接:` may be typed as labels; the query reads them through what this list knows.
+  const vocabulary = useMemo<QueryVocabulary>(() => ({
+    owners: [...new Set(tasks.connections.map((connection) => connection.owner))].map((owner) => ({ value: owner, label: ownerLabel(owner) })),
+    connections: tasks.connections.map((connection) => ({ value: connection.id, label: connection.label })),
+    families: [...new Set(tasks.rows.map((task) => task.locator.task_family).filter(Boolean))].map((family) => ({ value: family, label: taskFamilyLabel(family) })),
+  }), [tasks.connections, tasks.rows]);
+  const now = useMemo(() => Date.now(), [tasks.observedAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  const filterKey = JSON.stringify(filters);
+  const compiled = useMemo(() => compileTaskFilters(filters, { vocabulary, now }), [filterKey, vocabulary, now]); // eslint-disable-line react-hooks/exhaustive-deps
+  const filtered = useMemo(() => tasks.rows.filter((task) => inView(task, view) && compiled.matches(task)), [tasks.rows, view, compiled]);
+  // Beside each option, how many rows it would leave given every other filter.
+  const facetValues = useMemo(() => facetCounts(tasks.rows, ["owner", "state", "connection", "project", "family", "results", "prompt"], (task, key) => {
+    if (key === "owner") return task.locator.owner;
+    if (key === "state") return task.state;
+    if (key === "connection") return task.connection_id;
+    if (key === "project") return task.locator.project;
+    if (key === "family") return task.locator.task_family;
+    if (key === "results") return task.results.length ? "yes" : "no";
+    return promptCaptureForTask(task)?.state;
+  }, (task, except) => inView(task, view) && compiled.matches(task, except)), [compiled, tasks.rows, view]);
+  const countOf = (key: string, value: string) => facetValues[key]?.[value] || 0;
   const counts = useMemo(() => ({
     all: tasks.rows.length,
     active: tasks.rows.filter(taskInProgress).length,
@@ -138,20 +190,11 @@ export default function TasksPage() {
   }, [player, requestedPreview, resolvePreview, update]);
   const owners = [...new Set(tasks.rows.map((task) => task.locator.owner))];
   const states = [...new Set(tasks.rows.map((task) => task.state))].sort();
-  const activeFilters = ["owner", "connection", "state", "results", "prompt", "family", "project"].filter((key) => params.get(key)).length;
-  const storedPage = listPage(listKey);
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const currentPage = Math.min(storedPage, pageCount);
-  const pageStart = (currentPage - 1) * pageSize;
-  const pageRows = filtered.slice(pageStart, pageStart + pageSize);
-
-  useEffect(() => {
-    if (storedPage > pageCount) setPage(listKey, pageCount);
-  }, [listKey, pageCount, setPage, storedPage]);
+  const projects = [...new Set(tasks.rows.map((task) => task.locator.project).filter(Boolean))].sort();
+  const families = [...new Set(tasks.rows.map((task) => task.locator.task_family).filter(Boolean))].sort();
 
   const changeInspectorMode = useCallback((mode: InspectorMode) => {
     setInspectorMode(mode);
-    window.localStorage.setItem(inspectorPreferenceKey, mode);
   }, []);
 
   const selectedLane = view === "active" ? tasks.lanes.active : view === "history" ? tasks.lanes.history : null;
@@ -161,10 +204,9 @@ export default function TasksPage() {
     ? <Button size="sm" variant="ghost" onClick={() => navigate("/services")}>查看服务与连接</Button>
     : <Button size="sm" variant="ghost" onClick={tasks.refresh}>重新读取</Button>;
   const notices = [
-    selectedKey && !selected && tasks.status !== "loading" && !resolving && <MissingSelection key="missing" onClear={() => update({ task: null })} onTasks={() => navigate("/tasks")} />,
+    selectedKey && !selected && tasks.status !== "loading" && !resolving && <MissingSelection key="missing" onClear={() => update({ task: null })} onTasks={() => navigate("/tasks")} onRetry={() => setResolveRetry((value) => value + 1)} />,
     // An empty view whose lane failed explains itself below; otherwise one line names the connections the list lacks.
     !emptyExplainsLane && <SourceStatusLine key="source" noun="任务列表" />,
-    tasks.truncated && <InlineNotice key="truncated" tone="info">任务较多，本页只展示当前观察批次（已达分页上限）；筛选与计数仅针对已读取的批次。</InlineNotice>,
   ];
 
   const quickPreview = useCallback((task: TaskSnapshot, result: TaskSnapshot["results"][number]) => {
@@ -194,6 +236,37 @@ export default function TasksPage() {
     if (entry) update({ task: entry.task.task_key || null, preview: null }, "replace");
   }, [resolvePreview, update]);
   const columns = taskColumns(tasks.connections, quickPreview);
+  const sort = parseSort(params.get("sort"), sortableTaskColumns);
+  // A chosen sort wins; with words typed and no sort, the best match comes first.
+  const sorted = useMemo(() => sort ? sortByColumn(filtered, columns, sort) : rankByQuery(filtered, compiled), [filtered, sort?.id, sort?.dir, compiled]); // eslint-disable-line react-hooks/exhaustive-deps
+  const querySupport = useMemo<QuerySupport>(() => ({
+    extract: (text, current) => extractTaskQuery(text, current, vocabulary, Date.now()),
+    suggest: (key) => taskQuerySuggestions(key, tasks.rows, vocabulary, facetValues),
+    chips: {
+      episode: { label: "集" },
+      upd: { label: "更新", format: windowLabel },
+      kind: { label: "类型", format: (value) => value.split(",").map((item) => kindLabel(item as Parameters<typeof kindLabel>[0])).join("、") },
+      sort: { label: "排序", format: (value) => sortWords[value] || value },
+    },
+  }), [facetValues, tasks.rows, vocabulary]);
+  const paged = usePagedRows(sorted, pageSize, taskOverlays);
+  // Previous and next walk the whole filtered, sorted list; the list turns to the page the task is on. The step starts
+  // from the task in the address, which a quick second press may already have changed before this page rendered again.
+  const taskKeys = useMemo(() => sorted.map((task) => task.task_key || ""), [sorted]);
+  const latestKeys = useRef(taskKeys);
+  latestKeys.current = taskKeys;
+  const selectedIndex = selectedKey ? taskKeys.indexOf(selectedKey) : -1;
+  const stepTask = useCallback((delta: -1 | 1) => {
+    const target = stepWithin(latestKeys.current, new URLSearchParams(liveQuery(params)).get("task"), delta, pageSize);
+    if (target?.key) update({ task: target.key, page: target.page > 1 ? String(target.page) : null }, "replace");
+  }, [pageSize, params, update]);
+  const stepper = selectedIndex >= 0 ? {
+    noun: "任务",
+    previous: selectedIndex > 0 ? () => stepTask(-1) : undefined,
+    next: selectedIndex < taskKeys.length - 1 ? () => stepTask(1) : undefined,
+    position: `${selectedIndex + 1} / ${taskKeys.length}`,
+  } : undefined;
+  const changeSort = (next: SortState | null) => update({ sort: formatSort(next) }, "replace", true);
   const copy = useCopy();
   // The row's context menu: what its row button, its quick action and the inspector header offer, in one place.
   const taskActions = useCallback((task: TaskSnapshot): ItemAction[] => {
@@ -211,12 +284,13 @@ export default function TasksPage() {
     ];
   }, [copy, navigate, player, quickPreview, update]);
 
-  return <AudioQueue tracks={audioQueue}><div className={cx(!selected && "page-enter", "flex min-h-0 flex-col gap-5", selected && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="tasks">
+  const enter = usePageEnter(!selected);
+  return <AudioQueue tracks={audioQueue}><div className={cx(!selected && enter.className, "flex min-h-0 flex-col gap-5", selected && inspectorMode === "fixed" && "min-[1280px]:pr-[var(--inspector-width)]")} onAnimationEnd={enter.onAnimationEnd} data-page="tasks">
     <div className={cx("flex min-h-0 flex-1 gap-4", selected && inspectorMode === "fixed" ? "items-stretch" : "") }>
       <div className="min-w-0 flex-1 space-y-5">
     <h1 className="sr-only">任务中心</h1>
     <PageToolbar
-      summary="各 owner 任务的进度、结果与提示词采集；只读观察，不会重新提交。"
+      summary="各个工具里任务的进度、结果和提示词采集。这里只看，不会替你重新提交。"
       actions={<Button size="sm" onClick={tasks.refresh} disabled={tasks.refreshing} icon={<RefreshCw className={cx("size-3.5", tasks.refreshing && "motion-safe:animate-spin")} />}>重新观察</Button>}
       metrics={<ToggleGroup label="任务视图" value={view} onChange={(value) => update({ view: value === "all" ? null : value }, "replace", true)} options={views.map((item) => ({ ...item, count: tasks.status === "loading" ? null : counts[item.id] }))} />}
       meta={tasks.observedAt ? <span className="inline-flex items-center gap-1.5 text-2xs text-muted" title={formatFullTime(tasks.observedAt)}><Clock3 className="size-3.5" />观察于 {formatRelative(tasks.observedAt)}</span> : undefined}
@@ -227,13 +301,20 @@ export default function TasksPage() {
     <NoticeStack notices={notices} />
 
     <Panel bodyClassName="p-0">
-      <div className="border-b border-line px-4 py-3"><FilterBar placeholder="搜索任务" dates onChange={() => resetPage(listKey)} facets={[
-        { key: "owner", label: "来源", options: [...new Set(tasks.connections.map((c) => c.owner))].map((v) => ({ value: v, label: ownerLabel(v) })) },
-        { key: "state", label: "状态", options: states.map((v) => ({ value: v, label: readableState(v) })) },
-        { key: "connection", label: "连接", options: tasks.connections.map((c) => ({ value: c.id, label: c.label })) },
-        { key: "results", label: "成果", options: [{ value: "yes", label: "有成果" }, { value: "no", label: "无成果" }] },
-        { key: "prompt", label: "提示词", options: ["captured", "redacted", "queued", "capturing", "not_recorded", "blocked", "failed", "expired"].map((v) => ({ value: v, label: promptStateLabel(v as Parameters<typeof promptStateLabel>[0]) })) },
-      ]} /></div>
+      <div className="space-y-2.5 border-b border-line px-4 py-3">
+        {/* On a phone the views move into the conditions drawer, so the first task stays on the first screen. */}
+        <SavedViews className="max-sm:hidden" />
+        <FilterBar placeholder="搜索任务，或输入 状态:失败 这样的条件" dates query={querySupport} drawerTop={<fieldset className="min-w-0"><legend className="mb-1.5 text-[13px] font-medium text-ink-soft">视图</legend><SavedViews className="flex-wrap" /></fieldset>} facets={[
+          { key: "owner", label: "来源", options: [...new Set(tasks.connections.map((c) => c.owner))].map((v) => ({ value: v, label: ownerLabel(v), count: countOf("owner", v) })) },
+          { key: "state", label: "状态", options: states.map((v) => ({ value: v, label: readableState(v), count: countOf("state", v) })) },
+          { key: "connection", label: "连接", options: tasks.connections.map((c) => ({ value: c.id, label: c.label, count: countOf("connection", c.id) })) },
+          { key: "project", label: "项目", options: projects.map((v) => ({ value: v, label: v, count: countOf("project", v) })) },
+          { key: "family", label: "类型", options: families.map((v) => ({ value: v, label: taskFamilyLabel(v), count: countOf("family", v) })) },
+          { key: "results", label: "成果", options: [{ value: "yes", label: "有成果", count: countOf("results", "yes") }, { value: "no", label: "无成果", count: countOf("results", "no") }] },
+          { key: "prompt", label: "提示词", options: ["captured", "redacted", "queued", "capturing", "not_recorded", "blocked", "failed", "expired"].map((v) => ({ value: v, label: promptStateLabel(v as Parameters<typeof promptStateLabel>[0]), count: countOf("prompt", v) })) },
+        ]} />
+        <QueryScope matched={filtered.length} />
+      </div>
 
       {resolving && <p className="flex items-center gap-2 border-b border-line px-4 py-2.5 text-body-sm text-muted"><LoaderCircle className="size-4 motion-safe:animate-spin" />正在按深链定位原任务…</p>}
 
@@ -251,7 +332,7 @@ export default function TasksPage() {
           <DataTable
             label="任务列表"
             columns={columns}
-            rows={pageRows}
+            rows={paged.rows}
             rowKey={(task) => task.task_key || `${task.connection_id}:${task.locator.task_ref}`}
             rowLabel={(task) => `打开任务 ${task.title}，${ownerLabel(task.locator.owner)}，${taskStateLabels[task.state] || "结果未知"}`}
             rowAttributes={(task) => ({ "data-task": task.locator.task_ref })}
@@ -259,36 +340,63 @@ export default function TasksPage() {
             density={density}
             onRowClick={(task) => update({ task: task.task_key || null })}
             rowActions={taskActions}
+            sort={sort}
+            onSort={changeSort}
           />
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3 text-2xs text-muted">
-            <span className="tabular">显示 {filtered.length ? pageStart + 1 : 0}–{Math.min(pageStart + pageSize, filtered.length)} / {filtered.length} 条已加载任务 · 第 {currentPage} / {pageCount} 页</span>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="flex items-center gap-1.5">每页 <Select aria-label="每页数量" className="w-24" value={String(pageSize)} onChange={(event) => { setPageSize(Number(event.target.value) as PageSize); resetPage(listKey); }}>
-                {pageSizes.map((value) => <option key={value} value={value}>{value}</option>)}
-              </Select></label>
-              <label className="flex items-center gap-1.5">密度 <Select aria-label="列表密度" className="w-24" value={density} onChange={(event) => setDensity(event.target.value as ListDensity)}>
-                <option value="compact">紧凑</option><option value="comfortable">标准</option><option value="spacious">宽松</option>
-              </Select></label>
-              <Button size="sm" variant="ghost" disabled={currentPage <= 1} onClick={() => setPage(listKey, currentPage - 1)} icon={<ChevronLeft className="size-3.5" />}>上一页</Button>
-              <Button size="sm" variant="ghost" disabled={currentPage >= pageCount} onClick={() => setPage(listKey, currentPage + 1)} icon={<ChevronRight className="size-3.5" />}>下一页</Button>
-            </div>
-          </div>
+          <Pager
+            window={paged}
+            onPage={paged.setPage}
+            noun="条已加载任务"
+            pageSize={pageSize}
+            pageSizes={pageSizes}
+            onPageSize={(value) => { setPageSize(value as PageSize); update({}, "replace", true); }}
+            density={density}
+            onDensity={setDensity}
+          />
         </>}
       </ReadStateView>
     </Panel>
 
       </div>
-    {selected && inspectorMode === "fixed" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
+    {selected && inspectorMode === "fixed" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} stepper={stepper} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
     </div>
-    {selected && inspectorMode === "floating" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
+    {selected && inspectorMode === "floating" && <TaskDetail task={selected} open mode={inspectorMode} onModeChange={changeInspectorMode} preview={preview} stepper={stepper} onOpenChange={(open) => { if (!open) update({ task: null, preview: null }); }} />}
     <MediaViewer controller={preview} slides={viewerSlides} onNavigate={navigateViewer} onDetails={showViewerDetails} detailsLabel="查看任务" />
   </div></AudioQueue>;
 }
 
+const sortableTaskColumns = ["task", "state", "updated"] as const;
+const sortWords: Record<string, string> = { "updated:desc": "最新在前", "updated:asc": "最早在前", "task:asc": "标题 A→Z", "task:desc": "标题 Z→A", "state:asc": "先看要处理的", "state:desc": "先看已结束的" };
+const stateWords: Record<string, string> = { failed: "失败", partial_failed: "部分失败", rejected: "未通过", running: "执行中", queued: "排队中", pending: "等待执行", waiting_review: "等你确认", unknown: "结果未知", succeeded: "已完成", completed: "已完成", cancelled: "已取消", canceled: "已取消", blocked: "受阻" };
+const promptWords: Record<string, string> = { captured: "已采集", redacted: "已脱敏", queued: "排队", capturing: "采集中", not_recorded: "未记录", blocked: "受阻", failed: "失败", expired: "过期" };
+
+/** What `键:` offers, in words the query reads back, with how many rows each would leave. */
+function taskQuerySuggestions(key: QueryKey, rows: TaskSnapshot[], vocabulary: QueryVocabulary, counts: Record<string, Record<string, number>>): QuerySuggestion[] {
+  const distinct = (values: Array<string | null | undefined>) => [...new Set(values.filter((value): value is string => !!value))].sort();
+  switch (key) {
+    case "state": return distinct(rows.map((task) => task.state)).map((state) => ({ value: stateWords[state] || state, label: stateWords[state] || state, count: counts.state?.[state] }));
+    case "owner": return vocabulary.owners.map((owner) => ({ value: owner.value, label: owner.label, count: counts.owner?.[owner.value] }));
+    case "connection": return vocabulary.connections.map((connection) => ({ value: connection.label, label: connection.label, count: counts.connection?.[connection.value] }));
+    case "project": return distinct(rows.map((task) => task.locator.project)).map((project) => ({ value: project, label: project, count: counts.project?.[project] }));
+    case "family": return [...["图片", "视频", "声音"].map((word) => ({ value: word, label: `${word}（结果类型）` })), ...vocabulary.families.map((family) => ({ value: family.label, label: family.label, count: counts.family?.[family.value] }))];
+    case "episode": return distinct(rows.map((task) => task.episode_ref)).map((episode) => ({ value: episode, label: episode }));
+    case "upd":
+    case "created": return ["24h", "7d", "30d", "今天", "本周"].map((value) => ({ value, label: windowLabel(value) }));
+    case "results": return [{ value: "有", label: "有结果", count: counts.results?.yes }, { value: "无", label: "没有结果", count: counts.results?.no }];
+    case "prompt": return Object.entries(promptWords).map(([state, word]) => ({ value: word, label: word, count: counts.prompt?.[state] }));
+    case "sort": return [{ value: "最新", label: "最新在前" }, { value: "最早", label: "最早在前" }, { value: "标题", label: "按标题" }, { value: "状态", label: "先看要处理的" }];
+    default: return [];
+  }
+}
+/** Sorting by state puts what needs a person first, then what is moving, then what is done. */
+const stateRank: Record<string, number> = { unknown: 0, failed: 1, partial_failed: 2, rejected: 3, waiting_review: 4, blocked: 5, cancel_requested: 6, running: 7, queued: 8, pending: 9, created: 10, partial: 11, handoff_ready: 12, dry_run: 13, succeeded: 14, completed: 14, cancelled: 15, canceled: 15 };
+
 function StateCell({ task }: { task: TaskSnapshot }) {
   const percent = taskInProgress(task) ? percentOf(task) : null;
+  const freshness = task.control_center_freshness ? { control_center_freshness: task.control_center_freshness } : projectTaskFreshness(task);
   return <span className="flex min-w-[5.5rem] flex-col items-start gap-1.5">
     <TaskStatePill state={task.state} />
+    {freshness.control_center_freshness !== "fresh" && <span className={cx("text-2xs", freshness.control_center_freshness === "expired" ? "text-danger" : "text-warning")}>{taskFreshnessLabel(freshness.control_center_freshness)}</span>}
     {percent !== null && <span className="flex w-full items-center gap-1.5">
       <Progress value={percent} label="进度" tone="info" className="min-w-0 flex-1" />
       <span className="tabular whitespace-nowrap text-2xs text-muted">{progressLabel(task.progress)}</span>
@@ -301,6 +409,7 @@ function taskColumns(connections: TaskConnectionState[], onQuickPreview: (task: 
     {
       id: "task",
       header: "任务",
+      sort: { value: (task) => task.title },
       className: `${fillMainColumn} overflow-hidden`,
       cell: (task) => <span className="flex min-w-0 items-center gap-3">
         <TaskThumbnail task={task} result={task.results[0]} />
@@ -311,7 +420,7 @@ function taskColumns(connections: TaskConnectionState[], onQuickPreview: (task: 
         </span>
       </span>,
     },
-    { id: "state", header: "状态", cell: (task) => <StateCell task={task} /> },
+    { id: "state", header: "状态", sort: { value: (task) => stateRank[task.state] ?? 50 }, cell: (task) => <StateCell task={task} /> },
     {
       id: "stage",
       header: "阶段",
@@ -339,6 +448,7 @@ function taskColumns(connections: TaskConnectionState[], onQuickPreview: (task: 
       header: "更新",
       priority: 2,
       align: "end",
+      sort: { value: (task) => taskTime(task) || null, first: "desc" },
       cell: (task) => <span className="tabular whitespace-nowrap text-2xs text-muted" title={formatFullTime(task.updated_at || task.started_at || task.created_at)}>{taskTime(task) ? formatRelative(task.updated_at || task.started_at || task.created_at) : "未提供"}</span>,
     },
     {
@@ -380,8 +490,8 @@ function LaneStrip({ activeConnection, onFilter }: { activeConnection: string; o
   </ul>;
 }
 
-function MissingSelection({ onClear, onTasks }: { onClear: () => void; onTasks: () => void }) {
-  return <InlineNotice tone="warning" actions={<><NoticeAction onClick={onClear}>关闭</NoticeAction><NoticeAction onClick={onTasks}>返回任务中心</NoticeAction></>}>
+function MissingSelection({ onClear, onTasks, onRetry }: { onClear: () => void; onTasks: () => void; onRetry: () => void }) {
+  return <InlineNotice tone="warning" actions={<><NoticeAction onClick={onRetry}>重新读取</NoticeAction><NoticeAction onClick={onClear}>关闭</NoticeAction><NoticeAction onClick={onTasks}>返回任务中心</NoticeAction></>}>
     链接中的任务不在当前观察批次中，可能已超出时间窗或属于其他范围。
   </InlineNotice>;
 }

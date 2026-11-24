@@ -2,7 +2,12 @@ import { useMemo, useState } from "react";
 import { CircleAlert, Clock3, Info, Receipt, Table2, Wallet } from "../../icons";
 import { api, type UsageEvent } from "../../shared/api/control-center-client";
 import { useScopedRead } from "../../app/workspace";
-import { Button, CoverageChip, DataTable, EmptyState, InlineNotice, NoticeStack, PageToolbar, Panel, Pill, ReadStateView, Select, SkeletonRows, StaleNotice, StatCard, ToggleGroup, Tooltip, cx, ownerLabel, type Column } from "../../components/ui";
+import { Button, CoverageChip, DataTable, EmptyState, InlineNotice, NoticeStack, PageToolbar, Pager, Panel, Pill, ReadStateView, Select, SkeletonRows, StaleNotice, StatCard, ToggleGroup, Tooltip, cx, ownerLabel, sortByColumn, type Column } from "../../components/ui";
+import { useSearchParams } from "react-router-dom";
+import { useListPreferences } from "../../app/preferences";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { pageSizes } from "../../shared/pager";
+import { formatSort, parseSort, type SortState } from "../../shared/list-sort";
 import { formatFullTime, formatMoney, formatRelative } from "../../shared/read-model/format";
 
 type Range = "7" | "14" | "30";
@@ -58,7 +63,7 @@ function dayKey(time: number) {
 interface TrendPoint { key: string; label: string; cost: number; calls: number; unconfirmed: number; byOwner: Record<string, number> }
 
 export default function UsageAnalytics() {
-  const read = useScopedRead((scope, signal) => api.usage(scope, signal));
+  const read = useScopedRead((scope, signal) => api.usage(scope, signal), { cacheKey: "usage" });
   const [range, setRange] = useState<Range>("14");
   const [owner, setOwner] = useState("all");
   const [tableView, setTableView] = useState(false);
@@ -107,25 +112,36 @@ export default function UsageAnalytics() {
 
   const budget = read.data?.budget;
   const coverage = read.data?.coverage;
-  const sortedRows = useMemo(() => visible.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)), [visible]);
-  const receiptLimit = 100;
+  const [params, setParams] = useSearchParams();
+  const sort = parseSort(params.get("sort"), ["time", "quantity", "cost", "state"]) || { id: "time", dir: "desc" as const };
+  const { pageSize, setPageSize } = useListPreferences();
 
   const receiptColumns: Column<UsageEvent>[] = [
-    { id: "time", header: "时间", cell: (row) => <span className="whitespace-nowrap tabular text-ink-soft" title={formatFullTime(row.created_at)}>{formatRelative(row.created_at)}</span> },
+    { id: "time", header: "时间", sort: { value: (row) => Date.parse(row.created_at) || null, first: "desc" }, cell: (row) => <span className="whitespace-nowrap tabular text-ink-soft" title={formatFullTime(row.created_at)}>{formatRelative(row.created_at)}</span> },
     { id: "source", header: "来源 · 模型", cell: (row) => <div className="max-w-[260px] min-w-0">
       <span className="flex items-center gap-1.5 font-medium text-ink"><span aria-hidden="true" className="size-2 shrink-0 rounded-[2px]" style={{ background: ownerColor(row.owner) }} /><span className="truncate">{ownerLabel(row.owner)}</span></span>
       <span className="block truncate font-mono text-2xs text-muted">{row.model_ref}</span>
     </div> },
-    { id: "quantity", header: "计量", priority: 2, align: "end", cell: (row) => row.quantity === null ? <span className="text-faint">未知</span> : <span className="whitespace-nowrap tabular">{row.quantity.toLocaleString("zh-CN")} {unitLabels[row.unit] || row.unit}</span> },
-    { id: "state", header: "成本状态", cell: (row) => <Pill tone={costStateTone[row.cost_state as keyof typeof costStateTone] || "neutral"}>{costStateLabels[row.cost_state] || row.cost_state}</Pill> },
-    { id: "cost", header: "上游成本", align: "end", cell: (row) => row.upstream_cost === null ? <span className="text-faint">未知</span> : <span className="whitespace-nowrap tabular">{formatMoney(row.upstream_cost, row.currency)}</span> },
+    { id: "quantity", header: "计量", priority: 2, align: "end", sort: { value: (row) => row.quantity, first: "desc" }, cell: (row) => row.quantity === null ? <span className="text-faint">未知</span> : <span className="whitespace-nowrap tabular">{row.quantity.toLocaleString("zh-CN")} {unitLabels[row.unit] || row.unit}</span> },
+    { id: "state", header: "成本状态", sort: { value: (row) => costStateLabels[row.cost_state] || row.cost_state }, cell: (row) => <Pill tone={costStateTone[row.cost_state as keyof typeof costStateTone] || "neutral"}>{costStateLabels[row.cost_state] || row.cost_state}</Pill> },
+    { id: "cost", header: "上游成本", align: "end", sort: { value: (row) => row.upstream_cost, first: "desc" }, cell: (row) => row.upstream_cost === null ? <span className="text-faint">未知</span> : <span className="whitespace-nowrap tabular">{formatMoney(row.upstream_cost, row.currency)}</span> },
     { id: "ref", header: "引用", priority: 3, cell: (row) => <span className="block max-w-[200px] truncate font-mono text-2xs text-muted" title={row.source_ref}>{row.source_ref}</span> },
   ];
+  // Every receipt in the range, newest first unless a header says otherwise; no silent cut at 100 any more.
+  const sortedRows = useMemo(() => sortByColumn(visible, receiptColumns, sort), [visible, sort.id, sort.dir]); // eslint-disable-line react-hooks/exhaustive-deps
+  const paged = usePagedRows(sortedRows, pageSize, []);
+  const changeSort = (next: SortState | null) => setParams((current) => {
+    const query = new URLSearchParams(current);
+    if (next && !(next.id === "time" && next.dir === "desc")) query.set("sort", formatSort(next)!); else query.delete("sort");
+    query.delete("page");
+    return query;
+  }, { replace: true });
 
   return <div className="page-enter space-y-5" data-page="usage">
     <h1 className="sr-only">用量与成本</h1>
     <PageToolbar
-      summary="只汇总 owner 返回的模型用量回执：已确认成本按币种分别合计，估算与待核算不计入，未知成本不补零。"
+      lead="花了多少，还剩多少。"
+      summary="只汇总各个工具返回的用量回执：确认过的花费按币种分别合计，估算和待核算的不算进去，不知道的花费不补成 0。"
       actions={<div role="group" aria-label="用量筛选" className="flex flex-wrap items-center gap-2">
         <ToggleGroup label="时间范围" value={range} onChange={setRange} options={[{ id: "7", label: "近 7 天" }, { id: "14", label: "近 14 天" }, { id: "30", label: "近 30 天" }]} />
         <Select aria-label="来源" value={owner} onChange={(event) => setOwner(event.target.value)} className="w-32">
@@ -185,8 +201,9 @@ export default function UsageAnalytics() {
           </Panel>
         </div>
 
-        <Panel title="原始用量回执" actions={<span className="text-2xs text-muted tabular">{sortedRows.length > receiptLimit ? `最近 ${receiptLimit} / ${sortedRows.length} 条` : `${sortedRows.length} 条`}</span>} bodyClassName="p-0">
-          <DataTable label="原始用量回执" columns={receiptColumns} rows={sortedRows.slice(0, receiptLimit)} rowKey={(row) => row.owner + row.source_ref} empty={<EmptyState compact title="所选范围内没有回执" />} />
+        <Panel title="原始用量回执" actions={<span className="text-2xs text-muted tabular">{sortedRows.length} 条</span>} bodyClassName="p-0">
+          <DataTable label="原始用量回执" columns={receiptColumns} rows={paged.rows} rowKey={(row) => row.owner + row.source_ref} empty={<EmptyState compact title="所选范围内没有回执" />} sort={sort} onSort={changeSort} />
+          {sortedRows.length > 0 && <Pager window={paged} onPage={paged.setPage} noun="条回执" pageSize={pageSize} pageSizes={pageSizes} onPageSize={(value) => { setPageSize(value as typeof pageSize); paged.setPage(1); }} />}
         </Panel>
       </>}
     </ReadStateView>

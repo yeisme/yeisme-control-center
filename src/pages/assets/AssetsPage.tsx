@@ -1,9 +1,8 @@
+import { PromptLibraryLink } from "../../components/PromptLibraryLink";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowUpRight,
-  ChevronLeft,
-  ChevronRight,
   Clock3,
   Copy,
   Eye,
@@ -41,6 +40,7 @@ import {
   MetricStrip,
   NoticeStack,
   PageToolbar,
+  Pager,
   Panel,
   Pill,
   ReadStateView,
@@ -68,7 +68,8 @@ import { SourceStatusLine } from "../../components/SourceStatusLine";
 import { ResultViewer } from "../../components/ResultViewer";
 import { useMediaPreview, type MediaPreviewController } from "../../components/media-preview";
 import { MediaViewer, viewerOpenLabel, visualSlides } from "../../components/MediaViewer";
-import { collectResults, resultAction, type ResultEntry } from "../../shared/read-model/tasks";
+import { collectResults, resultAction, resultName, resultSource, type ResultEntry } from "../../shared/read-model/tasks";
+import { taskNeedsReview } from "../../shared/read-model/review";
 import { formatRelative } from "../../shared/read-model/format";
 import { ProcessTimeline } from "../../components/ProcessTimeline";
 import {
@@ -91,16 +92,19 @@ import { useScopedRead, useWorkspace } from "../../app/workspace";
 import { api } from "../../shared/api/control-center-client";
 import { ProjectFiles } from "./ProjectFiles";
 import { AudioQueue, audioTrackFrom, useAudioPlayer, useAudioQueue, useAudioState, useTrackPhase } from "../../app/audio-player";
-import { AudioPlayButton, AudioStage } from "../../components/AudioDock";
+import { AudioMiniWave, AudioPlayButton, AudioStage } from "../../components/AudioDock";
 import { taskStateLabels } from "../../task-observation";
-import { useOverlayParams } from "../../app/overlay-history";
+import { liveQuery, useOverlayParams } from "../../app/overlay-history";
+import { useAssetsPreferences, useInspectorMode, useListPreferences } from "../../app/preferences";
+import { clampTile, tileRange } from "../../shared/preferences";
+import { gridColumns, justifiedTile, tileRatio, type GalleryLayout } from "./gallery-layout";
+import { usePagedRows } from "../../app/use-paged-rows";
+import { galleryPageSizes, pageSizes, type GalleryPageSize, type PageSize } from "../../shared/pager";
 
 type KindFilter = "all" | MediaKind;
 type AccessFilter = "all" | "available" | "locked";
 type PreviewAction = ReturnType<typeof resultAction>;
 
-const viewPreferenceKey = "yeisme.control.assets.view";
-const inspectorPreferenceKey = "yeisme.control.assets.inspector-mode";
 const assetOverlays = ["result", "preview"] as const;
 const mediaKinds: MediaKind[] = ["image", "video", "audio", "text"];
 const kindOptions: { id: KindFilter; label: string }[] = [
@@ -120,11 +124,6 @@ const viewOptions: { id: AssetViewMode; label: ReactNode }[] = [
 
 const assetHref = (entry: ResultEntry) => `/assets?result=${encodeURIComponent(entry.key)}`;
 
-function readPreference<T>(key: string, fallback: T, parse: (value: string | null) => T) {
-  if (typeof window === "undefined") return fallback;
-  return parse(window.localStorage.getItem(key));
-}
-
 export default function AssetsPage() {
   const { scopeId, setScope } = useWorkspace();
   const [params, setParams] = useSearchParams();
@@ -139,10 +138,10 @@ export default function AssetsPage() {
     return query;
   }, { replace: true });
   return <div className="space-y-4">
-    {!!projects.data?.rows.length && <ToggleGroup label="资源目录" value={catalog} onChange={selectCatalog} options={[{ id: "owner", label: "owner 资源" }, { id: "shared", label: "共享项目成果" }]} />}
+    {!!projects.data?.rows.length && <ToggleGroup label="资源目录" value={catalog} onChange={selectCatalog} options={[{ id: "owner", label: "工具成果" }, { id: "shared", label: "项目成果" }]} />}
     {catalog === "shared" ? <ReadStateView status={projects.status} error={projects.error} onRetry={projects.reload} skeleton={<SkeletonBlock className="h-24 rounded-card" />}>
-      {shared ? <section className="page-enter space-y-4" data-page="shared-assets" aria-label="共享项目成果">
-      <PageToolbar summary="共享项目成果 · 按当前项目授权查看，不会替换 owner 资源" actions={<Select aria-label="共享项目" value={shared.id} onChange={(event) => { setScope(event.target.value); setParams((current) => { const query = new URLSearchParams(current); query.set("sharedProject", event.target.value); return query; }, { replace: true }); }}>{projects.data?.rows.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</Select>} />
+      {shared ? <section className="page-enter space-y-4" data-page="shared-assets" aria-label="项目成果">
+      <PageToolbar summary="共享项目的成果，按你在这个项目里的权限查看，不会替换各个工具里的原始资源。" actions={<Select aria-label="共享项目" value={shared.id} onChange={(event) => { setScope(event.target.value); setParams((current) => { const query = new URLSearchParams(current); query.set("sharedProject", event.target.value); return query; }, { replace: true }); }}>{projects.data?.rows.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</Select>} />
       <ProjectFiles project={shared} />
     </section> : <EmptyState icon={<Images />} title="共享项目不可用" body="当前链接没有对应的共享项目，未回退到其他项目。" />}
     </ReadStateView> : <OwnerAssetsPage />}
@@ -160,16 +159,19 @@ function OwnerAssetsPage() {
   const from = params.get("from") || "";
   const to = params.get("to") || "";
   const access = (["available", "locked"].includes(params.get("access") || "") ? params.get("access") : "all") as AccessFilter;
-  const [query, setQuery] = useState("");
-  const [storedView, setStoredView] = useState<AssetViewMode>(() => readPreference(viewPreferenceKey, "gallery", parseAssetViewMode));
-  const view = params.get("view") ? parseAssetViewMode(params.get("view")) : storedView;
-  const [inspectorMode, setInspectorMode] = useState<AssetInspectorMode>(() => readPreference(inspectorPreferenceKey, "fixed", parseAssetInspectorMode));
+  // The search is in the address like every other condition, so a link or a reload keeps it.
+  const urlQuery = params.get("q") || "";
+  const [query, setQuery] = useState(urlQuery);
+  const assetsPrefs = useAssetsPreferences();
+  const { pageSize: listPageSize, setPageSize: setListPageSize } = useListPreferences();
+  const view = params.get("view") ? parseAssetViewMode(params.get("view")) : assetsPrefs.view;
+  const [inspectorMode, setInspectorMode] = useInspectorMode("assets");
   const [maximized, setMaximized] = useState(false);
   const selectedKey = params.get("result");
 
   const [, writeOverlay] = useOverlayParams(assetOverlays);
   const update = useCallback((patch: Record<string, string | null>, history: "push" | "replace" = "replace") => {
-    const next = new URLSearchParams(params);
+    const next = new URLSearchParams(liveQuery(params));
     for (const [key, value] of Object.entries(patch)) {
       if (value && value !== "all") next.set(key, value);
       else next.delete(key);
@@ -211,19 +213,35 @@ function OwnerAssetsPage() {
   const taskStates = [...new Set(all.map((entry) => entry.task.state))];
   const previewable = useMemo(() => all.filter((entry) => resultAction(entry.task, "preview").enabled).length, [all]);
   const locked = all.length - previewable;
+  // Counted by task, like the 待你挑选 tab: two candidates of one task are one choice to make.
+  const waiting = useMemo(() => new Set(all.filter((entry) => taskNeedsReview(entry.task)).map((entry) => entry.task.task_key || entry.task.locator.task_ref)).size, [all]);
   const selected = all.find((entry) => entry.key === selectedKey) || null;
-  useRememberRecent(selected ? { key: `result:${selected.key}`, kind: "result", label: selected.result.name || "未命名结果", meta: `${ownerLabel(selected.task.locator.owner)} · ${kindLabel(selected.kind)}`, target: recentTarget("/assets", params) } : null);
+  useRememberRecent(selected ? { key: `result:${selected.key}`, kind: "result", label: resultName(selected), meta: `${ownerLabel(selected.task.locator.owner)} · ${kindLabel(selected.kind)}`, target: recentTarget("/assets", params) } : null);
   const selectedIndex = selected ? visible.findIndex((entry) => entry.key === selected.key) : -1;
+  const gallery = view === "gallery";
+  const pageSize = gallery ? assetsPrefs.pageSize : listPageSize;
+  const paged = usePagedRows(visible, pageSize, assetOverlays, { focusIndex: selectedIndex >= 0 ? selectedIndex : undefined });
+  /** The page a result is on, so closing the viewer or stepping the Inspector lands where the person last looked. */
+  const pageOf = useCallback((key: string) => {
+    const index = visible.findIndex((entry) => entry.key === key);
+    return index < 0 ? null : Math.floor(index / pageSize) + 1;
+  }, [pageSize, visible]);
+  const pageParam = (key: string) => { const page = pageOf(key); return page && page > 1 ? String(page) : null; };
+  useEffect(() => {
+    if (urlQuery === query) return;
+    const timer = window.setTimeout(() => update({ q: query.trim() || null, page: null }), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setQuery((current) => current.trim() === urlQuery ? current : urlQuery); }, [urlQuery]);
 
   const setView = (next: AssetViewMode) => {
-    setStoredView(next);
-    if (typeof window !== "undefined") window.localStorage.setItem(viewPreferenceKey, next);
-    update({ view: next === "gallery" ? null : next });
+    assetsPrefs.set({ view: next });
+    update({ view: next === "gallery" ? null : next, page: null });
   };
 
   const openDetails = useCallback((entry: ResultEntry, history: "push" | "replace" = "push") => {
-    update({ result: entry.key, preview: null }, history);
-  }, [update]);
+    update({ result: entry.key, preview: null, page: pageParam(entry.key) }, history);
+  }, [update, pageOf]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Playing from the library queues every playable audio result in the current filter order.
   const audioQueue = useMemo(() => visible.filter((entry) => entry.kind === "audio" && resultAction(entry.task, "preview").enabled).map((entry) => audioTrackFrom(entry, assetHref(entry))), [visible]);
@@ -256,9 +274,9 @@ function OwnerAssetsPage() {
     const entry = resolvePreview(key);
     if (!entry) return;
     preview.open(entry, { source: "asset-card", autoplay: true, syncQuery: false });
-    // An open inspector follows the viewer, so closing the viewer shows the last item looked at.
-    update({ preview: key, ...(selectedKey ? { result: key } : {}) }, "replace");
-  }, [preview, resolvePreview, selectedKey, update]);
+    // An open inspector follows the viewer, and so does the page, so closing the viewer shows the last item looked at.
+    update({ preview: key, page: pageParam(key), ...(selectedKey ? { result: key } : {}) }, "replace");
+  }, [preview, resolvePreview, selectedKey, update, pageOf]); // eslint-disable-line react-hooks/exhaustive-deps
   const showViewerDetails = useCallback((key: string) => update({ result: key, preview: null }, "replace"), [update]);
 
   const closeInspector = useCallback(() => {
@@ -268,19 +286,21 @@ function OwnerAssetsPage() {
 
   const changeInspectorMode = (mode: AssetInspectorMode) => {
     setInspectorMode(mode);
-    if (typeof window !== "undefined") window.localStorage.setItem(inspectorPreferenceKey, mode);
     update({ inspector: mode }, "replace");
   };
 
   useEffect(() => {
-    const requested = params.get("inspector");
-    if (requested === "fixed" || requested === "floating") setInspectorMode(requested);
-  }, [params]);
+    const requested = parseAssetInspectorMode(params.get("inspector"));
+    if (params.get("inspector") && requested !== inspectorMode) setInspectorMode(requested);
+  }, [params]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Previous and next replace the shown work, so Back still closes the panel in one step. They start from the work in
+  // the address, which a quick second press may have changed before this page rendered again.
   const navigateSelection = (direction: -1 | 1) => {
-    if (!visible.length || selectedIndex < 0) return;
-    const next = visible[Math.min(visible.length - 1, Math.max(0, selectedIndex + direction))];
-    if (next) openDetails(next);
+    const current = visible.findIndex((entry) => entry.key === new URLSearchParams(liveQuery(params)).get("result"));
+    if (current < 0) return;
+    const next = visible[Math.min(visible.length - 1, Math.max(0, current + direction))];
+    if (next) openDetails(next, "replace");
   };
 
   const loading = tasks.status === "loading";
@@ -293,45 +313,48 @@ function OwnerAssetsPage() {
 
   const [filterDrawer, setFilterDrawer] = useState(false);
   const activeConditions = [owner, project, resultState, taskState, access !== "all" ? access : "", from, to].filter(Boolean).length;
-  // One set of conditions, inline on wide screens and stacked with labels in the phone drawer.
-  const conditionFields = (stacked: boolean) => {
-    const field = (label: string, control: ReactNode) => stacked ? <Field label={label}>{control}</Field> : control;
-    return <>
-      {field("来源", <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value || null })} className={stacked ? undefined : "w-32"}>
-        <option value="">全部来源</option>
-        {owners.map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
-      </Select>)}
-      {field("项目", <Select aria-label="项目" value={project} onChange={(event) => update({ project: event.target.value || null })} className={stacked ? undefined : "w-40"}>
-        <option value="">全部项目</option>
-        {projects.map((item) => <option key={item} value={item}>{item}</option>)}
-      </Select>)}
-      {field("结果状态", <Select aria-label="结果状态" value={resultState} onChange={(event) => update({ resultState: event.target.value || null })} className={stacked ? undefined : "w-32"}>
-        <option value="">全部结果</option>
-        {resultStates.map((item) => <option key={item} value={item}>{resultStateLabel(item)?.label || item}</option>)}
-      </Select>)}
-      {field("任务状态", <Select aria-label="任务状态" value={taskState} onChange={(event) => update({ taskState: event.target.value || null })} className={stacked ? undefined : "w-32"}>
-        <option value="">全部任务</option>
-        {taskStates.map((item) => <option key={item} value={item}>{taskStateLabels[item] || item}</option>)}
-      </Select>)}
-      {field("内容权限", <Select aria-label="内容权限" value={access} onChange={(event) => update({ access: event.target.value })} className={stacked ? undefined : "w-36"}>
-        <option value="all">全部权限</option>
-        <option value="available">可预览</option>
-        <option value="locked">未授权</option>
-      </Select>)}
-      {stacked ? <div className="grid grid-cols-2 gap-3">
-        <Field label="开始日期"><Input type="date" value={from} onChange={(event) => update({ from: event.target.value || null })} /></Field>
-        <Field label="结束日期"><Input type="date" min={from} value={to} onChange={(event) => update({ to: event.target.value || null })} /></Field>
-      </div> : <>
-        <label className="text-2xs text-muted">从<input aria-label="开始日期" type="date" value={from} onChange={(event) => update({ from: event.target.value || null })} className="ml-1 rounded-control border border-line bg-panel px-2 py-1 text-body-sm" /></label>
-        <label className="text-2xs text-muted">到<input aria-label="结束日期" type="date" min={from} value={to} onChange={(event) => update({ to: event.target.value || null })} className="ml-1 rounded-control border border-line bg-panel px-2 py-1 text-body-sm" /></label>
-      </>}
-    </>;
+  // Wide screens keep 类型 and 来源 in view; the drawer holds the rest, so its count leaves out the visible 来源.
+  const moreConditions = activeConditions - (owner ? 1 : 0);
+  const lead = loading ? "正在整理你的作品…" : !all.length ? "这里还没有作品。" : waiting ? `${all.length} 件作品，${waiting} 个任务的结果等你挑选。` : `${all.length} 件作品。`;
+  // 来源 stays inline on wide screens; the drawer repeats it with a label, for phones.
+  const ownerSelect = (stacked: boolean) => {
+    const control = <Select aria-label="来源" value={owner} onChange={(event) => update({ owner: event.target.value || null })} className={stacked ? undefined : "w-32"}>
+      <option value="">全部来源</option>
+      {owners.map((item) => <option key={item} value={item}>{ownerLabel(item)}</option>)}
+    </Select>;
+    return stacked ? <Field label="来源">{control}</Field> : control;
   };
+  // The drawer holds every condition, 来源 included, so phones (which show none inline) reach them all.
+  const conditionFields = () => <>
+    {ownerSelect(true)}
+    <Field label="项目"><Select aria-label="项目" value={project} onChange={(event) => update({ project: event.target.value || null })}>
+      <option value="">全部项目</option>
+      {projects.map((item) => <option key={item} value={item}>{item}</option>)}
+    </Select></Field>
+    <Field label="结果状态"><Select aria-label="结果状态" value={resultState} onChange={(event) => update({ resultState: event.target.value || null })}>
+      <option value="">全部结果</option>
+      {resultStates.map((item) => <option key={item} value={item}>{resultStateLabel(item)?.label || item}</option>)}
+    </Select></Field>
+    <Field label="任务状态"><Select aria-label="任务状态" value={taskState} onChange={(event) => update({ taskState: event.target.value || null })}>
+      <option value="">全部任务</option>
+      {taskStates.map((item) => <option key={item} value={item}>{taskStateLabels[item] || item}</option>)}
+    </Select></Field>
+    <Field label="内容权限"><Select aria-label="内容权限" value={access} onChange={(event) => update({ access: event.target.value })}>
+      <option value="all">全部权限</option>
+      <option value="available">可预览</option>
+      <option value="locked">未授权</option>
+    </Select></Field>
+    <div className="grid grid-cols-2 gap-3">
+      <Field label="开始日期"><Input type="date" value={from} onChange={(event) => update({ from: event.target.value || null })} /></Field>
+      <Field label="结束日期"><Input type="date" min={from} value={to} onChange={(event) => update({ to: event.target.value || null })} /></Field>
+    </div>
+  </>;
   return <AudioQueue tracks={audioQueue}><div className={cx("page-enter space-y-5", selected && inspectorMode === "fixed" && !maximized && "min-[1280px]:pr-[var(--inspector-width)]")} data-page="assets">
     <h1 className="sr-only">资源库</h1>
     <PageToolbar
       foldMetrics
-      summary="浏览 owner 任务产出的结果；选择资源查看来源、权限与生产过程。预览和播放只在点击后才读取内容。"
+      lead={lead}
+      summary="图片、视频和声音都在这里。点开看它从哪来、怎么做的；预览和播放只在你点开时才读取内容。"
       metrics={loading ? <SkeletonBlock className="h-[50px] w-80 max-w-full rounded-control" /> : all.length > 0 ? <MetricStrip label="资源概况" items={metrics} /> : undefined}
       meta={!loading && (tasks.observedAt || tasks.truncated) ? <>
         {tasks.observedAt && <span className="inline-flex items-center gap-1.5 text-2xs text-muted"><Clock3 className="size-3.5" />读取于 {formatRelative(tasks.observedAt)}</span>}
@@ -344,15 +367,31 @@ function OwnerAssetsPage() {
     <Panel bodyClassName="p-0">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
         <ToggleGroup<KindFilter> label="类型" value={kind} onChange={(value) => update({ kind: value })} options={kindOptions} />
-        {/* Phones keep the type switch and the search; the other conditions live in a drawer with the same URL parameters. */}
+        {/* Two groups stay in view (类型, 来源); every other condition lives in one drawer with the same URL parameters. Phones keep only the type switch and the search. */}
         <Button variant="secondary" size="sm" className="sm:hidden max-sm:order-2" icon={<SlidersHorizontal className="size-3.5" />} aria-label={activeConditions ? `筛选，已选 ${activeConditions} 项` : "筛选"} onClick={() => setFilterDrawer(true)}>筛选{activeConditions > 0 && ` · ${activeConditions}`}</Button>
-        <div className="contents max-sm:hidden">{conditionFields(false)}</div>
+        <div className="contents max-sm:hidden">
+          {ownerSelect(false)}
+          <Button variant="ghost" size="sm" icon={<SlidersHorizontal className="size-3.5" />} aria-label={moreConditions ? `更多筛选，已选 ${moreConditions} 项` : "更多筛选"} onClick={() => setFilterDrawer(true)}>更多筛选{moreConditions > 0 && ` · ${moreConditions}`}</Button>
+        </div>
+        {gallery && <div className="flex items-center gap-3 max-md:hidden" data-gallery-controls>
+          <ToggleGroup<GalleryLayout> label="排列方式" value={assetsPrefs.layout} onChange={(layout) => assetsPrefs.set({ layout })} options={[{ id: "grid", label: "网格" }, { id: "justified", label: "按比例" }]} />
+          <label className="flex items-center gap-2 whitespace-nowrap text-2xs text-muted">缩略图大小
+            <input type="range" min={tileRange.min} max={tileRange.max} step={tileRange.step} value={assetsPrefs.tile} aria-valuetext={`${assetsPrefs.tile} 像素`} onChange={(event) => assetsPrefs.set({ tile: clampTile(Number(event.target.value)) })} className="w-24 accent-[var(--accent)]" />
+          </label>
+        </div>}
         <SearchField value={query} onChange={setQuery} placeholder="文件、结果或任务名称" label="搜索资源" className="ml-auto max-sm:order-1 max-sm:min-w-40 max-sm:flex-1 sm:w-64" />
       </div>
       <ReadStateView status={tasks.status === "empty" ? "ready" : tasks.status} error={tasks.error} onRetry={tasks.refresh} skeleton={<AssetSkeleton view={view} />}>
         {visible.length === 0 ? <EmptyState icon={<Images />} title={all.length ? "没有符合条件的资源" : "当前批次没有任务结果"} body={all.length ? "试试切换类型、权限或视图筛选。" : "结果来自 owner 任务投影；没有结果不代表生成失败。"} /> : <>
-          <AssetBrowser view={view} entries={visible} selectedKey={selected?.key || null} onDetails={openDetails} onPreview={openPreview} actionsFor={assetActions} />
-          <div className="border-t border-line px-4 py-3 text-2xs text-muted tabular">当前结果 {visible.length} / 已加载 {all.length} 个资源{tasks.truncated ? " · 历史未读全" : ""}</div>
+          <AssetBrowser view={view} entries={paged.rows} selectedKey={selected?.key || null} onDetails={openDetails} onPreview={openPreview} actionsFor={assetActions} tile={assetsPrefs.tile} layout={assetsPrefs.layout} />
+          <Pager
+            window={paged}
+            onPage={paged.setPage}
+            noun={`个资源（已加载 ${all.length} 个${tasks.truncated ? "，历史未读全" : ""}）`}
+            pageSize={pageSize}
+            pageSizes={gallery ? galleryPageSizes : pageSizes}
+            onPageSize={(value) => { if (gallery) assetsPrefs.set({ pageSize: value as GalleryPageSize }); else setListPageSize(value as PageSize); paged.setPage(1); }}
+          />
         </>}
       </ReadStateView>
     </Panel>
@@ -369,21 +408,26 @@ function OwnerAssetsPage() {
       onNext={() => navigateSelection(1)}
       hasPrevious={selectedIndex > 0}
       hasNext={selectedIndex >= 0 && selectedIndex < visible.length - 1}
+      position={selectedIndex >= 0 ? `${selectedIndex + 1} / ${visible.length}` : undefined}
       onOpenTask={() => navigate(`/tasks?task=${encodeURIComponent(selected.task.task_key || "")}`)}
     />}
-    <DetailSheet open={filterDrawer} onOpenChange={setFilterDrawer} title="筛选资源" footer={<div className="flex items-center justify-between gap-2">
+    <DetailSheet open={filterDrawer} onOpenChange={setFilterDrawer} title="筛选作品" footer={<div className="flex items-center justify-between gap-2">
       <Button variant="ghost" disabled={!activeConditions} onClick={() => update({ owner: null, project: null, resultState: null, taskState: null, access: null, from: null, to: null })}>清除条件</Button>
       <Button variant="primary" onClick={() => setFilterDrawer(false)}>完成</Button>
     </div>}>
-      <div className="space-y-4">{conditionFields(true)}</div>
+      <div className="space-y-4">{conditionFields()}</div>
     </DetailSheet>
     <MediaViewer controller={preview} slides={slides} onNavigate={navigateViewer} onDetails={showViewerDetails} />
   </div></AudioQueue>;
 }
 
-function AssetBrowser({ view, entries, selectedKey, onDetails, onPreview, actionsFor }: { view: AssetViewMode; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void; actionsFor: (entry: ResultEntry) => ItemAction[] }) {
+function AssetBrowser({ view, entries, selectedKey, onDetails, onPreview, actionsFor, tile, layout }: { view: AssetViewMode; entries: ResultEntry[]; selectedKey: string | null; onDetails: (entry: ResultEntry) => void; onPreview: (entry: ResultEntry) => void; actionsFor: (entry: ResultEntry) => ItemAction[]; tile: number; layout: GalleryLayout }) {
   if (view !== "gallery") return <AssetTable compact={view === "compact"} entries={entries} selectedKey={selectedKey} onDetails={onDetails} onPreview={onPreview} actionsFor={actionsFor} />;
-  return <ul className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-4 p-4" aria-label="资源大图网格" onKeyDown={(event) => moveBetweenRows(event, "grid")}>{entries.map((entry, index) => <AssetGalleryCard key={entry.key} entry={entry} index={index} selected={entry.key === selectedKey} onDetails={() => onDetails(entry)} onPreview={() => onPreview(entry)} actions={actionsFor(entry)} />)}</ul>;
+  const justified = layout === "justified";
+  const cards = entries.map((entry, index) => <AssetGalleryCard key={entry.key} entry={entry} index={index} selected={entry.key === selectedKey} onDetails={() => onDetails(entry)} onPreview={() => onPreview(entry)} actions={actionsFor(entry)} ratio={justified ? tileRatio(entry.result.width, entry.result.height) : undefined} tile={tile} />);
+  // 按比例: each picture keeps its shape and a row fills the width; the spacer keeps the last row from stretching.
+  if (justified) return <ul className="flex flex-wrap gap-3 p-4" aria-label="资源大图网格" data-gallery-layout="justified" onKeyDown={(event) => moveBetweenRows(event, "grid")}>{cards}<li aria-hidden="true" className="h-0 grow-[999] basis-0" /></ul>;
+  return <ul className="grid gap-4 p-4" style={{ gridTemplateColumns: gridColumns(tile) }} aria-label="资源大图网格" data-gallery-layout="grid" onKeyDown={(event) => moveBetweenRows(event, "grid")}>{cards}</ul>;
 }
 
 function AccessState({ action }: { action: PreviewAction }) {
@@ -395,7 +439,7 @@ function AccessState({ action }: { action: PreviewAction }) {
 function PreviewButton({ entry, action, onPreview, iconOnly = false, variant = "ghost", className, stop = false }: { entry: ResultEntry; action: PreviewAction; onPreview: () => void; iconOnly?: boolean; variant?: "secondary" | "ghost"; className?: string; stop?: boolean }) {
   if (entry.kind === "audio" && action.enabled) return <AudioPlayButton track={audioTrackFrom(entry, assetHref(entry))} variant={variant} iconOnly={iconOnly} stop={stop} className={className} />;
   const verb = entry.kind === "audio" ? "播放" : "预览";
-  const label = `${verb} ${entry.result.name || "未命名结果"}`;
+  const label = `${verb} ${resultName(entry)}`;
   const title = action.reason || "申请短期预览句柄";
   const run = (event: MouseEvent) => {
     if (stop) event.stopPropagation();
@@ -421,39 +465,55 @@ const posterTone: Record<MediaKind, string> = {
   text: "bg-kind-text-soft",
 };
 
-function AssetPoster({ entry, action }: { entry: ResultEntry; action: PreviewAction }) {
+function AssetPoster({ entry, action, ratio }: { entry: ResultEntry; action: PreviewAction; ratio?: number }) {
   const phase = useTrackPhase(entry.key);
   const spec = assetSpec(entry.result);
-  const thumbnail = entry.kind === "image" && action.enabled && entry.result.thumbnail?.state === "ready";
+  const thumbnail = (entry.kind === "image" || entry.kind === "video") && action.enabled && entry.result.thumbnail?.state === "ready";
   const chip = [kindLabel(entry.kind), spec.format, entry.kind === "image" ? null : spec.duration].filter(Boolean).join(" · ");
-  return <span className={cx("relative block aspect-[16/10] overflow-hidden", posterTone[entry.kind])}>
-    {thumbnail
-      ? <TaskThumbnail task={entry.task} result={entry.result} size="lg" className="absolute inset-0 border-0! rounded-none! bg-transparent!" />
-      : entry.kind === "image"
-        ? <><span aria-hidden="true" className="media-checker absolute inset-0 opacity-45" /><span className="absolute inset-0 grid place-items-center"><KindBadge kind="image" size="lg" /></span></>
-        : <span className="absolute inset-0 grid place-items-center"><KindBadge kind={entry.kind} size="lg" /></span>}
-    <span className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-20px)] truncate rounded-chip bg-panel/90 px-2 py-0.5 text-2xs font-medium text-ink-soft shadow-panel">{phase === "playing" ? "正在播放" : phase === "pending" ? "正在载入" : phase === "paused" ? "已暂停" : chip}</span>
+  // The viewer grows out of this poster when it opens on this result.
+  return <span data-viewer-origin={entry.key} className={cx("relative block overflow-hidden", !ratio && "aspect-[16/10]", posterTone[entry.kind])} style={ratio ? { aspectRatio: String(ratio) } : undefined}>
+    {/* A slow push-in on hover; nothing moves when reduced motion is asked for. */}
+    <span className="absolute inset-0 transition-transform duration-500 ease-out group-hover:scale-[1.03] motion-reduce:transform-none">
+      {thumbnail
+        ? <TaskThumbnail task={entry.task} result={entry.result} size="lg" className="absolute inset-0 border-0! rounded-none! bg-transparent!" />
+        : entry.kind === "image"
+          ? <><span aria-hidden="true" className="media-checker absolute inset-0 opacity-45" /><span className="absolute inset-0 grid place-items-center"><KindBadge kind="image" size="lg" /></span></>
+          : <span className="absolute inset-0 grid place-items-center"><KindBadge kind={entry.kind} size="lg" /></span>}
+    </span>
+    {/* The waveform the player drew for this track in this tab; a bare rail until it has been played. */}
+    {entry.kind === "audio" && !ratio && <AudioMiniWave trackKey={entry.key} bare className="absolute! inset-x-3 bottom-10" />}
+    {entry.kind === "video" && thumbnail && <span aria-hidden="true" className="absolute inset-0 grid place-items-center"><span className="grid size-10 place-items-center rounded-full bg-black/45 text-white backdrop-blur-sm"><Play className="ml-0.5 size-4" fill="currentColor" /></span></span>}
+    {/* In 按比例 the caption sits on the picture and carries the type; the chip would cover it. */}
+    {!ratio && <span className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-20px)] truncate rounded-chip bg-panel/90 px-2 py-0.5 text-2xs font-medium text-ink-soft shadow-panel">{phase === "playing" ? "正在播放" : phase === "pending" ? "正在载入" : phase === "paused" ? "已暂停" : chip}</span>}
   </span>;
 }
 
-function AssetGalleryCard({ entry, index, selected, onDetails, onPreview, actions }: { entry: ResultEntry; index: number; selected: boolean; onDetails: () => void; onPreview: () => void; actions: ItemAction[] }) {
+function AssetGalleryCard({ entry, index, selected, onDetails, onPreview, actions, ratio, tile }: { entry: ResultEntry; index: number; selected: boolean; onDetails: () => void; onPreview: () => void; actions: ItemAction[]; ratio?: number; tile: number }) {
   const action = resultAction(entry.task, "preview");
   const spec = assetSpec(entry.result);
-  const name = entry.result.name || "未命名结果";
+  const name = resultName(entry);
   const specLine = [spec.dimensions, spec.size].filter(Boolean).join(" · ");
-  return <ActionsContextMenu actions={actions}><li className="relative min-w-0 stagger-in" style={{ "--i": index } as CSSProperties}>
-    <article className={cx("group relative overflow-hidden rounded-card border bg-panel transition-[border-color,box-shadow] duration-150", selected ? "border-primary shadow-selected" : "border-line hover:border-line-strong hover:shadow-raised")} data-result={entry.key}>
+  const waiting = taskNeedsReview(entry.task);
+  return <ActionsContextMenu actions={actions}><li className="relative min-w-0 stagger-in" style={{ "--i": index, ...(ratio ? justifiedTile(ratio, tile) : {}) } as CSSProperties}>
+    <article className={cx("group relative overflow-hidden rounded-tile border bg-panel shadow-card transition-[border-color,box-shadow,transform] duration-200 ease-out", selected ? "border-primary shadow-selected" : "border-line/70 hover:-translate-y-0.5 hover:border-line-strong hover:shadow-raised motion-reduce:hover:translate-y-0")} data-result={entry.key} data-waiting={waiting || undefined}>
       {/* The card's button lies over the card rather than wrapping it, so its short name never omits text it visibly contains. */}
       <button type="button" data-row-button onClick={onDetails} aria-label={`选择 ${name} 资源`} aria-current={selected || undefined} className="absolute inset-0 z-[1] rounded-card focus-visible:outline-offset-[-3px]" />
-      <AssetPoster entry={entry} action={action} />
-      <div className="px-3.5 pb-3 pt-3">
-        <p className="truncate text-body-sm font-semibold text-ink">{name}</p>
-        <p className="mt-0.5 truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {entry.task.title}</p>
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <span className="min-w-0 truncate text-2xs text-faint tabular">{specLine || "规格未提供"}</span>
-          <AccessState action={action} />
+      <AssetPoster entry={entry} action={action} ratio={ratio} />
+      {ratio
+        ? <div className="tile-scrim pointer-events-none absolute inset-x-0 bottom-0 z-[1] px-3 pb-2.5 pt-10 text-white">
+          <p className="truncate text-body-sm font-semibold">{name}</p>
+          <p className="mt-0.5 truncate text-2xs text-white/80">{kindLabel(entry.kind)} · {ownerLabel(entry.task.locator.owner)}{action.enabled ? "" : " · 未授权"}</p>
         </div>
-      </div>
+        : <div className="px-3.5 pb-3 pt-3">
+          <p className="truncate text-body-sm font-semibold text-ink">{name}</p>
+          <p className="mt-0.5 truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {resultSource(entry)}</p>
+          <div className={cx("mt-2 flex items-center gap-2", specLine ? "justify-between" : "justify-end")}>
+            {/* A spec the tool did not give is left out rather than announced on every card. */}
+            {specLine && <span className="min-w-0 truncate text-2xs text-faint tabular">{specLine}</span>}
+            <AccessState action={action} />
+          </div>
+        </div>}
+      {waiting && <span className="pointer-events-none absolute left-2.5 top-2.5 z-[2] rounded-chip bg-warm px-2 py-0.5 text-2xs font-semibold text-canvas shadow-panel">待你挑选</span>}
       {entry.kind === "audio" && action.enabled && <span className="pointer-events-none absolute inset-x-0 top-0 z-[2] grid aspect-[16/10] place-items-center"><AudioPosterPlay entry={entry} /></span>}
       <div className="absolute right-2 top-2 z-[2] flex items-center gap-1 transition-opacity duration-150 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
         {!(entry.kind === "audio" && action.enabled) && <PreviewButton entry={entry} action={action} onPreview={onPreview} variant="secondary" className="shadow-raised" />}
@@ -468,7 +528,7 @@ function AudioPosterPlay({ entry }: { entry: ResultEntry }) {
   const player = useAudioPlayer();
   const phase = useTrackPhase(entry.key);
   const activeStatus = useAudioState((state) => state.track?.key === entry.key ? state.status : null);
-  const name = entry.result.name || "未命名结果";
+  const name = resultName(entry);
   const verb = phase === "playing" ? "暂停" : phase === "pending" ? "载入中" : phase === "paused" ? "继续" : "播放";
   const queue = useAudioQueue();
   const toggle = () => { if (activeStatus === "playing") player.toggle(); else player.play(audioTrackFrom(entry, assetHref(entry)), queue); };
@@ -490,8 +550,8 @@ function AssetNameCell({ entry, compact }: { entry: ResultEntry; compact: boolea
       // Other kinds keep their badge in a slot as wide as the thumbnail, so names line up and rows keep one height.
       : <span className={cx("grid shrink-0 place-items-center", compact ? "size-10" : "size-16")}><KindBadge kind={entry.kind} size={compact ? "sm" : "lg"} /></span>}
     <span className="min-w-0 flex-1">
-      <span className="block truncate text-body-sm font-semibold text-ink">{entry.result.name || "未命名结果"}</span>
-      <span className="block truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {entry.task.title}</span>
+      <span className="block truncate text-body-sm font-semibold text-ink">{resultName(entry)}</span>
+      <span className="block truncate text-meta text-muted">{ownerLabel(entry.task.locator.owner)} · {resultSource(entry)}</span>
       {!compact && <span className="block truncate text-2xs text-faint tabular @2xl:hidden">{kindLabel(entry.kind)} · {specLine}</span>}
     </span>
   </span>;
@@ -518,7 +578,7 @@ function AssetTable({ compact, entries, selectedKey, onDetails, onPreview, actio
     { id: "access", header: "内容权限", priority: 2, cell: (entry) => <AccessState action={resultAction(entry.task, "preview")} /> },
     ...detailColumns,
     { id: "actions", header: <span className="sr-only">操作</span>, align: "end", cell: (entry) => {
-      const name = entry.result.name || "未命名结果";
+      const name = resultName(entry);
       return <span className="flex items-center justify-end gap-1">
         <PreviewButton entry={entry} action={resultAction(entry.task, "preview")} onPreview={() => onPreview(entry)} iconOnly={compact} stop />
         <DetailsButton name={name} onDetails={() => onDetails(entry)} stop />
@@ -531,7 +591,7 @@ function AssetTable({ compact, entries, selectedKey, onDetails, onPreview, actio
     rows={entries}
     rowKey={(entry) => entry.key}
     rowAttributes={(entry) => ({ "data-result": entry.key })}
-    rowLabel={(entry) => `选择 ${entry.result.name || "未命名结果"} 资源`}
+    rowLabel={(entry) => `选择 ${resultName(entry)} 资源`}
     selectedKey={selectedKey}
     onRowClick={onDetails}
     rowActions={actionsFor}
@@ -540,14 +600,13 @@ function AssetTable({ compact, entries, selectedKey, onDetails, onPreview, actio
   />;
 }
 
-function AssetInspector({ entry, preview, mode, maximized, onModeChange, onMaximize, onClose, onPrevious, onNext, hasPrevious, hasNext, onOpenTask }: { entry: ResultEntry; preview: MediaPreviewController; mode: AssetInspectorMode; maximized: boolean; onModeChange: (mode: AssetInspectorMode) => void; onMaximize: () => void; onClose: () => void; onPrevious: () => void; onNext: () => void; hasPrevious: boolean; hasNext: boolean; onOpenTask: () => void }) {
+function AssetInspector({ entry, preview, mode, maximized, onModeChange, onMaximize, onClose, onPrevious, onNext, hasPrevious, hasNext, position, onOpenTask }: { entry: ResultEntry; preview: MediaPreviewController; mode: AssetInspectorMode; maximized: boolean; onModeChange: (mode: AssetInspectorMode) => void; onMaximize: () => void; onClose: () => void; onPrevious: () => void; onNext: () => void; hasPrevious: boolean; hasNext: boolean; position?: string; onOpenTask: () => void }) {
   const previewAction = resultAction(entry.task, "preview");
   const downloadAction = resultAction(entry.task, "download");
   const spec = assetSpec(entry.result);
   const specText = [spec.format, spec.dimensions, spec.duration, spec.size].filter(Boolean).join(" · ");
-  const header = <div className="flex items-start gap-3"><KindBadge kind={entry.kind} size="sm" /><div className="min-w-0 flex-1"><p className="text-2xs font-medium text-muted">{ownerLabel(entry.task.locator.owner)} · {kindLabel(entry.kind)}</p><h2 className="mt-0.5 break-words text-title font-semibold text-ink">{entry.result.name || "未命名结果"}</h2><p className="mt-1 truncate text-body-sm text-muted">{entry.task.locator.project} · {entry.task.title}</p></div></div>;
+  const header = <div className="flex items-start gap-3"><KindBadge kind={entry.kind} size="sm" /><div className="min-w-0 flex-1"><p className="text-2xs font-medium text-muted">{ownerLabel(entry.task.locator.owner)} · {kindLabel(entry.kind)}</p><h2 className="mt-0.5 break-words text-title font-semibold text-ink">{resultName(entry)}</h2><p className="mt-1 truncate text-body-sm text-muted">{entry.task.locator.project} · {entry.task.title}</p></div></div>;
   const meta = <div className="mt-3 flex min-w-0 items-center gap-2 text-2xs text-muted"><span className="min-w-0 flex-1 truncate">{entry.task.locator.task_ref}</span><span className="shrink-0 rounded-chip bg-primary-soft px-2 py-0.5 text-primary">只读观察</span></div>;
-  const stepButton = "grid size-8 place-items-center rounded-control text-muted hover:bg-panel-sunken hover:text-ink disabled:opacity-35";
   return <InspectorShell
     open
     mode={mode}
@@ -561,13 +620,14 @@ function AssetInspector({ entry, preview, mode, maximized, onModeChange, onMaxim
     dataAttribute="data-asset-inspector"
     returnFocus={itemSelector("data-result", entry.key)}
     header={header}
-    headerActions={<><button type="button" disabled={!hasPrevious} onClick={onPrevious} aria-label="上一个资源" title="上一个资源" className={stepButton}><ChevronLeft className="size-4" /></button><button type="button" disabled={!hasNext} onClick={onNext} aria-label="下一个资源" title="下一个资源" className={stepButton}><ChevronRight className="size-4" /></button></>}
+    stepper={{ noun: "资源", previous: hasPrevious ? onPrevious : undefined, next: hasNext ? onNext : undefined, position }}
+    itemKey={entry.key}
     meta={meta}
     sections={[{ id: "overview", label: "概览" }, { id: "source", label: "来源与版本" }, { id: "access", label: "权限与审阅" }, { id: "process", label: "生产过程" }]}
     footer={<div className="flex items-center gap-1.5 text-2xs text-muted"><LockKeyhole className="size-3 shrink-0" />预览、下载和审阅状态均以 owner 授权与回读为准。</div>}
   >
     <section id="asset-overview" data-inspector-section="overview" tabIndex={-1} className="scroll-mt-24 space-y-3"><AssetPreviewStage entry={entry} preview={preview} /><ResultViewer task={entry.task} result={entry.result} kind={entry.kind} preview={preview} showPreview={false} /><Facts columns={2} items={[{ label: "结果状态", value: <CodeText value={resultStateLabel(entry.result.state)} /> }, { label: "任务状态", value: <TaskStatePill state={entry.task.state} /> }, { label: "规格", value: specText || <Unknown />, wide: true }, { label: "更新时间", value: formatRelative(entry.task.updated_at || entry.task.created_at) }]} /></section>
-    <section id="asset-source" data-inspector-section="source" tabIndex={-1} className="mt-6 scroll-mt-24 space-y-3"><h3 className="text-body-sm font-semibold text-ink">来源与版本</h3><Facts columns={2} items={[{ label: "Owner 项目", value: entry.task.locator.project }, { label: "来源任务", value: entry.task.title, wide: true }, { label: "任务引用", value: entry.task.locator.task_ref }, { label: "修订版本", value: entry.task.revision || <Unknown /> }]} /><Button size="sm" variant="ghost" onClick={onOpenTask} icon={<ArrowUpRight className="size-3.5" />}>查看来源任务</Button></section>
+    <section id="asset-source" data-inspector-section="source" tabIndex={-1} className="mt-6 scroll-mt-24 space-y-3"><h3 className="text-body-sm font-semibold text-ink">来源与版本</h3><Facts columns={2} items={[{ label: "Owner 项目", value: entry.task.locator.project }, { label: "来源任务", value: entry.task.title, wide: true }, { label: "任务引用", value: entry.task.locator.task_ref }, { label: "修订版本", value: entry.task.revision || <Unknown /> }]} /><Button size="sm" variant="ghost" onClick={onOpenTask} icon={<ArrowUpRight className="size-3.5" />}>查看来源任务</Button><PromptLibraryLink owner={entry.task.locator.owner} source={entry.task.locator.task_ref}/></section>
     <section id="asset-access" data-inspector-section="access" tabIndex={-1} className="mt-6 scroll-mt-24 space-y-3"><h3 className="text-body-sm font-semibold text-ink">权限与审阅</h3><Facts columns={2} items={[{ label: "内容读取", value: previewAction.enabled ? <Pill tone="success">可申请预览</Pill> : <Pill tone="warning">{previewAction.reason || "未授权"}</Pill> }, { label: "下载", value: downloadAction.enabled ? <Pill tone="success">可下载</Pill> : <Pill tone="neutral">{downloadAction.reason || "未提供"}</Pill> }, { label: "审阅状态", value: <CodeText value={reviewStatusLabel(entry.task.provider_recovery?.review_status)} /> }, { label: "交付状态", value: <CodeText value={exportStatusLabel(entry.task.provider_recovery?.export_status)} /> }]} /><InlineNotice tone="neutral">控制中心只读取 owner 记录，不复制、采用或改写资源。</InlineNotice></section>
     <section id="asset-process" data-inspector-section="process" tabIndex={-1} className="mt-6 scroll-mt-24 space-y-3"><h3 className="text-body-sm font-semibold text-ink">生产过程</h3><ProcessTimeline observation={entry.task.process} /></section>
   </InspectorShell>;
@@ -585,7 +645,7 @@ function VisualPreviewStage({ entry, preview }: { entry: ResultEntry; preview: M
   const action = resultAction(entry.task, "preview");
   const showing = preview.target?.key === entry.key && preview.status !== "closed";
   const thumbnail = entry.kind === "image" && action.enabled && entry.result.thumbnail?.state === "ready";
-  return <div className={cx(stageBase, "relative overflow-hidden")} data-asset-stage={entry.kind}>
+  return <div className={cx(stageBase, "relative overflow-hidden")} data-asset-stage={entry.kind} data-viewer-origin={entry.key}>
     {thumbnail ? <TaskThumbnail task={entry.task} result={entry.result} size="lg" className="absolute inset-0 border-0! rounded-none! bg-transparent!" /> : <div className="p-6 text-center"><KindBadge kind={entry.kind} size="lg" className="mx-auto" /><p className="mt-3 text-2xs text-muted">{action.enabled ? "在查看器中打开后才读取内容。" : action.reason || "内容读取未授权"}</p></div>}
     {action.enabled && <Button size="sm" variant={thumbnail ? "secondary" : "primary"} className="absolute bottom-3 right-3 shadow-raised" icon={<Maximize2 className="size-3.5" />} onClick={() => preview.open(entry, { source: "detail-sheet", autoplay: true, history: "push" })}>{showing ? "查看器中" : viewerOpenLabel(entry.kind)}</Button>}
   </div>;

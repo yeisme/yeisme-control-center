@@ -1,11 +1,12 @@
+import { PromptLibraryLink } from "../../components/PromptLibraryLink";
 import { useEffect, useRef, useState } from "react";
-import { Archive, BellOff, CheckCheck, ChevronRight, Columns3, Copy, LoaderCircle, MoreHorizontal, RefreshCw, Route, ShieldQuestion } from "../../icons";
+import { Archive, BellOff, Bot, CheckCheck, ChevronRight, Columns3, Copy, LoaderCircle, MoreHorizontal, RefreshCw, Route, ShieldQuestion } from "../../icons";
 import { api, errorCode, type TaskEvent, type TaskSnapshot } from "../../shared/api/control-center-client";
 import { useWorkspace } from "../../app/workspace";
 import { useTasks } from "../../app/tasks-context";
 import { useNotifications } from "../../app/notifications-context";
 import { useObservationCache } from "../../app/observation-cache";
-import { ActionMenuItems, Button, CopyRef, InlineNotice, KindBadge, MenuContent, MenuRoot, MenuTrigger, Pill, Progress, TaskStatePill, cx, ownerLabel, itemSelector, taskTone, useToast, type ItemAction } from "../../components/ui";
+import { ActionMenuItems, Button, CopyRef, InlineNotice, KindBadge, MenuContent, MenuRoot, MenuTrigger, Pill, Progress, TaskStatePill, ownerLabel, itemSelector, taskTone, useToast, type ItemAction } from "../../components/ui";
 import { ResultViewer } from "../../components/ResultViewer";
 import type { MediaPreviewController } from "../../components/media-preview";
 import { formatRelative } from "../../shared/read-model/format";
@@ -18,28 +19,17 @@ import { createIdempotencyKey } from "../../shared/action-runner";
 import { kindOf } from "../../components/ui/Kind";
 import { ProcessTimeline } from "../../components/ProcessTimeline";
 import { FactsWithGaps, PromptCaptureSummary } from "../../components/PromptCaptureSummary";
+import { PromptCaptureReader } from "../../components/PromptCaptureReader";
+import { TaskReviewSummary } from "../../components/TaskReviewSummary";
 import type { ProcessObservation } from "../../observation-contract";
-import { InspectorShell, type InspectorMode, type InspectorSection } from "../../components/InspectorShell";
+import { InspectorShell, type InspectorMode, type InspectorSection, type InspectorStepper } from "../../components/InspectorShell";
+import { HandoffSheet } from "../../components/HandoffSheet";
+import { buildAgentBrief, type AgentBrief } from "../../shared/agent-brief";
+import { projectTaskFreshness, taskFreshnessLabel } from "../../shared/task-freshness";
 
-const taskFamilyLabels: Record<string, string> = {
-  run: "生成运行",
-  image: "图像任务",
-  delegation: "委托任务",
-  "video-task": "视频任务",
-  "voice-render-job": "配音合成",
-  "music-job": "音乐生成",
-  "audio-job": "音频任务",
-  "local-job": "本地任务",
-  // Anatomia: a shot breakdown of a video, and a question asked about one. Not Scaena's production breakdown.
-  decompose: "拉片分析",
-  understand: "视频问答",
-};
-
+export { taskFamilyLabel } from "../../shared/read-model/labels";
+import { taskFamilyLabel } from "../../shared/read-model/labels";
 const humanize = (value: string) => value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim();
-
-export function taskFamilyLabel(family: string | null | undefined) {
-  return family ? taskFamilyLabels[family] || humanize(family) : "类型未提供";
-}
 
 const nativeStateLabels: Record<string, string> = {
   connection_lost_after_submit: "提交后连接中断",
@@ -52,11 +42,11 @@ function nativeStateLabel(value: string) {
   return nativeStateLabels[value] || taskStateLabels[value] || humanize(value);
 }
 
-interface EventState { events: TaskEvent[]; gap: boolean; next?: string; resume?: string; freshness?: "fresh" | "stale" | "unknown"; observedAt?: string; observation?: ProcessObservation; coverage?: string; reason?: string; status: "loading" | "ready" | "unavailable"; error: string | null; loadingMore: boolean }
+interface EventState { events: TaskEvent[]; gap: boolean; next?: string; resume?: string; freshness?: "fresh" | "stale" | "unknown"; observedAt?: string; observation?: ProcessObservation; coverage?: string; reason?: string; status: "loading" | "ready" | "stale" | "unavailable"; error: string | null; loadingMore: boolean }
 
 export type TaskInspectorMode = InspectorMode;
 
-export function TaskDetail({ task: initial, open, mode, onModeChange, preview, onOpenChange }: { task: TaskSnapshot; open: boolean; mode: TaskInspectorMode; onModeChange: (mode: TaskInspectorMode) => void; preview: MediaPreviewController; onOpenChange: (open: boolean) => void }) {
+export function TaskDetail({ task: initial, open, mode, onModeChange, preview, onOpenChange, stepper }: { task: TaskSnapshot; open: boolean; mode: TaskInspectorMode; onModeChange: (mode: TaskInspectorMode) => void; preview: MediaPreviewController; onOpenChange: (open: boolean) => void; stepper?: InspectorStepper }) {
   const { scopeId, generation, session } = useWorkspace();
   const cache = useObservationCache();
   const { upsert, connections } = useTasks();
@@ -66,9 +56,13 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   const [task, setTask] = useState(initial);
   const [rereading, setRereading] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [brief, setBrief] = useState<AgentBrief | null>(null);
   const [events, setEvents] = useState<EventState>({ events: [], gap: false, status: "loading", error: null, loadingMore: false });
   const eventsRef = useRef(events);
   eventsRef.current = events;
+  const eventIdentityRef = useRef("");
+  const eventControllerRef = useRef<AbortController | null>(null);
+  const manualEventControllerRef = useRef<AbortController | null>(null);
   const key = task.task_key || "";
   const active = taskInProgress(task);
   const connection = connectionFor(task, connections);
@@ -76,21 +70,31 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   useEffect(() => setTask(initial), [initial]);
 
   useEffect(() => {
+    eventIdentityRef.current = `${scopeId}|${generation}|${key}`;
+    setEvents({ events: [], gap: false, status: "loading", error: null, loadingMore: false });
+  }, [generation, key, scopeId]);
+
+  useEffect(() => {
     if (!key) return;
     const controller = new AbortController();
+    eventControllerRef.current?.abort();
+    eventControllerRef.current = controller;
     let timer: number | undefined;
     let failures = 0;
     const load = async () => {
       try {
-        const after = eventsRef.current.resume;
+        const eventIdentity = `${scopeId}|${generation}|${key}`;
+        const after = eventIdentityRef.current === eventIdentity ? eventsRef.current.resume : undefined;
         const page = after
-          ? await api.taskEvents(scopeId, key, undefined, controller.signal, after)
-          : (await cache.read(`task-events:${scopeId}:${key}`, () => api.taskEvents(scopeId, key, undefined, controller.signal), 3_000, 15_000)).data;
-        if (controller.signal.aborted) return;
+          ? { data: await api.taskEvents(scopeId, key, undefined, controller.signal, after), stale: false }
+          : await cache.read(`task-events:${scopeId}:${key}`, (signal) => api.taskEvents(scopeId, key, undefined, signal), 3_000, 15_000, controller.signal);
+        if (controller.signal.aborted || eventIdentityRef.current !== eventIdentity) return;
         failures = 0;
+        const stale = !after && page.stale;
+        const taskPage = page.data;
         setEvents((current) => {
-          const merged = [...current.events, ...page.events].filter((event, index, values) => values.findIndex((item) => item.id === event.id) === index).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.occurred_at.localeCompare(b.occurred_at));
-          return { ...current, events: merged, gap: current.gap || page.gap, next: page.next_cursor || current.next, resume: page.resume_cursor || current.resume, freshness: page.freshness, observedAt: page.observed_at, observation: page.observation || current.observation, coverage: page.coverage, reason: page.reason, status: "ready", error: null };
+          const merged = [...current.events, ...taskPage.events].filter((event, index, values) => values.findIndex((item) => item.id === event.id) === index).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.occurred_at.localeCompare(b.occurred_at));
+          return { ...current, events: merged, gap: current.gap || taskPage.gap, next: taskPage.next_cursor || current.next, resume: taskPage.resume_cursor || current.resume, freshness: taskPage.freshness, observedAt: taskPage.observed_at, observation: taskPage.observation || current.observation, coverage: taskPage.coverage, reason: taskPage.reason, status: stale ? "stale" : "ready", error: null };
         });
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -100,18 +104,48 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
       if (active && !controller.signal.aborted) timer = window.setTimeout(() => void load(), observationDelay(true, true, document.hidden, failures));
     };
     void load();
-    return () => { controller.abort(); window.clearTimeout(timer); };
+    return () => {
+      controller.abort();
+      manualEventControllerRef.current?.abort();
+      if (eventControllerRef.current === controller) eventControllerRef.current = null;
+      window.clearTimeout(timer);
+    };
   }, [key, scopeId, generation, active]);
 
   const loadMore = async () => {
-    if (!events.next || events.loadingMore) return;
+    const requestedKey = key;
+    const cursor = events.next;
+    if (!cursor || events.loadingMore) return;
+    const controller = new AbortController();
+    manualEventControllerRef.current?.abort();
+    manualEventControllerRef.current = controller;
     setEvents((current) => ({ ...current, loadingMore: true }));
     try {
-      const page = await api.taskEvents(scopeId, key, events.next);
+      const page = await api.taskEvents(scopeId, requestedKey, cursor, controller.signal);
+      if (controller.signal.aborted || requestedKey !== (task.task_key || "") || eventsRef.current.next !== cursor) return;
       setEvents((current) => ({ ...current, events: [...current.events, ...page.events.filter((event) => !current.events.some((item) => item.id === event.id))], gap: page.gap, next: page.next_cursor, resume: page.resume_cursor || current.resume, freshness: page.freshness, observedAt: page.observed_at, observation: page.observation || current.observation, coverage: page.coverage, reason: page.reason, loadingMore: false }));
     } catch (error) {
+      if (controller.signal.aborted || requestedKey !== (task.task_key || "")) return;
       setEvents((current) => ({ ...current, loadingMore: false, error: errorCode(error) }));
+    } finally {
+      if (manualEventControllerRef.current === controller) manualEventControllerRef.current = null;
     }
+  };
+
+  const retryEvents = () => {
+    const requestedKey = key;
+    const controller = new AbortController();
+    manualEventControllerRef.current?.abort();
+    manualEventControllerRef.current = controller;
+    setEvents((current) => ({ ...current, status: "loading", error: null }));
+    void api.taskEvents(scopeId, requestedKey, undefined, controller.signal).then((page) => {
+      if (controller.signal.aborted || requestedKey !== (task.task_key || "")) return;
+      setEvents({ events: page.events, gap: page.gap, next: page.next_cursor, resume: page.resume_cursor, freshness: page.freshness, observedAt: page.observed_at, observation: page.observation, coverage: page.coverage, reason: page.reason, status: "ready", error: null, loadingMore: false });
+    }).catch((error) => {
+      if (!controller.signal.aborted && requestedKey === (task.task_key || "")) setEvents((current) => ({ ...current, status: "unavailable", error: errorCode(error) }));
+    }).finally(() => {
+      if (manualEventControllerRef.current === controller) manualEventControllerRef.current = null;
+    });
   };
 
   // Match on the task identity: a reminder recorded before a server restart carries an older signature.
@@ -189,6 +223,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   const stateTone = taskTone(task.state);
   const progressTone = stateTone === "success" || stateTone === "danger" ? stateTone : "neutral";
   const stageText = stageLabel(task.stage);
+  const freshness = task.control_center_freshness ? { control_center_freshness: task.control_center_freshness, control_center_freshness_reason: task.control_center_freshness_reason } : projectTaskFreshness(task);
   const showStage = !!task.stage && task.stage !== task.state && stageText !== taskStateLabels[task.state];
   const canAcknowledge = !!reminder && reminder.state !== "acknowledged";
   const canMute = !!reminder && reminder.state !== "muted";
@@ -238,12 +273,14 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
     mode={mode}
     maximized={maximized}
     returnFocus={itemSelector("data-task", task.locator.task_ref)}
+    stepper={stepper}
+    itemKey={task.task_key || `${task.connection_id}:${task.locator.task_ref}`}
     onModeChange={onModeChange}
     onMaximize={() => setMaximized((value) => !value)}
     onClose={() => onOpenChange(false)}
     eyebrow={<span className="inline-flex items-center gap-1.5">{ownerLabel(task.locator.owner)} · {taskFamilyLabel(task.locator.task_family)}</span>}
     title={task.title}
-    description={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1"><TaskStatePill state={task.state} />{showStage && <span>{stageText}</span>}{reminder && <Pill size="sm" tone={reminder.state === "unread" ? "warning" : "neutral"}>提醒{reminderStateLabels[reminder.state] || "状态未提供"}</Pill>}</span>}
+    description={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1"><TaskStatePill state={task.state} />{freshness.control_center_freshness !== "fresh" && <Pill size="sm" tone={freshness.control_center_freshness === "expired" ? "danger" : "warning"}>{taskFreshnessLabel(freshness.control_center_freshness)}</Pill>}{showStage && <span>{stageText}</span>}{reminder && <Pill size="sm" tone={reminder.state === "unread" ? "warning" : "neutral"}>提醒{reminderStateLabels[reminder.state] || "状态未提供"}</Pill>}</span>}
     context={<span className="inline-flex min-w-0 items-center gap-1.5"><span className="shrink-0">任务中心</span><ChevronRight className="size-3 shrink-0 text-faint" /><span className="truncate">{connection?.label || ownerLabel(task.locator.owner)}</span></span>}
     icon={<KindBadge kind={kindOf(task.results[0]?.mime, ownerModality[task.locator.owner])} size="md" />}
     reference={<CopyRef value={task.locator.task_ref} label="任务引用" />}
@@ -258,6 +295,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
     footer={<div className="flex flex-wrap items-center gap-2">
       <Button variant={task.state === "unknown" ? "primary" : "secondary"} size="sm" disabled={rereading} onClick={() => void reread()} icon={rereading ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : <RefreshCw className="size-3.5" />}>重新读取原任务</Button>
       {safeCancel && <Button size="sm" variant="danger" disabled={cancelling} data-safe-cancel="true" onClick={() => void safeCancelTask()}>{cancelling ? "正在取消" : "安全取消"}</Button>}
+      <Button size="sm" variant="ghost" icon={<Bot className="size-3.5" />} onClick={() => setBrief(buildAgentBrief({ kind: "task", task, scope: scopeId, returnTo: `#/tasks?${new URLSearchParams({ task: task.task_key || task.locator.task_ref })}` }))}>交给 Agent</Button>
       {moreActions.length > 0 && <MenuRoot modal={false}>
         <MenuTrigger asChild><Button size="sm" variant="ghost" className="ml-auto" aria-label="更多操作" icon={<MoreHorizontal className="size-4" />}>更多</Button></MenuTrigger>
         <MenuContent align="end"><ActionMenuItems actions={moreActions} /></MenuContent>
@@ -266,6 +304,15 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
   >
     <div className="space-y-5">
       {task.state === "unknown" && <InlineNotice tone="warning" icon={<ShieldQuestion />}>结果尚未确认：来源没有返回可判定的终态。请只重新读取原任务；不要据此重新提交生成。</InlineNotice>}
+      {task.state === "failed" && <InlineNotice tone="danger" icon={<ShieldQuestion />}>
+        <span className="font-medium">Owner 已明确报告失败。</span>
+        {task.error_code && <span className="ml-2 font-mono">{task.error_code}</span>}
+        {task.error_summary && <span className="ml-2">{task.error_summary}</span>}
+        {!task.error_code && !task.error_summary && <span className="ml-2">Owner 未提供具体失败原因。</span>}
+        {task.results.length === 0 && <span className="ml-2">当前没有可用生成成果。</span>}
+      </InlineNotice>}
+      {freshness.control_center_freshness === "stale" && <InlineNotice tone="warning">控制中心已连续 15 分钟没有看到 owner 更新。任务仍以 owner 状态为准；可重新读取原任务，不会自动重试或取消。</InlineNotice>}
+      {freshness.control_center_freshness === "expired" && <InlineNotice tone="danger">控制中心已连续 2 小时没有看到 owner 更新。这是本地过期标记，不代表 owner 已失败；请重新读取原任务，只有 owner 明确允许时才安全取消。</InlineNotice>}
 
       <section id="task-inspector-overview" data-inspector-section="overview" tabIndex={-1} aria-label="执行进度" className="scroll-mt-24 rounded-card border border-line bg-panel-soft p-4">
         <div className="flex items-baseline justify-between gap-3">
@@ -290,6 +337,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
         </div></AudioQueue>
       </section>}
 
+      <TaskReviewSummary task={task} />
       {recovery && <section id="task-inspector-recovery" data-inspector-section="recovery" tabIndex={-1} aria-label="Provider 恢复状态" className="scroll-mt-24 space-y-2">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-body-sm font-semibold text-ink">Provider 恢复状态</h3>
@@ -310,6 +358,8 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
       <section id="task-inspector-prompt" data-inspector-section="prompt" tabIndex={-1} aria-label="提示词采集" className="scroll-mt-24 space-y-2">
         <h3 className="text-body-sm font-semibold text-ink">提示词采集</h3>
         <PromptCaptureSummary prompt={promptCapture} />
+        {promptCapture?.readable && promptCapture.capture_ref && key && <PromptCaptureReader taskKey={key} captureRef={promptCapture.capture_ref} />}
+        <PromptLibraryLink owner={task.locator.owner} source={task.locator.task_ref} />
       </section>
 
       <section id="task-inspector-process" data-inspector-section="process" tabIndex={-1} aria-label="采集与过程" className="scroll-mt-24 space-y-2">
@@ -322,7 +372,7 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
           reason={events.reason}
           loading={events.status === "loading"}
           error={events.status === "unavailable" ? events.error : null}
-          onRetry={() => { setEvents((current) => ({ ...current, status: "loading", error: null })); void api.taskEvents(scopeId, key).then((page) => setEvents({ events: page.events, gap: page.gap, next: page.next_cursor, resume: page.resume_cursor, freshness: page.freshness, observedAt: page.observed_at, observation: page.observation, coverage: page.coverage, reason: page.reason, status: "ready", error: null, loadingMore: false })).catch((error) => setEvents((current) => ({ ...current, status: "unavailable", error: errorCode(error) }))); }}
+          onRetry={retryEvents}
           onLoadMore={events.next ? () => void loadMore() : undefined}
         />
       </section>
@@ -343,11 +393,12 @@ export function TaskDetail({ task: initial, open, mode, onModeChange, preview, o
         ]} />
         {task.work_url && <a href={task.work_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-body-sm font-medium text-info hover:underline"><Route className="size-4" />在片场打开对应作品</a>}
       </section>
+      <HandoffSheet brief={brief} open={!!brief} onOpenChange={(next) => { if (!next) setBrief(null); }} />
     </div>
   </TaskInspectorFrame>;
 }
 
-export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaximize, onClose, eyebrow, title, description, context, icon, reference, sections, footer, children, returnFocus }: {
+export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaximize, onClose, eyebrow, title, description, context, icon, reference, sections, footer, children, returnFocus, stepper, itemKey }: {
   open: boolean;
   mode: TaskInspectorMode;
   maximized: boolean;
@@ -365,6 +416,10 @@ export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaxi
   children: React.ReactNode;
   /** Selector of the task's list entry; see InspectorShell. */
   returnFocus?: string;
+  /** Previous and next in the list the panel was opened from; see InspectorShell. */
+  stepper?: InspectorStepper;
+  /** The item shown; another one fades the body in without replacing the panel. */
+  itemKey?: string;
 }) {
   const header = <div className="flex items-start gap-3">
     <span className="mt-0.5 shrink-0">{icon}</span>
@@ -392,6 +447,8 @@ export function TaskInspectorFrame({ open, mode, maximized, onModeChange, onMaxi
     ariaLabel="任务详情"
     dataAttribute="data-task-inspector"
     returnFocus={returnFocus}
+    stepper={stepper}
+    itemKey={itemKey}
     header={header}
     meta={meta}
     sections={sections as InspectorSection[]}
