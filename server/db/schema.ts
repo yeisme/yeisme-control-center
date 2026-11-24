@@ -21,12 +21,37 @@ export const sessions = sqliteTable(
     accessAudience: text("access_audience").notNull().default("[]"),
     expires: integer("expires").notNull(),
     personal: integer("personal", { mode: "boolean" }).notNull().default(false),
+    remembered: integer("remembered", { mode: "boolean" }).notNull().default(false),
     lastSeen: integer("last_seen"),
     credentialVersion: text("credential_version"),
+    inviteId: text("invite_id"),
     epoch: integer("epoch").notNull().default(1),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [index("sessions_subject_idx").on(t.issuer, t.subject)],
+  (t) => [
+    index("sessions_subject_idx").on(t.issuer, t.subject),
+    index("sessions_invite_idx").on(t.inviteId),
+  ],
+);
+
+/** One-time invitation tickets for personal accounts; only SHA-256 hashes persist. */
+export const personalInviteTokens = sqliteTable(
+  "personal_invite_tokens",
+  {
+    id: text("id").primaryKey(),
+    username: text("username").notNull(),
+    label: text("label").notNull().default(""),
+    tokenHash: text("token_hash").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: integer("created_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    consumedAt: integer("consumed_at"),
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [
+    uniqueIndex("personal_invite_token_hash_idx").on(t.tokenHash),
+    index("personal_invite_username_idx").on(t.username, t.createdAt),
+  ],
 );
 
 export const auditEvents = sqliteTable(
@@ -284,6 +309,11 @@ export const collaborationProjects = sqliteTable("collaboration_projects", {
   bindings: text("bindings").notNull().default("[]"), grants: text("grants").notNull().default("[]"),
   createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
 }, (t) => [index("collaboration_projects_org_idx").on(t.organizationId)]);
+export const projectCollectionBindings = sqliteTable("project_collection_bindings", {
+  projectId: text("project_id").primaryKey().references(() => collaborationProjects.id, { onDelete: "cascade" }),
+  owner: text("owner").notNull(), sourceScope: text("source_scope").notNull(), projectRef: text("project_ref").notNull(),
+  revision: integer("revision").notNull(), updatedAt: text("updated_at").notNull(), updatedBy: text("updated_by").notNull(),
+});
 export const collaborationFolders = sqliteTable("collaboration_folders", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull(), parentId: text("parent_id"), name: text("name").notNull(), revision: integer("revision").notNull().default(1),
 }, (t) => [index("collaboration_folder_project_idx").on(t.projectId)]);
@@ -325,3 +355,33 @@ export const ownerProjectConnections = sqliteTable("owner_project_connections", 
   templateId: text("template_id").notNull(), owner: text("owner").notNull(), projectRef: text("project_ref").notNull(),
   label: text("label").notNull().default(""), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
 }, (t) => [uniqueIndex("owner_project_connections_scope_idx").on(t.scopeId, t.tenant, t.owner, t.projectRef)]);
+
+/** Shared organization metadata only; prompt bodies and versions stay with owners. */
+export const promptCollections = sqliteTable("prompt_collections", {
+  id: text("id").primaryKey(),
+  scopeId: text("scope_id").notNull(),
+  name: text("name").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (t) => [index("prompt_collection_scope_idx").on(t.scopeId)]);
+export const promptCollectionLinks = sqliteTable("prompt_collection_links", {
+  id: text("id").primaryKey(),
+  scopeId: text("scope_id").notNull(),
+  collectionId: text("collection_id").notNull().references(() => promptCollections.id),
+  owner: text("owner").notNull(),
+  projectRef: text("project_ref").notNull(),
+  promptId: text("prompt_id").notNull(),
+}, (t) => [index("prompt_collection_link_scope_idx").on(t.scopeId, t.collectionId)]);
+
+/** Local recipe index; owner prompt bodies and execution state remain external. */
+export const promptRecipes = sqliteTable("prompt_recipes", {
+  id: text("id").primaryKey(), scopeId: text("scope_id").notNull(), visibility: text("visibility").notNull().default("private"),
+  state: text("state").notNull().default("active"), owner: text("owner").notNull(), projectRef: text("project_ref").notNull(),
+  title: text("title").notNull(), kind: text("kind").notNull(), tags: text("tags").notNull().default("[]"), notes: text("notes").notNull().default(""),
+  source: text("source").notNull(), facets: text("facets").notNull().default("{}"), revision: integer("revision").notNull().default(1),
+  contentState: text("content_state").notNull().default("metadata_only"), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (t) => [index("prompt_recipe_scope_idx").on(t.scopeId, t.updatedAt), index("prompt_recipe_owner_idx").on(t.scopeId, t.owner, t.projectRef)]);
+export const promptRecipeRevisions = sqliteTable("prompt_recipe_revisions", {
+  id: text("id").primaryKey(), recipeId: text("recipe_id").notNull().references(() => promptRecipes.id), revision: integer("revision").notNull(),
+  title: text("title").notNull(), kind: text("kind").notNull(), tags: text("tags").notNull().default("[]"), notes: text("notes").notNull().default(""),
+  source: text("source").notNull(), facets: text("facets").notNull().default("{}"), contentState: text("content_state").notNull(), createdBy: text("created_by").notNull(), createdAt: text("created_at").notNull(),
+}, (t) => [uniqueIndex("prompt_recipe_revision_idx").on(t.recipeId, t.revision)]);

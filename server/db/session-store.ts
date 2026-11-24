@@ -27,8 +27,10 @@ const toRow = (s: Session) => ({
   accessAudience: JSON.stringify(s.accessAudience || []),
   expires: s.expires,
   personal: s.personal === true,
+  remembered: s.remembered === true,
   lastSeen: s.last_seen ?? null,
   credentialVersion: s.credential_version ?? null,
+  inviteId: s.invite_id ?? null,
   epoch: s.epoch ?? 1,
 });
 
@@ -42,8 +44,10 @@ const toSession = (r: Row): Session => ({
   accessAudience: audiences(r.accessAudience),
   expires: r.expires,
   personal: r.personal ? true : undefined,
+  remembered: r.remembered ? true : undefined,
   last_seen: r.lastSeen ?? undefined,
   credential_version: r.credentialVersion ?? undefined,
+  invite_id: r.inviteId ?? undefined,
   epoch: r.epoch,
 });
 
@@ -52,7 +56,7 @@ const toSession = (r: Row): Session => ({
  * call sites (auth flows, tests) keep working while sessions survive restarts.
  */
 export class SessionStore {
-  constructor(private db: ControlDB) {}
+  constructor(public readonly db: ControlDB) {}
 
   get(id: string): Session | undefined {
     const row = this.db.select().from(table).where(eq(table.id, id)).get();
@@ -104,10 +108,10 @@ export class SessionStore {
    * until it is removed, so without this one account's forgotten sessions could use up the table for everyone. The rule is the
    * one a request applies (`last_seen + idle <= now`, a missing time counting as 0), so a session removed here is one the next request would have refused.
    */
-  pruneIdle(now: number, idleMs: number): void {
+  pruneIdle(now: number, idleMs: number, rememberedIdleMs = idleMs): void {
     this.db
       .delete(table)
-      .where(sql`${table.personal} = 1 and coalesce(${table.lastSeen}, 0) + ${idleMs} <= ${now}`)
+      .where(sql`${table.personal} = 1 and coalesce(${table.lastSeen}, 0) + case when ${table.remembered} = 1 then ${rememberedIdleMs} else ${idleMs} end <= ${now}`)
       .run();
   }
 

@@ -1,17 +1,28 @@
-import { and, desc, lt, eq, sql } from "drizzle-orm";
+import { and, desc, gte, lt, eq, sql } from "drizzle-orm";
 import { AuthError } from "../auth";
 import type { ControlDB } from "./client";
 import { auditEvents } from "./schema";
 
 export const auditActions = [
   "auth.login",
+  "auth.invite_redeemed",
   "auth.logout",
   "admin.user_created",
   "admin.user_revoked",
+  "admin.user_rotated",
+  "admin.user_enabled",
+  "admin.user_updated",
+  "admin.invite_created",
+  "admin.invite_revoked",
+  "account.key_rotated",
   "requests.content_read",
+ "prompts.content_read",
+ "prompts.index",
   "requests.attachment_read",
   "tasks.artifact_access",
+  "tasks.prompt_read",
   "media.read",
+  "episode.artifact_access",
   "tasks.cancel",
   "provider_runs.create",
   "provider_runs.reconcile",
@@ -151,13 +162,18 @@ export class AuditStore {
   }
 
   /** Admin read model: newest first, numeric before-cursor pagination. */
-  page(options: { before?: number; limit?: number; action?: string }): AuditPage {
+  page(options: { before?: number; limit?: number; action?: string; outcome?: string; actor?: string; from?: string; to?: string }): AuditPage {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
     const filters = [
       options.before !== undefined
         ? lt(auditEvents.id, options.before)
         : undefined,
       options.action ? eq(auditEvents.action, options.action) : undefined,
+      options.outcome ? eq(auditEvents.outcome, options.outcome) : undefined,
+      options.actor ? eq(auditEvents.actor, options.actor) : undefined,
+      // Days are UTC days, as everywhere else the control center takes a date: from the first instant of `from` to the end of `to`.
+      options.from ? gte(auditEvents.occurredAt, `${options.from}T00:00:00.000Z`) : undefined,
+      options.to ? lt(auditEvents.occurredAt, new Date(Date.parse(`${options.to}T00:00:00.000Z`) + 86_400_000).toISOString()) : undefined,
     ].filter((v) => v !== undefined);
     const rows = this.db
       .select()
