@@ -5,3 +5,15 @@ temp/
 .local/
 .env*
 public/source.zip
+
+# 运行态/构建产物
+\.pi-bg/
+
+# 运行态/构建产物
+\.pi/
+
+# 运行态/构建产物
+tsconfig.tsbuildinfo
+
+# 运行态/构建产物
+\.tsbuildinfo
