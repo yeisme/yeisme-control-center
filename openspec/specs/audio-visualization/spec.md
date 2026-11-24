@@ -1,0 +1,52 @@
+# audio-visualization Specification
+
+## Purpose
+TBD - created by archiving change yeisme-control-center-studio-v22. Update Purpose after archive.
+## Requirements
+### Requirement: 只分析播放器已读进内存的音轨
+控制中心 SHALL 只分析全局播放器已经整块读进内存的音轨（不超过 16MB），用离线音频上下文解码，不另外申请媒体句柄，也不预取未播放的音轨。播放元素 MUST NOT 接进实时 `AudioContext`。分析结果 SHALL 只保存在当前标签页的内存里，最多 24 条；范围、会话或 epoch 变化时 MUST 清空结果，并作废进行中的分析。样本 MUST 在算完后丢弃，分析数值 MUST NOT 写入存储、日志或证据。
+
+#### Scenario: 没播放过的音轨
+- **WHEN** 用户打开声音站，列表里有一条从没播放过的音频
+- **THEN** 这一行显示「播放后显示波形」，页面不为它发起任何媒体读取
+
+#### Scenario: 流式播放的大文件
+- **WHEN** 播放一条超过 16MB、走 Range 流式读取的音频
+- **THEN** 舞台写明「文件较大，边下边播，没有生成波形」，播放不受影响
+
+#### Scenario: 切换范围
+- **WHEN** 用户播放过一条音轨后切换到另一个范围
+- **THEN** 之前的分析结果被清空，旧范围里还没算完的分析不会写回
+
+### Requirement: 真实的波形、频谱与电平
+有分析结果时，播放器进度条、资源库音频卡片、结果查看器和声音站行 SHALL 显示由解码样本算出的波形，已播放部分用强调色。舞台 SHALL 支持「波形 / 频谱」切换（`aria-pressed`），并列出时长、峰值 dBFS、平均电平（RMS）dBFS、静音段数、削波数、声道和采样率。电平 MUST 标为峰值和平均电平，MUST NOT 称为 LUFS 或响度。WAV SHALL 按文件声明的采样率解码；解码器重采样过的文件 MUST NOT 把分析采样率显示为文件的采样率。60 秒以内的音轨，标记时间 SHALL 精确到 0.1 秒。未播放部分的波形与背景的对比度 SHALL 不低于 3:1。图形 SHALL 为装饰（`aria-hidden`），进度条的 `role="slider"`、键盘和拖动操作保持不变。
+
+#### Scenario: 播放后出现波形
+- **WHEN** 用户在资源库播放「片尾环境音乐」
+- **THEN** dock 上出现 `[data-waveform="ready"]`，卡片上出现迷你波形，进度条仍可用键盘拖动
+
+#### Scenario: 切到频谱
+- **WHEN** 用户在舞台点「频谱」
+- **THEN** 图形换成频谱图，「频谱」按钮 `aria-pressed="true"`
+
+### Requirement: 静音与削波标记可跳转
+舞台 SHALL 把低于 -50 dBFS 且持续至少 0.4 秒的区段标为静音，把 |样本| ≥ 0.999 的连续段标为削波，每处一个按钮；点击 SHALL 跳到该处之前 0.5 秒（不早于开头）。
+
+#### Scenario: 跳到削波
+- **WHEN** fixture 音轨（静音在 0.6–1.2 秒，削波在 1.2–1.5 秒）的舞台上，用户点削波标记
+- **THEN** 播放位置落在 0.5–1.6 秒之间
+
+### Requirement: 跳动条跟随真实电平
+有分析结果、正在播放、页面可见且未开启减少动效时，播放器的 4 根跳动条 SHALL 按播放头位置的频带电平改变高度，并通过 CSS 变量写入，不触发 React 渲染。开启减少动效时 MUST 保持静止。
+
+#### Scenario: 减少动效
+- **WHEN** 系统开启减少动效后播放一条已分析的音轨
+- **THEN** 跳动条没有 `--level` 变化，也没有正在运行的动画
+
+### Requirement: 声音站的音频行
+声音站 SHALL 把音频结果列为行，每行包括标题（点开查看器）、任务与时长、迷你波形或说明，以及播放按钮；整列 SHALL 作为一个队列进入全局播放器。没有权限的行显示「未授权」。同一条音频 MUST NOT 同时出现在方块里。
+
+#### Scenario: 整列播放
+- **WHEN** 用户在 ep-01 声音站点第一行的播放按钮
+- **THEN** 全局播放器开始播放，这一行出现波形，方块列表里没有这一条
+
