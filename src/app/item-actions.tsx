@@ -2,43 +2,52 @@ import { createContext, useCallback, useContext, useState, type ReactNode } from
 import { Dialog } from "radix-ui";
 import { Button, type ItemAction, useToast } from "../components/ui";
 import { ExternalLink, Link2 } from "../icons";
-import { copyReference } from "../shared/clipboard";
+import { copyText } from "../shared/clipboard";
+import { shortcutText } from "../shared/platform";
 
 /** An absolute link to a page of this app (hash routes), to copy or open in a new tab. */
 export function appLink(route: string) {
   return `${window.location.origin}${window.location.pathname}#${route.startsWith("/") ? route : `/${route}`}`;
 }
 
-type Copy = (value: string, what: string) => Promise<void>;
-const CopyContext = createContext<Copy>(async () => undefined);
+/** Resolves true when the value reached the clipboard, false when it opened in the manual-copy box instead. */
+type Copy = (value: string, what: string) => Promise<boolean>;
+const CopyContext = createContext<Copy>(async () => false);
 
 /**
- * Copying from menus. When the browser refuses the clipboard, the value opens selected in a small dialog to copy by
- * hand, instead of the action failing silently.
+ * Copying from menus and sheets. When the browser refuses the clipboard, the value opens selected in a dialog to copy
+ * by hand, line breaks and all, instead of the action failing silently.
  */
 export function CopyProvider({ children }: { children: ReactNode }) {
   const notify = useToast();
   const [manual, setManual] = useState<{ value: string; what: string } | null>(null);
   const copy = useCallback<Copy>(async (value, what) => {
-    if (await copyReference(value)) notify(`已复制${what}`, "success");
-    else setManual({ value, what });
+    if (await copyText(value)) {
+      notify(`已复制${what}`, "success");
+      return true;
+    }
+    setManual({ value, what });
+    return false;
   }, [notify]);
+  const lines = manual ? manual.value.split("\n").length : 1;
   return (
     <CopyContext.Provider value={copy}>
       {children}
       <Dialog.Root open={!!manual} onOpenChange={(open) => { if (!open) setManual(null); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fade-in fixed inset-0 z-[86] backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
-          <Dialog.Content className="pop-in fixed left-1/2 top-1/2 z-[87] w-[min(440px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none">
+          <Dialog.Overlay className="fade-in fixed inset-0 z-critical-scrim backdrop-blur-[1px]" style={{ background: "var(--scrim)" }} />
+          <Dialog.Content className={`pop-in fixed left-1/2 top-1/2 z-critical ${lines > 1 ? "w-[min(640px,calc(100vw-24px))]" : "w-[min(440px,calc(100vw-24px))]"} -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none`}>
             <Dialog.Title className="text-title-sm font-semibold">复制{manual?.what}</Dialog.Title>
-            <Dialog.Description className="mt-1 text-body-sm text-muted">浏览器未允许直接复制，内容已选中，请按 Ctrl+C 或长按复制。</Dialog.Description>
-            <input
+            <Dialog.Description className="mt-1 text-body-sm text-muted">浏览器没有允许直接复制。内容已经全选，按 {shortcutText("C")} 复制；手机上长按选择「复制」。</Dialog.Description>
+            <textarea
               aria-label={`手动复制${manual?.what || ""}`}
+              data-manual-copy
               readOnly
               autoFocus
+              rows={Math.min(Math.max(lines, 1), 14)}
               value={manual?.value || ""}
               onFocus={(event) => event.currentTarget.select()}
-              className="mt-4 w-full rounded-control border border-line bg-panel-soft px-3 py-2 font-mono text-xs"
+              className="mt-4 block w-full resize-none rounded-control border border-line bg-panel-soft px-3 py-2 font-mono text-xs leading-5 whitespace-pre-wrap break-words"
             />
             <div className="mt-4 flex justify-end"><Dialog.Close asChild><Button variant="primary">完成</Button></Dialog.Close></div>
           </Dialog.Content>

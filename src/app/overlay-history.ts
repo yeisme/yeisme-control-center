@@ -20,7 +20,11 @@ export function overlayMove(before: URLSearchParams, after: URLSearchParams, ove
  * The query as it is now. React Router applies navigations as transitions, so a component committed by an urgent
  * update (a viewer opening on click) can still hold the URL from before the navigation.
  */
-function liveQuery(rendered: URLSearchParams) {
+/**
+ * The query the address holds now. React Router writes history synchronously, so this already has a write made a moment
+ * ago that the page has not rendered yet; building on it lets two writes in one moment (a click, then a keystroke) both land.
+ */
+export function liveQuery(rendered: URLSearchParams) {
   const hash = window.location.hash;
   if (!hash.startsWith("#/")) return rendered;
   const index = hash.indexOf("?");

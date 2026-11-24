@@ -1,16 +1,21 @@
 import { useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { Dialog } from "radix-ui";
 import { Keyboard, X } from "../icons";
 import { Kbd } from "../components/ui";
-import { modifierLabel, shortcutGroups } from "../shared/keyboard";
+import { modifierLabel } from "../shared/keyboard";
+import { shortcutReference } from "../shared/keymap";
+import { useKeymap } from "../app/keymap";
 
 /** Shortcut reference opened with `?`; the entries come from the same table the shell, lists and viewer implement. */
 export function ShortcutSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const groups = shortcutGroups(modifierLabel(typeof navigator === "undefined" ? "" : navigator.userAgent));
+  const keymap = useKeymap();
+  const navigate = useNavigate();
+  const groups = shortcutReference(modifierLabel(typeof navigator === "undefined" ? "" : navigator.userAgent), keymap);
   const content = useRef<HTMLDivElement>(null);
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal>
-      <Dialog.Overlay className="fade-in fixed inset-0 z-[60]" style={{ background: "var(--scrim)" }} />
+      <Dialog.Overlay className="fade-in fixed inset-0 z-palette-scrim" style={{ background: "var(--scrim)" }} />
       <Dialog.Content
         ref={content}
         tabIndex={-1}
@@ -18,7 +23,7 @@ export function ShortcutSheet({ open, onOpenChange }: { open: boolean; onOpenCha
         data-shortcut-sheet
         // Focus the sheet, not its close button: opened from the palette with Enter, the same key press would activate that button.
         onOpenAutoFocus={(event) => { event.preventDefault(); content.current?.focus(); }}
-        className="pop-in fixed inset-x-3 top-[10vh] z-[61] mx-auto max-h-[80vh] max-w-[680px] overflow-y-auto rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none"
+        className="pop-in fixed inset-x-3 top-[10vh] z-palette mx-auto max-h-[80vh] max-w-[680px] overflow-y-auto rounded-[16px] border border-line bg-panel p-5 text-ink shadow-float outline-none"
       >
         <div className="flex items-center gap-2.5">
           <Keyboard aria-hidden="true" className="size-4 text-muted" />
@@ -36,7 +41,7 @@ export function ShortcutSheet({ open, onOpenChange }: { open: boolean; onOpenCha
             </dl>
           </section>)}
         </div>
-        <p className="mt-4 text-2xs text-muted">在输入框里输入，或者有弹窗打开时，<Kbd>/</Kbd> 和 <Kbd>?</Kbd> 不会触发。</p>
+        <p className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted"><span>在输入框里输入，或者有弹窗打开时，除了搜索，别的快捷键都不会触发。「<Kbd>G</Kbd> <Kbd>T</Kbd>」是先按 G、再按 T。</span><button type="button" className="font-medium text-ink-soft underline-offset-2 hover:text-ink hover:underline" onClick={() => { onOpenChange(false); navigate("/settings?section=keys"); }}>在设置里改快捷键</button></p>
       </Dialog.Content>
     </Dialog.Portal>
   </Dialog.Root>;

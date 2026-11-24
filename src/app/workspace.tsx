@@ -5,7 +5,10 @@ import { useToast } from "../components/ui";
 import { clearMediaSessionCaches } from "./media-cache";
 import { clearRecentItems } from "./recent-store";
 import { signOut, staleSessionVerdict, staleSignalPlan } from "./session-recovery";
-import { statusForFailure, type ReadState } from "../shared/read-model/read-state";
+import { statusForFailure, type ReadState, type ReadStatus } from "../shared/read-model/read-state";
+import { useObservationCache } from "./observation-cache";
+import { consumePendingInviteToken } from "../shared/url-invite";
+import { browserSessionHeartbeatEnv, startSessionHeartbeat } from "./session-heartbeat";
 
 export type AuthPhase = "loading" | "login_required" | "forbidden" | "offline" | "ready";
 
@@ -21,7 +24,8 @@ interface WorkspaceValue {
   isAdmin: boolean;
   setScope: (id: string) => void;
   refresh: () => void;
-  login: (input: { username?: string; secret: string }) => Promise<void>;
+  login: (input: { username?: string; secret: string; remember?: boolean }) => Promise<void>;
+  redeemInvite: (token: string) => Promise<void>;
   /** Ends the session on the server; resolves false, leaving the page signed in, when the server could not be told. */
   logout: () => Promise<boolean>;
   expire: () => void;
@@ -65,7 +69,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     csrfRef.current = undefined;
     setSession(null);
     const errorClass = errorClassOf(error);
-    setPhase(errorClass === "login_required" ? "login_required" : errorClass === "forbidden" ? "forbidden" : "offline");
+    const phase: AuthPhase = errorClass === "login_required" ? "login_required" : "offline";
+    setPhase(errorClass === "forbidden" ? "forbidden" : phase);
   }, []);
 
   const loadSession = useCallback(async (signal?: AbortSignal) => {
@@ -80,9 +85,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const controller = new AbortController();
     api.authMethods(controller.signal).then(setMethods).catch(() => {});
-    void loadSession(controller.signal);
+    // Frame-0 URL scrubbing: strip ?token= / ?invite= before any subresource or
+    // history entry can retain the one-time ticket, then redeem over same-origin POST.
+    const pendingInviteToken = consumePendingInviteToken();
+    if (pendingInviteToken) {
+      void (async () => {
+        try {
+          await api.redeemInvite(pendingInviteToken);
+          if (controller.signal.aborted) return;
+          await loadSession(controller.signal);
+          notify("已通过专属一次性邀请链接进入创作台", "success");
+        } catch (error) {
+          if (isAbort(error)) return;
+          failSession(error);
+        }
+      })();
+    } else {
+      void loadSession(controller.signal);
+    }
     return () => controller.abort();
-  }, [loadSession]);
+  }, [loadSession, failSession, notify]);
 
   const setScope = useCallback((id: string) => {
     clearMediaSessionCaches();
@@ -100,6 +122,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setPhaseCode("login_required");
     setGeneration((value) => value + 1);
   }, []);
+
+  /** Reads only for the heartbeat: transient network failures must not clear a valid page session. */
+  const heartbeatSession = useCallback((signal: AbortSignal) => {
+    // Adoption belongs to the heartbeat's active-success guard, not this request callback:
+    // a late response after effect cleanup must not restore the old session.
+    return api.session(signal);
+  }, []);
+
+  // A visible control-center tab must count as activity even on pages that do not poll owner data.
+  // The server still enforces the absolute expiry, credential rotation and revocation checks.
+  useEffect(() => {
+    if (phase !== "ready" || !session) return;
+    return startSessionHeartbeat({
+      refresh: heartbeatSession,
+      env: browserSessionHeartbeatEnv(),
+      onRefresh: adopt,
+      onUnauthenticated: expire,
+    });
+  }, [heartbeatSession, phase, session?.epoch]);
 
   /** Reads the session again and makes every scoped read start over; one reload at a time. */
   const reloadSession = useCallback(() => {
@@ -149,11 +190,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     })();
   }), [notify, adopt, failSession]);
 
-  const login = useCallback(async (input: { username?: string; secret: string }) => {
+  const login = useCallback(async (input: { username?: string; secret: string; remember?: boolean }) => {
     await api.login({ ...input, keyRequired: methods?.key_required === true });
     await loadSession();
     setGeneration((value) => value + 1);
   }, [loadSession, methods?.key_required]);
+
+  const redeemInvite = useCallback(async (token: string) => {
+    await api.redeemInvite(token);
+    await loadSession();
+    setGeneration((value) => value + 1);
+  }, [loadSession]);
 
   const logoutRef = useRef<() => Promise<boolean>>(async () => false);
   const logout = useCallback(async () => {
@@ -190,10 +237,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setScope,
     refresh,
     login,
+    redeemInvite,
     logout,
     expire,
     noteEpoch,
-  }), [phase, phaseCode, methods, session, scopeId, generation, setScope, refresh, login, logout, expire, noteEpoch]);
+  }), [phase, phaseCode, methods, session, scopeId, generation, setScope, refresh, login, redeemInvite, logout, expire, noteEpoch]);
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
 }
@@ -204,13 +252,19 @@ export function useWorkspace() {
   return value;
 }
 
+const defaultScopedReadCache = { freshMs: 10_000, staleMs: 60_000 } as const;
+
 interface ScopedReadOptions<T> {
   /** Extra dependency key; a change re-reads within the same generation. */
   key?: string;
+  /** Stable resource identity used by the shared read cache. Omit to preserve uncached legacy behavior. */
+  cacheKey?: string;
   enabled?: boolean;
   isEmpty?: (data: T) => boolean;
   /** Poll interval in ms computed from the latest data; null stops polling. */
   poll?: (data: T | null, failures: number) => number | null;
+  /** Shared read-model cache policy. Set false only for intentionally uncached reads. */
+  cache?: { freshMs: number; staleMs: number } | false;
 }
 
 /**
@@ -224,7 +278,8 @@ export function useScopedRead<T extends object>(
   options: ScopedReadOptions<T> = {},
 ): ScopedRead<T> {
   const { scopeId, generation, expire, noteEpoch, phase } = useWorkspace();
-  const { key = "", enabled = true } = options;
+  const cache = useObservationCache();
+  const { key = "", cacheKey, enabled = true, cache: cachePolicy = defaultScopedReadCache } = options;
   const [state, setState] = useState<ReadState<T>>({ status: "loading", data: null, error: null, observedAt: null });
   const [tick, setTick] = useState(0);
   const readRef = useRef(read);
@@ -237,11 +292,39 @@ export function useScopedRead<T extends object>(
   const loadedIdentity = useRef("");
   const failures = useRef(0);
 
+  const resourceKey = cacheKey ? `scoped-read:${scopeId}:${cacheKey}` : "";
+  const canCache = cachePolicy !== false && !!resourceKey;
+  const freshMs = cachePolicy === false ? 0 : cachePolicy.freshMs;
+  const staleMs = cachePolicy === false ? 0 : cachePolicy.staleMs;
+  const scopedStatus = (stale: boolean, empty: boolean): ReadStatus => {
+    if (stale) return "stale";
+    return empty ? "empty" : "ready";
+  };
   useEffect(() => {
     identityRef.current = identity;
     failures.current = 0;
-    setState({ status: "loading", data: null, error: null, observedAt: null });
-  }, [identity]);
+    const cached = enabled && canCache ? cache.peek<T>(resourceKey) : null;
+    if (cached) {
+      loadedIdentity.current = identity;
+      const empty = optionsRef.current.isEmpty?.(cached.data) ?? false;
+      setState({ status: scopedStatus(cached.stale, empty), data: cached.data, error: null, observedAt: cached.observedAt });
+    } else {
+      loadedIdentity.current = "";
+      setState({ status: "loading", data: null, error: null, observedAt: null });
+    }
+  }, [cache, cachePolicy, enabled, identity, resourceKey]);
+
+  useEffect(() => {
+    if (!canCache) return;
+    return cache.addListener(resourceKey, () => {
+      if (identityRef.current !== identity) return;
+      const current = cache.peek<T>(resourceKey);
+      if (!current) return;
+      const empty = optionsRef.current.isEmpty?.(current.data) ?? false;
+      loadedIdentity.current = identity;
+      setState({ status: scopedStatus(current.stale, empty), data: current.data, error: null, observedAt: current.observedAt });
+    });
+  }, [cache, canCache, identity, resourceKey]);
 
   useEffect(() => {
     if (!enabled || !scopeId || phase !== "ready") return;
@@ -250,13 +333,16 @@ export function useScopedRead<T extends object>(
     let timer: number | undefined;
     const run = async () => {
       try {
-        const data = await readRef.current(scopeId, controller.signal);
+        const result = cachePolicy === false
+          ? { data: await readRef.current(scopeId, controller.signal), stale: false, observedAt: new Date().toISOString() }
+          : await cache.read(resourceKey, (signal: AbortSignal) => readRef.current(scopeId, signal), freshMs, staleMs, controller.signal);
+        const data = result.data;
         if (controller.signal.aborted || identityRef.current !== requested) return;
         noteEpoch("epoch" in data && typeof data.epoch === "number" ? data.epoch : undefined);
         failures.current = 0;
         loadedIdentity.current = requested;
         const empty = optionsRef.current.isEmpty?.(data) ?? false;
-        setState({ status: empty ? "empty" : "ready", data, error: null, observedAt: new Date().toISOString() });
+        setState({ status: scopedStatus(result.stale, empty), data, error: null, observedAt: result.observedAt });
         schedule(data);
       } catch (error) {
         if (isAbort(error) || controller.signal.aborted || identityRef.current !== requested) return;
@@ -282,8 +368,11 @@ export function useScopedRead<T extends object>(
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [identity, enabled, scopeId, phase, tick, expire, noteEpoch]);
+  }, [cache, canCache, freshMs, identity, enabled, resourceKey, scopeId, phase, tick, expire, noteEpoch]);
 
-  const reload = useCallback(() => setTick((value) => value + 1), []);
+  const reload = useCallback(() => {
+    if (canCache) cache.invalidate(resourceKey);
+    setTick((value) => value + 1);
+  }, [cache, canCache, resourceKey]);
   return loadedIdentity.current === identity || state.data === null ? { ...state, reload } : { status: "loading", data: null, error: null, observedAt: null, reload };
 }

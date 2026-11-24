@@ -1,7 +1,7 @@
 import { Component, Suspense, useEffect, type ComponentType, type CSSProperties, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { WorkspaceProvider, useWorkspace } from "./workspace";
-import { ListPreferencesProvider } from "./list-preferences";
+import { AccountPreferencesProvider } from "./preferences";
 import { TaskObservationProvider } from "./tasks-context";
 import { NotificationProvider } from "./notifications-context";
 import { ObservationCacheProvider } from "./observation-cache";
@@ -17,6 +17,8 @@ import { pageFromPath, type WorkspacePage } from "../app-shell/navigation";
 import { isGuidePath } from "../pages/guide/guide-location";
 import { Button, EmptyState, SkeletonBlock, SkeletonRows, ToastProvider, TooltipProvider } from "../components/ui";
 import { CopyProvider } from "./item-actions";
+import { KeyRevealProvider } from "./key-reveal";
+import { DevicePreferencesProvider } from "./device-preferences";
 import { RefreshCw, Unplug } from "../icons";
 import "../styles/app.css";
 
@@ -26,7 +28,9 @@ const loaders: Record<WorkspacePage, () => Promise<{ default: ComponentType }>> 
   drama: () => import("../pages/drama/DramaPage"),
   guide: () => import("../pages/guide/GuidePage"),
   creation: () => import("../pages/creation/CreationPage"),
+  prompts: () => import("../pages/prompts/PromptsPage"),
   assets: () => import("../pages/assets/AssetsPage"),
+  activity: () => import("../pages/activity/ActivityPage"),
   tasks: () => import("../pages/tasks/TasksPage"),
   reminders: () => import("../pages/reminders/RemindersPage"),
   requests: () => import("../pages/requests/RequestsPage"),
@@ -35,6 +39,10 @@ const loaders: Record<WorkspacePage, () => Promise<{ default: ComponentType }>> 
   capabilities: () => import("../pages/capabilities/CapabilityHub"),
   usage: () => import("../pages/usage/UsageAnalytics"),
   team: () => import("../pages/team/TeamPage"),
+  admin: () => import("../pages/admin/AdminPage"),
+  settings: () => import("../pages/settings/SettingsPage"),
+  "mcp-gateway": () => import("../pages/mcp-gateway/McpGatewayPage"),
+  agents: () => import("../pages/agents/AgentMonitorPage"),
 };
 
 const pages = Object.fromEntries(Object.entries(loaders).map(([id, load]) => [id, routePage(load)])) as Record<WorkspacePage, ReturnType<typeof routePage>>;
@@ -109,20 +117,22 @@ function Workspace() {
   return <ObservationCacheProvider>
     <TaskObservationProvider>
       <NotificationProvider>
-      <ListPreferencesProvider>
+      <AccountPreferencesProvider>
       <AudioPlayerProvider>
       <RecentProvider>
         <AppShell>
           <PageBoundary key={page}>
             <Suspense fallback={<PageSkeleton />}>
-              {/* Keyed by scope+generation so every page-local state (selection, drafts, content) resets on scope or epoch change. */}
-              <Page key={`${page}:${scopeId}:${generation}`} />
+              {/* Keyed by scope+generation so every page-local state (selection, drafts, content) resets on scope or epoch change.
+                  Members and administration is the exception: every account change moves the epoch, and a form being filled in
+                  must not close because someone else changed an account; its reads still start over with the generation. */}
+              <Page key={page === "admin" ? `${page}:${scopeId}` : `${page}:${scopeId}:${generation}`} />
             </Suspense>
           </PageBoundary>
         </AppShell>
       </RecentProvider>
       </AudioPlayerProvider>
-      </ListPreferencesProvider>
+      </AccountPreferencesProvider>
       </NotificationProvider>
     </TaskObservationProvider>
   </ObservationCacheProvider>;
@@ -130,14 +140,18 @@ function Workspace() {
 
 export function App() {
   return <ThemeProvider>
+    <DevicePreferencesProvider>
     <TooltipProvider>
       <ToastProvider>
         <CopyProvider>
           <WorkspaceProvider>
-            <Workspace />
+            <KeyRevealProvider>
+              <Workspace />
+            </KeyRevealProvider>
           </WorkspaceProvider>
         </CopyProvider>
       </ToastProvider>
     </TooltipProvider>
+    </DevicePreferencesProvider>
   </ThemeProvider>;
 }

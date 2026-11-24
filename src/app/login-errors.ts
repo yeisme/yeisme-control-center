@@ -1,6 +1,7 @@
 /** What the sign-in page says for each refusal the login route can answer with. */
 export const loginErrors: Record<string, string> = {
   invalid_credentials: "用户名或凭据不正确。",
+  invite_token_invalid: "该一次性邀请链接已失效（可能已被使用、已过期或已被管理员撤回），请联系管理员重新生成。",
   // Two limits answer with this: too many refused credentials (for everyone), and too many sign-ins by this one account. A login
   // that merely overlapped another is `login_busy`, which is a matter of seconds.
   login_rate_limited: "登录过于频繁或失败次数过多，请 15 分钟后再试。",

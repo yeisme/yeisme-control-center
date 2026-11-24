@@ -6,6 +6,7 @@ import { mediaFilename } from "../shared/media-filename";
 import { audioBlobLimitBytes, audioStrategy, bufferedEnd, clampSeek, nextPlaybackRate, queueFor, queueStep, regrantAllowed, trackPhase, type AudioStatus, type AudioTransport, type TrackPhase } from "../shared/audio-playback";
 import { ownerLabel, useToast } from "../components/ui";
 import { grantErrorLabel, type PreviewTarget } from "../components/media-preview";
+import { audioAnalysisCache } from "./audio-analysis-cache";
 
 /** One playable owner result. Identity is `key`; everything else is display or grant input. */
 export interface AudioTrack {
@@ -276,6 +277,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       if (token !== loadToken.current) return;
       objectUrl.current = URL.createObjectURL(blob);
       attach(objectUrl.current, "blob", at);
+      // The bytes are already in memory: the waveform comes from them, never from another read.
+      void audioAnalysisCache.offer(track.key, blob);
     } catch (failure) {
       if (token !== loadToken.current || controller.signal.aborted) return;
       const code = failureCode(failure);
@@ -481,7 +484,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
 
   // A new scope, session or epoch invalidates every handle; nothing keeps playing across that boundary.
   const identity = `${session?.identity || ""}|${session?.epoch || 0}|${scopeId}`;
-  useEffect(() => { close(); }, [close, identity]);
+  useEffect(() => { close(); audioAnalysisCache.clear(); }, [close, identity]);
   useEffect(() => () => { close(); }, [close]);
 
   // Operating-system media keys and lock-screen controls follow the same player.

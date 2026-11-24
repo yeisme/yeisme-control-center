@@ -26,7 +26,8 @@ export interface NotificationObservation {
   error: string | null;
   syncing: boolean;
   refresh: () => void;
-  loadMore: () => void;
+  /** Reads the next page of reminders; resolves once its rows are in (or the read failed). */
+  loadMore: () => Promise<void>;
   hasMore: boolean;
   /** Replace the list with a freshly read first page, including the server's counts over every row. */
   apply: (page: Pick<NotificationPage, "rows" | "unread" | "attention" | "next_cursor">) => void;
@@ -271,10 +272,10 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     setRows((current) => current.map((item) => item.id === row.id ? row : item));
   }, [rows]);
   const moreIdentity = useRef(""); moreIdentity.current = `${scopeId}|${generation}`;
-  const loadMore = useCallback(() => {
-    if (!nextCursor || syncing) return;
+  const loadMore = useCallback((): Promise<void> => {
+    if (!nextCursor || syncing) return Promise.resolve();
     const identity = moreIdentity.current; setSyncing(true);
-    void api.notifications(scopeId, undefined, nextCursor).then((page) => { if (identity !== moreIdentity.current) return; changes.current.bump(); extended.current = true; setRows((current) => [...current, ...page.rows.filter((v) => !current.some((r) => r.id === v.id))]); setNextCursor(page.next_cursor || null); setUnreadTotal(page.unread); setAttentionTotal(page.attention ?? null); }).catch((e) => { if (identity === moreIdentity.current) setError(errorCode(e)); }).finally(() => { if (identity === moreIdentity.current) setSyncing(false); });
+    return api.notifications(scopeId, undefined, nextCursor).then((page) => { if (identity !== moreIdentity.current) return; changes.current.bump(); extended.current = true; setRows((current) => [...current, ...page.rows.filter((v) => !current.some((r) => r.id === v.id))]); setNextCursor(page.next_cursor || null); setUnreadTotal(page.unread); setAttentionTotal(page.attention ?? null); }).catch((e) => { if (identity === moreIdentity.current) setError(errorCode(e)); }).finally(() => { if (identity === moreIdentity.current) setSyncing(false); });
   }, [nextCursor, syncing, scopeId]);
   const unread = unreadTotal;
   // The time the groups and the unread view are worked out against: taken again whenever the rows change and whenever a
