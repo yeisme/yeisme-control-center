@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yeisme 创作台 · C 端体验提案 v19</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="studio.css">
+<script src="sprite.js"></script>
+</head>
+<body>
+<div class="index">
+  <div class="inner">
+    <p class="eyebrow"><span class="dot"></span>设计提案 · v19 · 2026-11-05</p>
+    <h1>从控制台，<br>到创作台。</h1>
+    <p class="lead">控制中心不该像一张运营报表。它是你每天打开、继续做东西的地方。<br>这四屏把「现在需要我做什么」放回第一位，把系统状态压到它该在的位置。</p>
+
+    <div class="principles">
+      <article class="principle">
+        <p class="n">01</p>
+        <h3>一次只推一件事</h3>
+        <p>首屏只回答一个问题：现在最值得做的就是这一件。其余的工作项按「等你决定」排，不铺成仪表盘。</p>
+      </article>
+      <article class="principle">
+        <p class="n">02</p>
+        <h3>作品是主角</h3>
+        <p>结果用画面说话：大图、播放、波形、版本。列表降级为补充，不再让表格占据第一屏。</p>
+      </article>
+      <article class="principle">
+        <p class="n">03</p>
+        <h3>系统静音</h3>
+        <p>连接、预算、同步时间收成一条安静的状态线；只有真的坏了，才升到能看见的地方。</p>
+      </article>
+    </div>
+
+    <div class="screen-grid">
+      <a class="screen-card" href="today.html">
+        <div class="shot"><img src="../screenshots/today-1440.png" alt="今天页原型"></div>
+        <div class="cap"><strong>今天</strong><span>暗色 · 1440</span></div>
+      </a>
+      <a class="screen-card" href="works.html">
+        <div class="shot"><img src="../screenshots/works-1440.png" alt="作品页原型"></div>
+        <div class="cap"><strong>作品</strong><span>暖纸浅色 · 1440</span></div>
+      </a>
+      <a class="screen-card" href="drama.html">
+        <div class="shot"><img src="../screenshots/drama-1440.png" alt="剧集页原型"></div>
+        <div class="cap"><strong>创作 · 剧集</strong><span>暗色 · 1440</span></div>
+      </a>
+      <a class="screen-card" href="mobile.html">
+        <div class="shot"><img src="../screenshots/mobile-390.png" alt="手机端原型" style="object-position: top"></div>
+        <div class="cap"><strong>今天 · 手机</strong><span>暗色 · 390</span></div>
+      </a>
+    </div>
+
+    <div class="section-head" style="margin-top:56px">
+      <div>
+        <p class="eyebrow">前后对比</p>
+        <h2 style="font-size:24px">同一份真实数据，两种叙事</h2>
+      </div>
+      <span class="filter-note">左边：现行 v18.1 · 右边：v19 提案</span>
+    </div>
+
+    <div class="compare">
+      <article class="pair">
+        <div class="shots">
+          <figure><img src="../screenshots/before-today-1440.png" alt="现行工作台"><figcaption>现在 · 工作台</figcaption></figure>
+          <figure><img src="../screenshots/today-1440.png" alt="提案今天页"><figcaption>提案 · 今天</figcaption></figure>
+        </div>
+        <div class="pair-note"><strong>首屏从「七个数字」变成「一件要继续的事」。</strong><span>导航 14 → 5，KPI 卡 7 → 0，首屏动作 2 个。</span></div>
+      </article>
+
+      <article class="pair">
+        <div class="shots">
+          <figure><img src="../screenshots/before-works-1440.png" alt="现行资源库"><figcaption>现在 · 资源库</figcaption></figure>
+          <figure><img src="../screenshots/works-1440.png" alt="提案作品页"><figcaption>提案 · 作品</figcaption></figure>
+        </div>
+        <div class="pair-note"><strong>结果从「带筛选表格的资源管理」变成「可以逛的作品集」。</strong><span>筛选从 8 个控件降为 2 组；卡片承担预览与确认。</span></div>
+      </article>
+
+      <article class="pair">
+        <div class="shots">
+          <figure><img src="../screenshots/before-drama-1440.png" alt="现行剧集制作"><figcaption>现在 · 剧集制作</figcaption></figure>
+          <figure><img src="../screenshots/drama-1440.png" alt="提案剧集页"><figcaption>提案 · 创作</figcaption></figure>
+        </div>
+        <div class="pair-note"><strong>阶段链从「状态标签」变成「每集下一步」。</strong><span>技术阶段收进一条进度；每集只留一个可执行动作。</span></div>
+      </article>
+
+      <article class="pair">
+        <div class="shots mobile-shots">
+          <figure><img src="../screenshots/before-mobile-390.png" alt="现行手机端"><figcaption>现在 · 手机</figcaption></figure>
+          <figure><img src="../screenshots/mobile-390.png" alt="提案手机端"><figcaption>提案 · 手机</figcaption></figure>
+        </div>
+        <div class="pair-note"><strong>手机端从「压扁的桌面」变成「单手可用的创作流」。</strong><span>底部五个 tab、单列内容、首屏只有一个主按钮。</span></div>
+      </article>
+    </div>
+
+    <div class="index-foot">
+      <p>原型边界：四屏都是静态可点原型，使用项目内已有的公开演示画面与 fixture 叙事，不连接任何 owner、不发起写入、不进入构建。设计说明、信息架构映射与落地路线见 <code>docs/design/c-end-experience-v1.md</code>。</p>
+      <p>本地预览：在 <code>client/yeisme-control-center</code> 下运行 <code>python3 -m http.server 4330</code>，打开 <code>http://127.0.0.1:4330/design-proposals/c-end-studio-v19/prototype/index.html</code>。</p>
+    </div>
+  </div>
+</div>
+<script src="studio.js"></script>
+</body>
+</html>

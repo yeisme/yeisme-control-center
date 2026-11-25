@@ -1,0 +1,547 @@
+$ pwd
+/home/yeshugen/workplace/yeisme-agent
+$ ocr review --repo client/yeisme-control-center --provider cpa --model grok-4.7-build-fast --format json --audience agent --effort high --concurrency 2 --timeout 60 --max-tokens-budget 0 --max-tools 100 --exclude ... --preview
+{
+  "files": [
+    {
+      "path": "app/index.html",
+      "status": "modified",
+      "insertions": 40,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "docs/current-status.md",
+      "status": "modified",
+      "insertions": 3,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/frontend-api-completion.md",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/provider-live.md",
+      "status": "modified",
+      "insertions": 2,
+      "deletions": 2,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/shared-projects-media-browser.md",
+      "status": "modified",
+      "insertions": 12,
+      "deletions": 2,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "openspec/changes/yeisme-shared-projects-media-browser-v1/proposal.md",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "openspec/changes/yeisme-shared-projects-media-browser-v1/specs/shared-collaboration/spec.md",
+      "status": "modified",
+      "insertions": 30,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "scripts/capture-visual-matrix.ts",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "scripts/verify-app.mjs",
+      "status": "modified",
+      "insertions": 2,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "scripts/verify-browser-journey.ts",
+      "status": "modified",
+      "insertions": 41,
+      "deletions": 36,
+      "will_review": true
+    },
+    {
+      "path": "scripts/verify-dev-preview.mjs",
+      "status": "modified",
+      "insertions": 2,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "server/actions.ts",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "server/app.ts",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "server/generation-batches.ts",
+      "status": "modified",
+      "insertions": 12,
+      "deletions": 3,
+      "will_review": true
+    },
+    {
+      "path": "server/index.ts",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "src/app-shell/AppShell.tsx",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "src/app-shell/navigation.ts",
+      "status": "modified",
+      "insertions": 14,
+      "deletions": 4,
+      "will_review": true
+    },
+    {
+      "path": "src/app/App.tsx",
+      "status": "modified",
+      "insertions": 18,
+      "deletions": 3,
+      "will_review": true
+    },
+    {
+      "path": "src/app/auth.tsx",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 6,
+      "will_review": true
+    },
+    {
+      "path": "src/components/ProcessTimeline.tsx",
+      "status": "modified",
+      "insertions": 5,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "src/components/ResultViewer.tsx",
+      "status": "modified",
+      "insertions": 30,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "src/components/media-preview.tsx",
+      "status": "modified",
+      "insertions": 5,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "src/components/ui/Layout.tsx",
+      "status": "modified",
+      "insertions": 3,
+      "deletions": 3,
+      "will_review": true
+    },
+    {
+      "path": "src/components/ui/Toast.tsx",
+      "status": "modified",
+      "insertions": 3,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "src/icons.tsx",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/assets/AssetsPage.tsx",
+      "status": "modified",
+      "insertions": 90,
+      "deletions": 14,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/assets/ProjectFiles.tsx",
+      "status": "modified",
+      "insertions": 7,
+      "deletions": 2,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/assets/asset-view.ts",
+      "status": "modified",
+      "insertions": 41,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/assets/folder-cover.ts",
+      "status": "modified",
+      "insertions": 3,
+      "deletions": 3,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/capabilities/CatalogInspector.tsx",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 4,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/capabilities/catalog-view.ts",
+      "status": "modified",
+      "insertions": 6,
+      "deletions": 14,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/creation/BatchGeneration.tsx",
+      "status": "modified",
+      "insertions": 11,
+      "deletions": 9,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/creation/CreationPage.tsx",
+      "status": "modified",
+      "insertions": 18,
+      "deletions": 154,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "status": "modified",
+      "insertions": 83,
+      "deletions": 32,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/projects/SharedProjects.tsx",
+      "status": "modified",
+      "insertions": 22,
+      "deletions": 8,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/tasks/TasksPage.tsx",
+      "status": "modified",
+      "insertions": 16,
+      "deletions": 3,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/api/control-center-client.ts",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/clipboard.ts",
+      "status": "modified",
+      "insertions": 23,
+      "deletions": 1,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/collaboration.ts",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/read-model/project-navigation.ts",
+      "status": "modified",
+      "insertions": 13,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/tool-catalog.ts",
+      "status": "modified",
+      "insertions": 0,
+      "deletions": 4,
+      "will_review": true
+    },
+    {
+      "path": "src/styles/app.css",
+      "status": "modified",
+      "insertions": 2,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "tests/assets-view.test.ts",
+      "status": "modified",
+      "insertions": 16,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/catalog-view.test.ts",
+      "status": "modified",
+      "insertions": 6,
+      "deletions": 8,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/collaboration.test.ts",
+      "status": "modified",
+      "insertions": 7,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/frontend-read-model.test.ts",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/generation-batches.test.ts",
+      "status": "modified",
+      "insertions": 13,
+      "deletions": 5,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/notifications.test.ts",
+      "status": "modified",
+      "insertions": 2,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/project-navigation.test.ts",
+      "status": "modified",
+      "insertions": 9,
+      "deletions": 1,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "docs/review-followup-2026-10-28.md",
+      "status": "added",
+      "insertions": 96,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/reviews/control-center-grok47-complete.command.txt",
+      "status": "added",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/reviews/control-center-grok47-preview.txt",
+      "status": "added",
+      "insertions": 3,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "docs/reviews/control-center-grok47-rerun.json",
+      "status": "added",
+      "insertions": 650,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "openspec/changes/yeisme-control-center-guide-and-player-v1/.openspec.yaml",
+      "status": "added",
+      "insertions": 2,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "openspec/changes/yeisme-control-center-guide-and-player-v1/proposal.md",
+      "status": "added",
+      "insertions": 19,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "openspec/changes/yeisme-control-center-guide-and-player-v1/specs/control-center-frontend-backend/spec.md",
+      "status": "added",
+      "insertions": 35,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "openspec/changes/yeisme-control-center-guide-and-player-v1/tasks.md",
+      "status": "added",
+      "insertions": 26,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "src/app/audio-player.tsx",
+      "status": "added",
+      "insertions": 565,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/app/boot-splash.tsx",
+      "status": "added",
+      "insertions": 34,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/components/AudioDock.tsx",
+      "status": "added",
+      "insertions": 236,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "status": "added",
+      "insertions": 254,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/guide/HeroStory.tsx",
+      "status": "added",
+      "insertions": 48,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/guide/ToolStories.tsx",
+      "status": "added",
+      "insertions": 24,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/guide/guide-content.ts",
+      "status": "added",
+      "insertions": 180,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/pages/guide/guide-motion.tsx",
+      "status": "added",
+      "insertions": 105,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/shared/audio-playback.ts",
+      "status": "added",
+      "insertions": 112,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/styles/audio.css",
+      "status": "added",
+      "insertions": 220,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "src/styles/guide.css",
+      "status": "added",
+      "insertions": 237,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "tests/audio-playback.test.ts",
+      "status": "added",
+      "insertions": 69,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/clipboard.test.ts",
+      "status": "added",
+      "insertions": 31,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/creation-state.test.ts",
+      "status": "added",
+      "insertions": 10,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/guide-content.test.ts",
+      "status": "added",
+      "insertions": 49,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "tests/observation-ui.test.ts",
+      "status": "added",
+      "insertions": 70,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    }
+  ],
+  "total_insertions": 3714,
+  "total_deletions": 342,
+  "total_files": 73,
+  "reviewable_count": 49,
+  "excluded_count": 24
+}

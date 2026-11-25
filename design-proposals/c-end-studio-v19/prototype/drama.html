@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yeisme · 雨夜重逢</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="studio.css">
+<script src="sprite.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="主导航">
+    <a class="brand" href="index.html" aria-label="Yeisme 创作台">Y</a>
+    <nav>
+      <a class="rail-link" href="today.html"><svg class="i"><use href="#i-sun"/></svg>今天</a>
+      <a class="rail-link active" href="drama.html" aria-current="page"><svg class="i"><use href="#i-pen"/></svg>创作</a>
+      <a class="rail-link" href="works.html"><svg class="i"><use href="#i-grid"/></svg>作品</a>
+      <a class="rail-link" href="drama.html" data-soon="动态在正式方案里是一条时间线，本原型只画了 4 屏"><svg class="i"><use href="#i-activity"/></svg>动态</a>
+      <a class="rail-link" href="drama.html" data-soon="「我的」收纳系统、连接与设置，本原型只画了 4 屏"><svg class="i"><use href="#i-user"/></svg>我的</a>
+    </nav>
+    <div class="rail-avatar"><button class="avatar" type="button" data-soon="账号面板在正式方案里从「我的」进入">Y</button></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <a class="scope-chip" href="drama.html">
+        <img class="thumb" src="../../../public/guide/showcase/eikona-gpt-1.webp" alt="">
+        <span><strong>雨夜重逢</strong> <span class="crumb">· 3 集</span></span>
+        <svg class="i i-sm"><use href="#i-chevron"/></svg>
+      </a>
+      <span class="status-pill"><span class="dot"></span>系统正常</span>
+      <span class="top-gap"></span>
+      <button class="search-pill" type="button" data-open-palette>
+        <svg class="i i-sm"><use href="#i-search"/></svg>
+        <span>搜索作品、任务</span>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="btn-icon" type="button" data-theme-toggle aria-label="切换主题"><svg class="i i-sm"><use href="#i-theme"/></svg></button>
+      <button class="btn btn-primary btn-sm" type="button" data-soon="新建面板在正式方案里是底部抽屉：图片 / 视频 / 声音 / 文字"><svg class="i i-sm"><use href="#i-plus"/></svg>新建</button>
+    </header>
+
+    <div class="wrap">
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">创作 · 剧集制作</p>
+          <h1 class="display">《雨夜重逢》</h1>
+          <p class="lead">3 集，2 集在等你。剧本在 Auctra，分镜在 Scaena，合成在 MuWeave —— 这里只告诉下一步。</p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" type="button" data-soon="刷新只是重新读取 owner 的最新状态，不会触发任何生成"><svg class="i i-sm"><use href="#i-refresh"/></svg>刷新</button>
+          <button class="btn btn-primary btn-sm" type="button" data-soon="新建一集会先建空集，再选择从剧本还是从分镜开始"><svg class="i i-sm"><use href="#i-plus"/></svg>新建一集</button>
+        </div>
+      </header>
+
+      <div class="stages" aria-label="剧集制作阶段">
+        <span class="stage done"><span class="stage__dot"><svg class="i i-sm"><use href="#i-check"/></svg></span>剧本</span>
+        <span class="stage-line done"></span>
+        <span class="stage done"><span class="stage__dot"><svg class="i i-sm"><use href="#i-check"/></svg></span>导演计划</span>
+        <span class="stage-line done"></span>
+        <span class="stage done"><span class="stage__dot"><svg class="i i-sm"><use href="#i-check"/></svg></span>创意分镜</span>
+        <span class="stage-line done"></span>
+        <span class="stage now"><span class="stage__dot"><svg class="i i-sm"><use href="#i-pen"/></svg></span>制作交接</span>
+        <span class="stage-line"></span>
+        <span class="stage"><span class="stage__dot"></span>制作拆解</span>
+      </div>
+
+      <div class="drama-layout">
+        <section class="episodes" aria-label="剧集列表">
+          <article class="episode">
+            <div class="episode__thumb">
+              <img src="../../../public/guide/showcase/eikona-gpt-1.webp" alt="第 1 集雨停站台的画面">
+              <span class="episode__no">EP 01</span>
+            </div>
+            <div>
+              <h2 class="episode__title">第 1 集 · 雨停站台</h2>
+              <p class="ep-meta">已推送到制作拆解 · 24 分钟</p>
+              <div class="ep-progress" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i></div>
+              <p class="ep-stage-line"><b>5 / 5</b> 全部完成 · 生成、审阅和交付在 MuWeave 完成</p>
+              <p class="episode__next"><span class="dot"></span>这一集没有待办</p>
+            </div>
+            <div class="episode__cta">
+              <button class="btn btn-ghost btn-sm" type="button" data-soon="打开会在 MuWeave 里继续这一集">打开</button>
+              <span class="sub">上周五完成</span>
+            </div>
+          </article>
+
+          <article class="episode">
+            <div class="episode__thumb">
+              <img src="../../../public/guide/showcase/eikona-grok-3.webp" alt="第 2 集末班车的画面">
+              <span class="episode__no">EP 02</span>
+            </div>
+            <div>
+              <h2 class="episode__title">第 2 集 · 末班车</h2>
+              <p class="ep-meta">创意分镜 · 18 个镜头</p>
+              <div class="ep-progress" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></div>
+              <p class="ep-stage-line"><b>3 / 5</b> 创意分镜等你审阅</p>
+              <p class="episode__next"><span class="dot warm"></span><b>下一步：</b>审阅 6 个分镜，过了就能进制作</p>
+            </div>
+            <div class="episode__cta">
+              <button class="btn btn-primary btn-sm" type="button" data-soon="审阅台会左右对比分镜与剧本，支持键盘逐条通过">去审阅</button>
+              <span class="sub">昨天更新</span>
+            </div>
+          </article>
+
+          <article class="episode">
+            <div class="episode__thumb">
+              <img src="../../../public/guide/showcase/scaena-i2v-poster.webp" alt="第 3 集回声的画面">
+              <span class="episode__no">EP 03</span>
+            </div>
+            <div>
+              <h2 class="episode__title">第 3 集 · 回声</h2>
+              <p class="ep-meta">制作交接 · 18 个镜头 · 12 个已确认</p>
+              <div class="ep-progress" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i></i></div>
+              <p class="ep-stage-line"><b>4 / 5</b> 制作交接 · 4 个正在生成</p>
+              <p class="episode__next danger"><span class="dot danger"></span><b>下一步：</b>确认 2 个镜头，重试 1 个失败</p>
+            </div>
+            <div class="episode__cta">
+              <button class="btn btn-primary btn-sm" type="button" data-soon="继续制作会回到今天的片场，处理完这 3 件事就能收工">继续制作</button>
+              <span class="sub">2 分钟前更新</span>
+            </div>
+          </article>
+        </section>
+
+        <aside class="aside-card" aria-label="今晚的通告">
+          <h3>今晚的通告</h3>
+          <p class="sub">第 3 集 · 3 个决定</p>
+          <div class="todo">
+            <span class="todo__num">1</span>
+            <div><p class="todo__title">挑选「站台 · 人群背景」</p><p class="todo__desc">4 个候选，选一个就收工</p></div>
+          </div>
+          <div class="todo">
+            <span class="todo__num">2</span>
+            <div><p class="todo__title">重试「天台 · 黄昏光比」</p><p class="todo__desc">提示词被审核拦截，给个新说法</p></div>
+          </div>
+          <div class="todo">
+            <span class="todo__num">3</span>
+            <div><p class="todo__title">回查「旧车站 · 转场」</p><p class="todo__desc">上传中断，先看是不是已经成了</p></div>
+          </div>
+          <button class="btn btn-primary" type="button" data-soon="开始处理会依次带你走完这三件事，每一步都可就地完成">开始处理<svg class="i i-sm"><use href="#i-arrow"/></svg></button>
+          <p class="sub" style="margin-top:12px">上次同步：2 分钟前</p>
+        </aside>
+      </div>
+
+      <footer class="statusline">
+        <span class="item"><span class="dot"></span>6/8 连接可读</span>
+        <span class="sep"></span>
+        <span class="item">剧集数据来自 Auctra · 只读</span>
+        <a class="link-more" href="today.html" data-soon="系统页在正式方案里从底部状态或「我的」进入；本原型未绘制">系统和连接<svg class="i i-sm"><use href="#i-chevron"/></svg></a>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="studio.js"></script>
+</body>
+</html>

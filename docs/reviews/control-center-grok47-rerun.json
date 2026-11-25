@@ -1,0 +1,650 @@
+{
+  "status": "partial",
+  "message": "Review partially complete: 34 finding(s); 26 of 46 selected item(s) failed.",
+  "llm": {
+    "provider": "cpa",
+    "model": "grok-4.7-build-fast"
+  },
+  "summary": {
+    "files_reviewed": 46,
+    "comments": 34,
+    "total_tokens": 994595,
+    "input_tokens": 803748,
+    "output_tokens": 190847,
+    "cache_read_tokens": 395008,
+    "elapsed": "9m9s",
+    "budget_exceeded": true
+  },
+  "tool_calls": {
+    "total": 59,
+    "by_tool": {
+      "code_comment": 9,
+      "code_search": 24,
+      "file_find": 3,
+      "file_read": 23
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "src/components/ProcessTimeline.tsx",
+      "content": "空检查点通知漏掉了 CoverageState 里的 `expired` 和 `integrity_failed`。这两种覆盖度并不是「尚未返回中间检查点」，但只要 observation 存在且 checkpoints 为空，就会和真正的缺口一起展示这句文案，把过期/完整性失败误报成缺少检查点。建议用白名单（partial/pending/unknown/complete）判断缺口，并为 expired 与 integrity_failed 单独给出对应说明。",
+      "suggestion_code": "    !error && hasObservation && (coverage === \"partial\" || coverage === \"pending\" || coverage === \"unknown\" || coverage === \"complete\") && checkpoints.length === 0 && <InlineNotice key=\"checkpoint-gap\" tone=\"neutral\" icon={<ShieldQuestion />}>来源已返回过程观察，但尚未返回中间检查点；当前只展示已确认的阶段状态。</InlineNotice>,",
+      "start_line": 66,
+      "end_line": 66,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/tasks/TasksPage.tsx",
+      "content": "音频预览键被直接置为 null 后，useMediaPreview 会把 previewKey 从 URL 里的值同步成 null（见 media-preview 里 previewKey 变化时调用 onPreviewKeyChange(null, \"replace\")）。结果是刷新、分享或浏览器前进后退时，合法的 `?preview=<audio>` 会被静默删掉，而不是仅仅不在任务 Inspector 里打开。若音频应只走全局播放器，应在识别到音频目标时主动调用播放器并再清掉该查询参数，而不要把键伪装成「从未存在」交给 preview 同步逻辑。",
+      "suggestion_code": "  const requestedEntry = requestedPreview ? resolvePreview(requestedPreview) : null;\n  const previewKey = requestedEntry?.kind === \"audio\" ? null : requestedPreview;\n  // 识别到音频目标后应交给全局播放器，并显式清除 preview 查询参数，而不是伪装成 null 让 useMediaPreview 间接删掉 URL。",
+      "start_line": 120,
+      "end_line": 120,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/assets/AssetsPage.tsx",
+      "content": "切到「共享项目成果」时 selectCatalog 只增删 catalog，不清掉 kind/owner/from/to/project/state 等 owner 筛选。ProjectFiles 会把同一组 query 传给 projectItems，用户看不到这些筛选，空态却只说「当前目录没有可显示的成果」。另外 catalog=shared 但项目列表还没有 shared（加载中或解析失败）时条件为假，会直接渲染 OwnerAssetsPage。切换目录时应清掉 owner 专用筛选，并在共享目录未就绪时保留加载/空态，而不要落回 owner 资源。",
+      "suggestion_code": "  const selectCatalog = (next: \"owner\" | \"shared\") => setParams((current) => {\n    const query = new URLSearchParams(current);\n    for (const key of [\"kind\", \"owner\", \"project\", \"resultState\", \"taskState\", \"access\", \"from\", \"to\", \"q\", \"state\", \"folder\", \"batch\", \"cursor\", \"source_cursor\"]) query.delete(key);\n    if (next === \"owner\") query.delete(\"catalog\");\n    else query.set(\"catalog\", \"shared\");\n    return query;\n  }, { replace: true });",
+      "start_line": 112,
+      "end_line": 117,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/assets/AssetsPage.tsx",
+      "content": "shared 用 params.sharedProject || scopeId 查找，找不到就静默回退到 rows[0]，也不回写 URL。深链里的 sharedProject 失效时会打开另一个项目的文件，地址栏仍显示原 id。找不到时应保留空态并说明项目不可用，不要替换成第一条。",
+      "suggestion_code": null,
+      "start_line": 111,
+      "end_line": 111,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/assets/AssetsPage.tsx",
+      "content": "画廊上的播放按钮在 phase 为 playing（文案是「暂停」）时仍无条件调用 player.play，不会暂停。应按当前 phase 分支：playing 调 pause，paused 调 resume，否则才 play；并捕获 play 的失败向用户提示，而不要吞掉 Promise。",
+      "suggestion_code": null,
+      "start_line": 398,
+      "end_line": 398,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/assets/ProjectFiles.tsx",
+      "content": "kind===audio 时 openPreview 直接 player.play 后 return，没有先检查预览授权，也没有把 Promise 交回调用方的 catch。锁定成果会绕过 grant，播放失败没有提示。应 await/返回该 Promise，失败时写入 previewError。",
+      "suggestion_code": null,
+      "start_line": 47,
+      "end_line": 47,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/assets/asset-view.ts",
+      "content": "注释约定按本地日闭区间过滤，缺失时间不得命中已限定窗口；实现只对 ISO 字符串 slice(0,10) 做字典序比较。UTC 与本地日相差一天时会漏掉或错收资源。应按本地日历日期比较（例如 用 Date 取 getFullYear/getMonth/getDate 格式化后再比）。OwnerAssetsPage 里也内联了同一套条件，没有调用已导出的 matchesAssetFilters，两套过滤以后会漂移。",
+      "suggestion_code": null,
+      "start_line": 21,
+      "end_line": 26,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/assets/ProjectFiles.tsx",
+      "content": "详情页音频分支提前 return 时不会 preview.close，且详情里始终渲染 InlineMediaPreview。上一项若是图片/视频，预览会残留在音频详情下方。切到音频或关闭应先关闭旧预览，音频条目不要再挂 InlineMediaPreview。",
+      "suggestion_code": null,
+      "start_line": 47,
+      "end_line": 47,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/assets/AssetsPage.tsx",
+      "content": "检查器里的 AudioStage 调用 audioTrackFrom(entry) 时没有传入 assetHref，与列表/画廊入口不一致。播放器回跳会丢掉 result 深链。应传入与列表相同的 assetHref(entry)。",
+      "suggestion_code": null,
+      "start_line": 497,
+      "end_line": 497,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/capabilities/catalog-view.ts",
+      "content": "「查看接入方式」的可点击性只由这份手写 owner 集合决定，而使用指南实际用 `guideTools[].id` 匹配 `?tool=`。两边现在都是 eikona/sonora/scaena/auctra，但没有共用来源：以后增删工具、或把 `id` 与 `owner` 写成不同值时，这里仍会给主按钮，跳转后却选不中卡片、也不会滚到对应说明。请从 `guideTools` 派生可跳转的 id（并用该 id 而不是 `entry.value.owner` 拼 query），避免链接与指南页 URL 同步失效。",
+      "suggestion_code": "import { guideTools } from \"../guide/guide-content\";\n\nconst guideOwners = new Map(guideTools.map((tool) => [tool.owner, tool.id]));\n\n/** 使用指南 card that explains how to call this owner from a CLI or an MCP client; null when none exists. */\nexport function guideTarget(entry: CatalogEntry): string | null {\n  const tool = guideOwners.get(entry.value.owner);\n  return tool ? `/guide?tool=${tool}` : null;\n}",
+      "start_line": 123,
+      "end_line": 128,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/components/ui/Toast.tsx",
+      "content": "复制失败时没有错误处理，也不会清掉已成功状态。旧实现有 `.catch`；现在 `copyReference` 若 reject，会变成未处理的 Promise 拒绝，且不会调用 `onCopyFailed`。若上一次已 `setCopied(true)` 而本次返回 false，勾选状态仍会保留到定时器结束。失败时应 `setCopied(false)` 并在 catch 中同样通知 `onCopyFailed`。",
+      "suggestion_code": "    onClick={() => {\n      void copyReference(value)\n        .then((ok) => {\n          if (ok) setCopied(true);\n          else {\n            setCopied(false);\n            onCopyFailed?.(value);\n          }\n        })\n        .catch(() => {\n          setCopied(false);\n          onCopyFailed?.(value);\n        });\n    }}",
+      "start_line": 47,
+      "end_line": 47,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "server/generation-batches.ts",
+      "content": "verify 把入参 raw.prompt_capture 经 normalizePromptObservation 后直接写进 GenerationBatchItem，没有再向 owner 回执取观察，也没有与本次 receipt.prompt_capture 比对。plan() 虽然先用回执填了该字段，但 fixed 校验（保存固定批次）同样信任 raw。BatchGeneration 会把带 prompt_capture 的 planned 原样作为 generation.batch.create 的 items 提交，协作方可以保持合法 plan_digest，只替换观察内容；该字段会被持久化并展示给共享项目成员。若请求 schema 未声明该字段且 additionalProperties 为 false，则正常保存会直接 422。应在服务端丢弃客户端上送的 prompt_capture，只保留本次 owner 回执（或服务端已存的观察）经规范化后的结果。",
+      "suggestion_code": "      const { prompt_capture: clientCapture, ...clientItem } = raw;\n      const promptCapture = normalizePromptObservation(clientCapture);\n      if (fixed && promptCapture) throw new AuthError(\"generation_prompt_capture_untrusted\", 422);\n      result.push({ id: clientItem.id, owner: \"eikona\", modality: \"image\", model_ref: clientItem.model_ref, candidate_count: clientItem.candidate_count, folder_id: clientItem.folder_id || null, input_ref: clientItem.input_ref, input_digest: clientItem.input_digest, plan_digest: plan.plan_digest, estimated_cost: amount, currency: \"USD\", state: reason ? \"blocked\" : \"planned\", ...(reason ? { reason } : {}), binding_digest: digest(p.bindings), ...(!fixed && promptCapture ? { prompt_capture: promptCapture } : {}) } as GenerationBatchItem);",
+      "start_line": 55,
+      "end_line": 56,
+      "category": "security",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/creation/BatchGeneration.tsx",
+      "content": "保存固定批次把整份 planned（现在含 prompt_capture）原样交给 generation.batch.create。服务端 verify 会把 raw.prompt_capture 写回批次项，因此该字段会被当作可信输入持久化；请求体多一个未声明字段时也会让保存直接 422。提交前应剔掉 prompt_capture，只保留合同字段；展示仍可使用服务端回执里的观察。",
+      "suggestion_code": "<Button size=\"sm\" onClick={() => { const items = planned.map(({ prompt_capture: _capture, ...item }) => item); setForm(\"save\"); void action.prepare(\"generation.batch.create\", project.id, project.revision, { name, items, idempotency_key: createIdempotencyKey(\"batch\") }, project.id); }}>保存固定批次</Button>",
+      "start_line": 62,
+      "end_line": 62,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "app/index.html",
+      "content": "慢连接自救链接使用 `href=\"./”`，会按当前文档 URL 解析到父路径（例如 `/projects/:id` → `/projects/`），而不是重新加载当前页面。深链下会跳走路由或在无 SPA fallback 时 404，启动挂死时唯一恢复入口失效。请改为强制重载当前文档（`location.reload()`），避免被相对路径或路由点击拦截吞掉。",
+      "suggestion_code": "        <div class=\"boot-status\"><p class=\"boot-note\">正在连接控制中心…</p><p class=\"boot-slow\">连接比平时慢。<a href=\"\" onclick=\"location.reload();return false;\">重新加载</a></p></div>",
+      "start_line": 52,
+      "end_line": 52,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "app/index.html",
+      "content": "`prefers-reduced-motion: reduce` 只取消了 `.boot-mark` / `.boot-word`，轨道 `.boot-orbit::after` 仍无限旋转（仅把周期改为 4s）。减少动效偏好下应停止该无限动画，而不是改慢。",
+      "suggestion_code": "      @media (prefers-reduced-motion: reduce) { .boot-mark, .boot-word, .boot-orbit::after { animation: none; } .boot-splash[data-leaving], .boot-splash[data-leaving] .boot-stage { animation: none; } }",
+      "start_line": 43,
+      "end_line": 43,
+      "category": "bug",
+      "severity": "low"
+    },
+    {
+      "path": "src/app/boot-splash.tsx",
+      "content": "`window.matchMedia?.(...)` 的可选链只作用于 `matchMedia` 本身，后续 `.matches` 不在链上。jsdom 或未实现 `matchMedia` 的环境会在这里抛 TypeError。此时 `dataset.leaving` 已经写上，后续 `dismissBootSplash` 会直接 return，启动层永久留下且离开 loading 的 effect 失败。应对返回值也使用可选链。",
+      "suggestion_code": "  if (window.matchMedia?.(\"(prefers-reduced-motion: reduce)\")?.matches) {",
+      "start_line": 17,
+      "end_line": 17,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/app/boot-splash.tsx",
+      "content": "`BootSplash` 注释说明是给没有 index.html 启动层的运行时（测试、热更新）用的同款启动层，但根节点没有 `id=\"boot-splash\"`。`hasBootSplash` / `dismissBootSplash` 都按该 id 查找，这条路径渲染后无法被识别也拆不掉。样式也只写在 index.html 的 `<style>` 里，离开该文档后这份副本没有启动层样式。",
+      "suggestion_code": "  return <div id=\"boot-splash\" className=\"boot-splash\" role=\"status\" aria-live=\"polite\">",
+      "start_line": 27,
+      "end_line": 27,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "深链 effect 依赖 `requested?.id`，因此任何把 `tool` 写进查询串的操作都会在约 120ms 后 `scrollIntoView` 到 `#guide-tool-*`。快速开始的 Picker 走 `choose(id)`（本意不滚动），「用某工具走一遍三步」走 `choose(id, true)`（本意滚到 `#guide-steps`），两者都会被这次滚动盖过。请只在首次深链入口滚动一次（例如用 ref 记下初始 `tool` 并滚完即清空），页内切换不要再跟着滚到工具卡。",
+      "suggestion_code": "  const deepLinkTool = useRef(params.get(\"tool\"));\n  useEffect(() => {\n    const id = deepLinkTool.current;\n    if (!id || !guideTools.some((item) => item.id === id)) return;\n    deepLinkTool.current = null;\n    const timer = window.setTimeout(() => document.getElementById(`guide-tool-${id}`)?.scrollIntoView({ behavior: window.matchMedia?.(\"(prefers-reduced-motion: reduce)\").matches ? \"auto\" : \"smooth\", block: \"center\" }), 120);\n    return () => window.clearTimeout(timer);\n  }, []);",
+      "start_line": 214,
+      "end_line": 217,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "`copied` / `copyFailed` 只随成功提示计时清除，不随 `command` 变化重置。快速开始第一步的安装命令和 `--version` 没有 key，切换工具时同一实例会被复用，新命令上仍会显示「已复制」或失败输入框，用户可能把剪贴板里的旧命令当成当前命令。请在 `command` 变化时清掉这两个状态，并给会随工具改变的 CommandLine 加上含命令的 key。",
+      "suggestion_code": "  useEffect(() => {\n    setCopied(false);\n    setCopyFailed(false);\n  }, [command]);\n  useEffect(() => {\n    if (!copied) return;\n    const timer = window.setTimeout(() => setCopied(false), 1400);\n    return () => window.clearTimeout(timer);\n  }, [copied]);",
+      "start_line": 38,
+      "end_line": 42,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "`copy` 把 `copyReference` 的返回值直接当布尔成功标记，且没有 try/catch。若本次剪贴板改动成功时返回 void、抛错，或内部已降级仍返回 false，按钮会误报失败或成功；抛错时 `copyFailed` 已被清掉且不会出现手动复制框。请捕获异常，只把严格的 `true` 当成成功，并与 `copyReference` 的布尔契约对齐（含 execCommand 降级）。",
+      "suggestion_code": "  const copy = async () => {\n    setCopied(false);\n    setCopyFailed(false);\n    try {\n      if (await copyReference(command) !== true) throw new Error(\"copy failed\");\n      setCopied(true);\n    } catch {\n      setCopied(false);\n      setCopyFailed(true);\n    }\n  };",
+      "start_line": 43,
+      "end_line": 48,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "`tool` 每次从 `?tool=` 派生，`client` 却只在 useState 初始化时读一次 `?client=`。指南路由保持挂载时，历史回退、外链或其它 setSearchParams 只改查询串，Picker 和 connectCommands 仍用旧客户端，复制出的接入命令会和地址栏不一致。请像 tool 一样从查询参数派生 client，不要另存一份不同步的 state。",
+      "suggestion_code": "  const client: GuideClient = params.get(\"client\") === \"codex\" ? \"codex\" : \"claude\";",
+      "start_line": 198,
+      "end_line": 198,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "useCatalog 只把 isRouteUnavailable 收成 `catalog: null`，其它网络错误、AbortError 和 5xx 继续抛出；过期缓存失败时也不回退 `cached.data`。这与「指南文案不等待目录」相反：目录异常会让 loader 失败，证明行和工具状态拿不到上次结果。请在非 abort 的失败上回退过期缓存，否则返回 `{ catalog: null }`，让静态指南继续渲染。",
+      "suggestion_code": "    } catch (error) {\n      if (signal.aborted) throw error;\n      if (cached?.data) return { catalog: cached.data };\n      return { catalog: null };\n    }",
+      "start_line": 27,
+      "end_line": 30,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/guide/GuidePage.tsx",
+      "content": "复制按钮的 aria-label（以及 title）使用了嵌套三元，违反项目对三元表达式的限制；后续再加复制状态时容易改错读屏文案。请先用 if/变量算出文案再传给 aria-label 和 title。",
+      "suggestion_code": "      <button type=\"button\" className=\"guide-copy\" aria-label={copyLabel} title={copyTitle} onClick={() => void copy()}>{copied ? <Check className=\"size-3.5\" /> : <Copy className=\"size-3.5\" />}</button>",
+      "start_line": 53,
+      "end_line": 53,
+      "category": "style",
+      "severity": "low"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "「关闭」调用的是 `onSelect(selected)`，而上层把 `onSelect` 接到 `selectProjectResult(params, entry.key)`。该函数只有在 key 为空时才会 `delete(\"result\")`，传入当前条目会把同一个 `result` 再写回 URL，同时删掉 `preview`。面板关不掉，语义与按钮相反，用户只能靠切 tab 退出。请单独提供关闭回调，调用 `selectProjectResult(params, null)`。",
+      "suggestion_code": "<Button size=\"sm\" variant=\"ghost\" onClick={onClose}>关闭</Button>\n// 上层：onClose={() => setParams(selectProjectResult(params, null))}",
+      "start_line": 795,
+      "end_line": 795,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "「预览/播放」和 `onPreview` 只把 `preview` 写进查询串，本文件没有读取 `params.get(\"preview\")`，也没有按 `entry.key` 调用 `useMediaPreview` 的打开/关闭。查询串没有订阅方时按钮不会开始播放。上一项/下一项走 `onSelect` → `selectProjectResult`，只会删掉 `preview` 参数，不会清掉钩子里上一条的媒体或授权错误，`AssetPreviewStage` 仍读 `preview.status`，会把旧状态显到当前结果上。请在 `preview` 参数或选中项变化时打开对应条目并在参数清除时重置播放器。",
+      "suggestion_code": "onPreview={(entry) => {\n  const next = selectProjectResult(params, entry.key);\n  next.set(\"preview\", entry.key);\n  setParams(next);\n  preview.open(entry);\n}}\n// 切换结果或删除 preview 时按 entry.key 关闭/重置上一条播放状态",
+      "start_line": 604,
+      "end_line": 604,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "`catalog !== \"owner\"` 时无条件渲染共享项目，原先「没有组织数据则回退 owner」的分支已删除。本页唯一按钮还是 `setParams({ shared: \"1\" })`，会整表替换查询串，且不会写入 `catalog=owner`。无组织用户、以及不带 `catalog=owner` 的 `?project=` 深链会进入共享项目；这个文件里也没有把目录切回 owner 的入口。请保留显式 owner 入口（写入 `catalog=owner` 而不要清掉已有的 `project`），并让带 `project` 的深链仍打开 owner 项目。",
+      "suggestion_code": "const ownerCatalog = params.get(\"catalog\") === \"owner\" || (!params.get(\"sharedProject\") && params.has(\"project\"));\nif (!ownerCatalog) return <SharedProjects />;\n// owner 页提供返回共享；共享页提供进入 owner：setParams 时保留其余参数并设置 catalog=owner",
+      "start_line": 261,
+      "end_line": 262,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "`taskQ`/`taskState`/`taskStage`、`assetQ`/`assetKind`、`reviewQ`/`reviewStatus` 都写在页面级查询串上。`selectProjectTab` 只删除 `task`/`result`/`preview`，切项目的现有逻辑也不会清这些筛选。打开另一个 owner 项目后筛选会继承，有数据的列表会误显示「没有符合条件的任务/结果/审阅记录」。切换 `project` 时请删掉这三组参数。",
+      "suggestion_code": "const next = new URLSearchParams(current);\nfor (const key of [\"taskQ\", \"taskState\", \"taskStage\", \"assetQ\", \"assetKind\", \"reviewQ\", \"reviewStatus\"]) next.delete(key);",
+      "start_line": 690,
+      "end_line": 693,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "表格只渲染 `filtered.slice(0, listLimit)`，上一项/下一项却在完整 `filtered` 上移动，会选中表格里不存在的行并丢掉高亮。`selected` 取自未筛选的 `results`，当前结果被类型/搜索排除时 `selectedIndex === -1`，上下项都被禁用。同时任务表的 `TruncationNote` 仍 `navigate(tasksHref(project))`，不携带 `taskQ`/`taskState`/`taskStage`，筛选后的总数与任务页不一致。请让窗口覆盖当前选中项，或只在可见行上步进；「查看全部」要带上同一组筛选。",
+      "suggestion_code": "const selectedIndex = selected ? filtered.indexOf(selected) : -1;\nconst windowStart = selectedIndex >= listLimit ? selectedIndex - listLimit + 1 : 0;\nconst rows = filtered.slice(windowStart, windowStart + listLimit);",
+      "start_line": 750,
+      "end_line": 753,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/projects/ProjectsPage.tsx",
+      "content": "`kindLabel(item as \"image\")` 把 video/audio/text 都断言成 image，类型检查失效。若 `kindLabel` 参数不是完整结果类型联合，后续改签名也不会在这里报错。请按实际联合类型传入，不要用 `as \"image\"`。",
+      "suggestion_code": "{([\"image\", \"video\", \"audio\", \"text\"] as const).map((item) => <option key={item} value={item}>{kindLabel(item)}</option>)}",
+      "start_line": 779,
+      "end_line": 779,
+      "category": "maintainability",
+      "severity": "low"
+    },
+    {
+      "path": "src/pages/projects/SharedProjects.tsx",
+      "content": "`role`/`owner` 只在客户端过滤当前 `listing.data.rows`，`hidden` 仍交给接口。`listing.data` 为空时 `|| []` 会变成空列表；若 `ReadStateView` 在 loading/error 仍渲染 children，会把加载中显示成空态。组织下拉只改 `organization` 和 `sharedProject`，不清 `role`/`owner`，切组织后旧筛选会把有数据的列表过滤成「没有匹配的项目」。空态标题是嵌套三元，但 body 始终是「创建项目后…」，隐藏项目和筛选无结果都会用错说明。请在数据就绪后再判空，切组织时清掉 role/owner，并按空态原因分开文案。",
+      "suggestion_code": "const loaded = listing.data?.rows;\nconst rows = (loaded ?? []).filter((p) => (!params.get(\"role\") || params.get(\"role\")!.split(\",\").includes(p.role)) && (!params.get(\"owner\") || p.bindings.some((binding) => params.get(\"owner\")!.split(\",\").includes(binding.owner))));\n// 仅在 loaded 存在时渲染空态；切组织时 patch(\"role\", null); patch(\"owner\", null)",
+      "start_line": 82,
+      "end_line": 82,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/pages/projects/SharedProjects.tsx",
+      "content": "`copy()` 成功时会 `setManualCopy(\"\")`，但 `CopyRef` 只接了 `onCopyFailed={setManualCopy}`。失败后再从这里复制成功，上一次的项目链接或 `yeisme-project:` 引用仍会留在手动复制警告里。请补上成功回调并清空 `manualCopy`。owner 列表的手动框只挂在列表 notices 上，若详情/菜单复制时该区域不在视口内，提示会指向一个看不见的输入框。",
+      "suggestion_code": "<CopyRef value={project.id} label=\"项目引用\" onCopy={() => setManualCopy(\"\")} onCopyFailed={setManualCopy} />",
+      "start_line": 75,
+      "end_line": 75,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/app/audio-player.tsx",
+      "content": "requestGrant 在 await 之后无条件写入 grant.current。close()（scope/epoch/session 变化或卸载）和更新的 load() 会先把 grant 清掉并递增 loadToken，但旧的 artifactAccess 返回仍会把上一个会话的短期 URL 写回来。后续 requestGrant 只要 key 相同且距过期超过 5s 就会复用这个已失效句柄，播放会挂到旧授权上。请把写入放在 token 仍然等于 loadToken.current 之后（或在 close 时递增一代 grant 代际并在写入前比对）。",
+      "suggestion_code": "    const issued = await api.artifactAccess(scope, track.taskKey, track.resultRef, \"preview\", current.csrf);\n    if (token !== loadToken.current) throw new DOMException(\"The operation was aborted.\", \"AbortError\");\n    const next = { key: track.key, url: issued.url, mime: issued.mime || track.mime, expiresAt: Date.parse(issued.expires_at) };\n    grant.current = next;\n    return next;",
+      "start_line": 201,
+      "end_line": 204,
+      "category": "bug",
+      "severity": "high"
+    },
+    {
+      "path": "src/app/audio-player.tsx",
+      "content": "skip 用 audio.currentTime 作为基准，但 <audio> 始终挂在树上。load/detach 会清掉 src，此时 currentTime 是 0 而不是 null，?? 不会回退到 clock。缓冲、重新授权或尚未 HAVE_METADATA 时点前进/后退，会把 pendingSeek 里的续播位置覆盖成 ±10 秒。currentTime() 同样只判空。应在已 attach 且 readyState 达到 HAVE_METADATA 时用元素时间，否则用 pendingSeek ?? clock.current。",
+      "suggestion_code": "  const playbackTime = () => {\n    const audio = audioRef.current;\n    if (audio && attached.current && audio.readyState >= HTMLMediaElement.HAVE_METADATA) return audio.currentTime;\n    return pendingSeek.current ?? clock.get().current;\n  };\n  const skip = useCallback((delta: number) => seek(playbackTime() + delta), [clock, seek]);",
+      "start_line": 393,
+      "end_line": 393,
+      "category": "bug",
+      "severity": "medium"
+    },
+    {
+      "path": "src/app/audio-player.tsx",
+      "content": "下载链接没有插入文档就 click()。空的 issued.url 会指向当前页并刷新 SPA；cross-origin 签名 URL 会忽略 download，点击后直接把控制台导走。Safari/Firefox 对未挂载的 <a download> 也经常不会开始下载。请拒绝空 URL，把链接挂到 document.body 再点击并立刻移除；若 URL 不是同源，改为新开窗口或 fetch 成 blob，避免卸载当前页。",
+      "suggestion_code": "      if (!issued.url) throw new Error(\"media_unavailable\");\n      const anchor = document.createElement(\"a\");\n      anchor.href = issued.url;\n      anchor.download = issued.filename || mediaFilename(track.title, issued.mime || track.mime);\n      anchor.rel = \"noopener\";\n      anchor.target = \"_blank\";\n      document.body.appendChild(anchor);\n      anchor.click();\n      anchor.remove();",
+      "start_line": 441,
+      "end_line": 445,
+      "category": "bug",
+      "severity": "medium"
+    }
+  ],
+  "groups": [
+    {
+      "label": "Product guide pages, content, and styles",
+      "files": [
+        "openspec/changes/yeisme-control-center-guide-and-player-v1/.openspec.yaml",
+        "src/pages/guide/GuidePage.tsx",
+        "src/pages/guide/HeroStory.tsx",
+        "src/pages/guide/ToolStories.tsx",
+        "src/pages/guide/guide-content.ts",
+        "src/pages/guide/guide-motion.tsx",
+        "src/styles/guide.css"
+      ]
+    },
+    {
+      "label": "Audio player dock and playback",
+      "files": [
+        "src/app/audio-player.tsx",
+        "src/components/AudioDock.tsx",
+        "src/shared/audio-playback.ts",
+        "src/styles/audio.css"
+      ]
+    },
+    {
+      "label": "App shell, navigation, boot, and global chrome",
+      "files": [
+        "app/index.html",
+        "src/app-shell/AppShell.tsx",
+        "src/app-shell/navigation.ts",
+        "src/app/App.tsx",
+        "src/icons.tsx",
+        "src/styles/app.css",
+        "src/app/boot-splash.tsx"
+      ]
+    },
+    {
+      "label": "Asset library views and folder covers",
+      "files": [
+        "src/pages/assets/AssetsPage.tsx",
+        "src/pages/assets/ProjectFiles.tsx",
+        "src/pages/assets/asset-view.ts",
+        "src/pages/assets/folder-cover.ts"
+      ]
+    },
+    {
+      "label": "Projects pages and project navigation",
+      "files": [
+        "src/pages/projects/ProjectsPage.tsx",
+        "src/pages/projects/SharedProjects.tsx",
+        "src/shared/read-model/project-navigation.ts"
+      ]
+    },
+    {
+      "label": "Creation flow and generation batches",
+      "files": [
+        "server/generation-batches.ts",
+        "src/pages/creation/BatchGeneration.tsx",
+        "src/pages/creation/CreationPage.tsx"
+      ]
+    },
+    {
+      "label": "Capability catalog and tool catalog",
+      "files": [
+        "src/pages/capabilities/CatalogInspector.tsx",
+        "src/pages/capabilities/catalog-view.ts",
+        "src/shared/tool-catalog.ts"
+      ]
+    },
+    {
+      "label": "Tasks, process timeline, and result viewer",
+      "files": [
+        "src/components/ProcessTimeline.tsx",
+        "src/components/ResultViewer.tsx",
+        "src/pages/tasks/TasksPage.tsx"
+      ]
+    },
+    {
+      "label": "Shared layout and toast UI",
+      "files": [
+        "src/components/ui/Layout.tsx",
+        "src/components/ui/Toast.tsx"
+      ]
+    },
+    {
+      "label": "Auth, API client, clipboard, and collaboration",
+      "files": [
+        "src/app/auth.tsx",
+        "src/shared/api/control-center-client.ts",
+        "src/shared/clipboard.ts",
+        "src/shared/collaboration.ts"
+      ]
+    },
+    {
+      "label": "Server app bootstrap",
+      "files": [
+        "server/app.ts",
+        "server/index.ts"
+      ]
+    },
+    {
+      "label": "Visual and browser verification scripts",
+      "files": [
+        "scripts/capture-visual-matrix.ts",
+        "scripts/verify-app.mjs",
+        "scripts/verify-browser-journey.ts",
+        "scripts/verify-dev-preview.mjs"
+      ]
+    }
+  ],
+  "coverage": {
+    "selected": [
+      "src/styles/guide.css",
+      "src/pages/guide/GuidePage.tsx",
+      "src/app/auth.tsx",
+      "openspec/changes/yeisme-control-center-guide-and-player-v1/.openspec.yaml",
+      "src/pages/creation/BatchGeneration.tsx",
+      "src/shared/tool-catalog.ts",
+      "src/styles/app.css",
+      "src/components/ui/Layout.tsx",
+      "src/styles/audio.css",
+      "src/pages/guide/HeroStory.tsx",
+      "scripts/verify-dev-preview.mjs",
+      "scripts/capture-visual-matrix.ts",
+      "src/shared/read-model/project-navigation.ts",
+      "src/pages/creation/CreationPage.tsx",
+      "src/components/ui/Toast.tsx",
+      "scripts/verify-app.mjs",
+      "src/pages/capabilities/catalog-view.ts",
+      "src/pages/guide/ToolStories.tsx",
+      "src/pages/tasks/TasksPage.tsx",
+      "src/components/AudioDock.tsx",
+      "src/app-shell/AppShell.tsx",
+      "src/pages/projects/ProjectsPage.tsx",
+      "src/components/ResultViewer.tsx",
+      "server/generation-batches.ts",
+      "src/pages/projects/SharedProjects.tsx",
+      "src/icons.tsx",
+      "src/app-shell/navigation.ts",
+      "src/shared/collaboration.ts",
+      "scripts/verify-browser-journey.ts",
+      "src/app/audio-player.tsx",
+      "src/pages/assets/ProjectFiles.tsx",
+      "src/pages/capabilities/CatalogInspector.tsx",
+      "src/app/App.tsx",
+      "server/index.ts",
+      "src/shared/audio-playback.ts",
+      "src/pages/assets/asset-view.ts",
+      "src/pages/assets/AssetsPage.tsx",
+      "src/pages/guide/guide-motion.tsx",
+      "src/components/ProcessTimeline.tsx",
+      "src/app/boot-splash.tsx",
+      "server/app.ts",
+      "src/shared/api/control-center-client.ts",
+      "src/shared/clipboard.ts",
+      "src/pages/assets/folder-cover.ts",
+      "app/index.html",
+      "src/pages/guide/guide-content.ts"
+    ],
+    "completed": [
+      "src/pages/guide/GuidePage.tsx",
+      "src/pages/creation/BatchGeneration.tsx",
+      "src/components/ui/Layout.tsx",
+      "src/styles/audio.css",
+      "src/components/ui/Toast.tsx",
+      "src/pages/capabilities/catalog-view.ts",
+      "src/pages/tasks/TasksPage.tsx",
+      "src/components/AudioDock.tsx",
+      "src/pages/projects/ProjectsPage.tsx",
+      "src/components/ResultViewer.tsx",
+      "server/generation-batches.ts",
+      "src/pages/projects/SharedProjects.tsx",
+      "src/app/audio-player.tsx",
+      "src/pages/assets/ProjectFiles.tsx",
+      "src/shared/audio-playback.ts",
+      "src/pages/assets/asset-view.ts",
+      "src/pages/assets/AssetsPage.tsx",
+      "src/components/ProcessTimeline.tsx",
+      "src/app/boot-splash.tsx",
+      "app/index.html"
+    ],
+    "failed": [
+      {
+        "path": "src/styles/guide.css",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/app/auth.tsx",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "openspec/changes/yeisme-control-center-guide-and-player-v1/.openspec.yaml",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/shared/tool-catalog.ts",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/styles/app.css",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/pages/guide/HeroStory.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "scripts/verify-dev-preview.mjs",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "scripts/capture-visual-matrix.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/shared/read-model/project-navigation.ts",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/pages/creation/CreationPage.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "scripts/verify-app.mjs",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/pages/guide/ToolStories.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/app-shell/AppShell.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/icons.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/app-shell/navigation.ts",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/shared/collaboration.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "scripts/verify-browser-journey.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/pages/capabilities/CatalogInspector.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/app/App.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "server/index.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/pages/guide/guide-motion.tsx",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "server/app.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/shared/api/control-center-client.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/shared/clipboard.ts",
+        "classification": "budget",
+        "reason": "aggregate token budget reached before dispatch completed"
+      },
+      {
+        "path": "src/pages/assets/folder-cover.ts",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      },
+      {
+        "path": "src/pages/guide/guide-content.ts",
+        "classification": "budget",
+        "reason": "reached the aggregate token budget before finishing"
+      }
+    ]
+  }
+}

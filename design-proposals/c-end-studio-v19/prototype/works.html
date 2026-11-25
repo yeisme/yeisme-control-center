@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yeisme · 作品</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="studio.css">
+<script src="sprite.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="主导航">
+    <a class="brand" href="index.html" aria-label="Yeisme 创作台">Y</a>
+    <nav>
+      <a class="rail-link" href="today.html"><svg class="i"><use href="#i-sun"/></svg>今天</a>
+      <a class="rail-link" href="drama.html"><svg class="i"><use href="#i-pen"/></svg>创作</a>
+      <a class="rail-link active" href="works.html" aria-current="page"><svg class="i"><use href="#i-grid"/></svg>作品</a>
+      <a class="rail-link" href="works.html" data-soon="动态在正式方案里是一条时间线，本原型只画了 4 屏"><svg class="i"><use href="#i-activity"/></svg>动态</a>
+      <a class="rail-link" href="works.html" data-soon="「我的」收纳系统、连接与设置，本原型只画了 4 屏"><svg class="i"><use href="#i-user"/></svg>我的</a>
+    </nav>
+    <div class="rail-avatar"><button class="avatar" type="button" data-soon="账号面板在正式方案里从「我的」进入">Y</button></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <a class="scope-chip" href="drama.html">
+        <img class="thumb" src="../../../public/guide/showcase/eikona-gpt-1.webp" alt="">
+        <span><strong>雨夜重逢</strong> <span class="crumb">· 第 3 集</span></span>
+        <svg class="i i-sm"><use href="#i-chevron"/></svg>
+      </a>
+      <span class="status-pill"><span class="dot"></span>系统正常</span>
+      <span class="top-gap"></span>
+      <button class="search-pill" type="button" data-open-palette>
+        <svg class="i i-sm"><use href="#i-search"/></svg>
+        <span>搜索作品、任务</span>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="btn-icon" type="button" data-theme-toggle aria-label="切换主题"><svg class="i i-sm"><use href="#i-theme"/></svg></button>
+      <button class="btn btn-primary btn-sm" type="button" data-soon="新建面板在正式方案里是底部抽屉：图片 / 视频 / 声音 / 文字"><svg class="i i-sm"><use href="#i-plus"/></svg>新建</button>
+    </header>
+
+    <div class="wrap">
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">作品</p>
+          <h1 class="display">34 个结果，<br>都在这里。</h1>
+          <p class="lead">来自《雨夜重逢》和《海岸来信》。确认过的自动归档，没确认的一直留在最上面。</p>
+        </div>
+        <span class="filter-note">显示 <b data-filter-count>8</b> 个</span>
+      </header>
+
+      <div class="filters" data-filter-group data-filter-by="kind" role="toolbar" aria-label="按类型筛选">
+        <button class="chip active" type="button" data-filter="all">全部<span class="n">34</span></button>
+        <button class="chip" type="button" data-filter="image">图像<span class="n">26</span></button>
+        <button class="chip" type="button" data-filter="video">视频<span class="n">7</span></button>
+        <button class="chip" type="button" data-filter="audio">声音<span class="n">1</span></button>
+        <button class="chip" type="button" data-filter="text">文稿<span class="n">0</span></button>
+        <span class="spacer"></span>
+        <span class="filter-label">按作品</span>
+        <span class="filters" style="margin:0" data-filter-group data-filter-by="project">
+          <button class="chip active" type="button" data-filter="all">全部</button>
+          <button class="chip" type="button" data-filter="rain">雨夜重逢</button>
+          <button class="chip" type="button" data-filter="coast">海岸来信</button>
+        </span>
+      </div>
+
+      <section class="works-grid" aria-label="作品列表">
+        <article class="work" data-work-kind="image" data-project="rain">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/eikona-gpt-1.webp" data-preview-title="雨夜 · 站台回眸" data-preview-meta="图像 · 1440×960 · 今天 21:12">
+            <img src="../../../public/guide/showcase/eikona-gpt-1.webp" alt="雨夜站台回眸的生成图">
+            <span class="work__tag">图像</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">雨夜 · 站台回眸</span><span class="work__meta">今天 21:12</span></div>
+        </article>
+
+        <article class="work" data-work-kind="image" data-project="rain">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/eikona-gpt-2.webp" data-preview-title="站台 · 人群背景" data-preview-meta="图像 · 1440×960 · 今天 21:04">
+            <img src="../../../public/guide/showcase/eikona-gpt-2.webp" alt="站台人群背景的生成图">
+            <span class="work__tag review">待你挑选</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">站台 · 人群背景</span><span class="work__meta">共 4 个候选</span></div>
+        </article>
+
+        <article class="work" data-work-kind="image" data-project="rain">
+          <button class="work__frame" type="button" data-preview="../../../public/v18/rain-street.jpg" data-preview-title="站台 · 雨夜空镜" data-preview-meta="图像 · 1400×933 · 今天 20:58">
+            <img src="../../../public/v18/rain-street.jpg" alt="雨夜空镜的生成图" style="object-position: 50% 58%;filter:grayscale(1) sepia(.62) saturate(1.05) contrast(1.06) brightness(.94)">
+            <span class="work__tag">图像</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">站台 · 雨夜空镜</span><span class="work__meta">今天 20:58</span></div>
+        </article>
+
+        <article class="work" data-work-kind="video" data-project="rain">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/scaena-i2v-poster.webp" data-preview-title="旧车站 · 转场" data-preview-meta="视频 · 0:06 · 今天 19:40">
+            <img src="../../../public/guide/showcase/scaena-i2v-poster.webp" alt="旧车站转场视频封面">
+            <span class="work__tag">视频 · 0:06</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-play"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">旧车站 · 转场</span><span class="work__meta">今天 19:40</span></div>
+        </article>
+
+        <article class="work" data-work-kind="image" data-project="coast">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/eikona-grok-1.webp" data-preview-title="海岸 · 黄昏" data-preview-meta="图像 · 1024×1024 · 今天 20:40">
+            <img src="../../../public/guide/showcase/eikona-grok-1.webp" alt="海岸黄昏的生成图">
+            <span class="work__tag">图像</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">海岸 · 黄昏</span><span class="work__meta">今天 20:40</span></div>
+        </article>
+
+        <article class="work" data-work-kind="image" data-project="coast">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/eikona-grok-3.webp" data-preview-title="防波堤 · 起雾" data-preview-meta="图像 · 1024×1024 · 今天 20:22">
+            <img src="../../../public/guide/showcase/eikona-grok-3.webp" alt="防波堤起雾的生成图">
+            <span class="work__tag">图像</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">防波堤 · 起雾</span><span class="work__meta">今天 20:22</span></div>
+        </article>
+
+        <article class="work" data-work-kind="image" data-project="rain">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/eikona-grok-2.webp" data-preview-title="旧站台 · 霓虹" data-preview-meta="图像 · 1024×1024 · 今天 20:48">
+            <img src="../../../public/guide/showcase/eikona-grok-2.webp" alt="旧站台霓虹的生成图" style="object-position: 38% 45%">
+            <span class="work__tag">图像</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-search"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">旧站台 · 霓虹</span><span class="work__meta">今天 20:48</span></div>
+        </article>
+
+        <article class="work" data-work-kind="video" data-project="coast">
+          <button class="work__frame" type="button" data-preview="../../../public/guide/showcase/scaena-t2v-poster.webp" data-preview-title="第 02 场 · 空镜" data-preview-meta="视频 · 0:08 · 今天 20:31">
+            <img src="../../../public/guide/showcase/scaena-t2v-poster.webp" alt="第 02 场空镜视频封面">
+            <span class="work__tag">视频 · 0:08</span>
+            <span class="work__more"><svg class="i i-sm"><use href="#i-more"/></svg></span>
+            <span class="work__grid"><span class="work__play"><svg class="i i-sm"><use href="#i-play"/></svg></span></span>
+          </button>
+          <div class="work__caption"><span class="work__title">第 02 场 · 空镜</span><span class="work__meta">今天 20:31</span></div>
+        </article>
+      </section>
+
+      <footer class="statusline">
+        <span class="item"><span class="dot"></span>6/8 连接可读</span>
+        <span class="sep"></span>
+        <span class="item">共 34 个结果 · 只显示最近 8 个</span>
+        <a class="link-more" href="works.html" data-soon="无限滚动在正式方案里按游标加载，不一次拉全量">载入更多<svg class="i i-sm"><use href="#i-chevron"/></svg></a>
+      </footer>
+    </div>
+  </div>
+</div>
+<script src="studio.js"></script>
+</body>
+</html>

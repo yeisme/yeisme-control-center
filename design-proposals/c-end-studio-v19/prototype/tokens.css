@@ -1,0 +1,110 @@
+/* ==========================================================================
+   Yeisme Studio v19 · C 端创作台设计令牌
+   原型专用；尚未进入 src/styles 运行时。
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+
+  /* 画布与表面 */
+  --bg: #0b110e;
+  --bg-soft: #0e1512;
+  --surface: #131c17;
+  --surface-2: #19241e;
+  --surface-3: #203028;
+  --surface-glass: rgb(19 28 23 / 72%);
+
+  /* 文字 */
+  --ink: #f2f5ee;
+  --ink-2: #c9d2c7;
+  --muted: #93a198;
+  --faint: #6f7e73;
+
+  /* 分隔 */
+  --line: rgb(236 245 236 / 9%);
+  --line-strong: rgb(236 245 236 / 17%);
+
+  /* 品牌与强调 */
+  --lime: #d9f26e;
+  --lime-ink: #1b2610;
+  --lime-soft: rgb(217 242 110 / 12%);
+  --forest: #1e4b3a;
+  --forest-deep: #173c30;
+
+  /* 人味暖色：只用于人的动作与情绪，不用于状态 */
+  --warm: #f0bb8f;
+  --warm-soft: rgb(240 187 143 / 14%);
+
+  /* 状态 */
+  --danger: #f49480;
+  --danger-soft: rgb(244 148 128 / 14%);
+  --review: #cbaee8;
+  --review-soft: rgb(203 174 232 / 14%);
+  --info: #a3c9ea;
+
+  /* 形状与阴影 */
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 18px 48px -24px rgb(0 0 0 / 80%);
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / 6%) inset, 0 24px 60px -22px rgb(0 0 0 / 85%);
+  --shadow-hero: 0 44px 120px -40px rgb(0 0 0 / 90%);
+  --ring: 0 0 0 1px rgb(217 242 110 / 45%), 0 0 0 5px rgb(217 242 110 / 12%);
+
+  /* 动效 */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur: 240ms;
+  --dur-slow: 480ms;
+
+  /* 布局 */
+  --rail: 88px;
+  --gutter: clamp(20px, 2.4vw, 40px);
+  --maxw: 1360px;
+  --topbar: 68px;
+
+  /* 字体 */
+  --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f1e7;
+  --bg-soft: #f0eadf;
+  --surface: #fffdf7;
+  --surface-2: #f7f2e8;
+  --surface-3: #efe8db;
+  --surface-glass: rgb(255 253 247 / 78%);
+
+  --ink: #16201a;
+  --ink-2: #3c4a40;
+  --muted: #69766c;
+  --faint: #8b978d;
+
+  --line: rgb(22 32 26 / 9%);
+  --line-strong: rgb(22 32 26 / 16%);
+
+  --lime: #b9d94a;
+  --lime-ink: #1b2610;
+  --lime-soft: rgb(185 217 74 / 18%);
+  --forest: #1d4738;
+  --forest-deep: #173c30;
+
+  --warm: #b96f43;
+  --warm-soft: rgb(185 111 67 / 10%);
+
+  --danger: #b04a34;
+  --danger-soft: rgb(176 74 52 / 10%);
+  --review: #77539b;
+  --review-soft: rgb(119 83 155 / 10%);
+  --info: #2f6389;
+
+  --shadow-card: 0 1px 2px rgb(40 35 24 / 5%), 0 18px 40px -28px rgb(40 35 24 / 45%);
+  --shadow-raised: 0 1px 2px rgb(40 35 24 / 6%), 0 26px 60px -26px rgb(40 35 24 / 40%);
+  --shadow-hero: 0 40px 90px -40px rgb(40 35 24 / 50%);
+  --ring: 0 0 0 1px rgb(29 71 56 / 50%), 0 0 0 5px rgb(29 71 56 / 12%);
+}

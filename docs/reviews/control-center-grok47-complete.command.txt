@@ -1,0 +1,1 @@
+ocr review --repo client/yeisme-control-center --provider cpa --model grok-4.7-build-fast --format json --audience agent --effort high --concurrency 2 --timeout 60 --max-tokens-budget 0 --max-tools 100 --exclude **/dist/**,**/node_modules/**,**/temp/**,**/fixtures/** --background ... --output client/yeisme-control-center/docs/reviews/control-center-grok47-complete.json

@@ -1,0 +1,2 @@
+4ce714ce5ba958e80f821c56c61dad3d5410516fd5cda765131b9eaabde9cdb3  client/yeisme-control-center/docs/reviews/control-center-grok47-rerun.json
+bc5f7aac0916e1c58e5a611f8171278adda7683c0e7041fb17479fc8b2f79db0  client/yeisme-control-center/docs/reviews/control-center-grok47-preview.txt

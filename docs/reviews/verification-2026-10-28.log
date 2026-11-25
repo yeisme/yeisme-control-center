@@ -1,0 +1,158 @@
+$ bun run typecheck
+$ tsc --noEmit
+$ bun run test
+$ vitest run
+
+[1m[46m RUN [49m[22m [36mv4.0.15 [39m[90m/home/yeshugen/workplace/yeisme-agent/client/yeisme-control-center[39m
+
+ [32m✓[39m tests/creation-state.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/media-filename.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/task-cancel.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/clipboard.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m tests/task-links.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m tests/creative-input.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/media-cache.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m tests/task-paging-bounded.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32m✓[39m tests/audio-playback.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m tests/task-overview.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32m✓[39m tests/task-filters.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/request-visibility.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32m✓[39m tests/project-navigation.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/task-polling.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+ [32m✓[39m tests/catalog-view.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 20[2mms[22m[39m
+ [32m✓[39m tests/guide-content.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m tests/assets-view.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/list-preferences.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/observation-contract.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m tests/tool-catalog-normalize.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 26[2mms[22m[39m
+ [32m✓[39m tests/folder-cover.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m tests/work-queue.test.ts [2m([22m[2m14 tests[22m[2m)[22m[32m 20[2mms[22m[39m
+ [32m✓[39m tests/creative-flow.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 22[2mms[22m[39m
+ [32m✓[39m tests/frontend-read-model.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+ [32m✓[39m tests/usage-analytics.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m tests/observation-ui.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 26[2mms[22m[39m
+ [32m✓[39m tests/tool-catalog-store.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 236[2mms[22m[39m
+ [32m✓[39m tests/scaena-storyboard.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 78[2mms[22m[39m
+ [32m✓[39m tests/contract/contract-samples.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+ [32m✓[39m tests/db-store.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 255[2mms[22m[39m
+ [32m✓[39m tests/drama-read-model.test.ts [2m([22m[2m23 tests[22m[2m)[22m[33m 611[2mms[22m[39m
+     [33m[2m✓[22m[39m treats the owner's `partial` as pipeline progress, so an accepted screenplay is not flagged for attention [33m 575[2mms[22m[39m
+ [32m✓[39m tests/task-connections.test.ts [2m([22m[2m39 tests[22m[2m)[22m[32m 195[2mms[22m[39m
+ [32m✓[39m tests/generation-batches.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 336[2mms[22m[39m
+ [32m✓[39m tests/media-bridge.test.ts [2m([22m[2m8 tests[22m[2m)[22m[33m 436[2mms[22m[39m
+   [33m[2m✓[22m[39m requests the thumbnail variant and rejects a video body for a small preview [33m 312[2mms[22m[39m
+ [32m✓[39m tests/project-metadata.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 632[2mms[22m[39m
+     [33m[2m✓[22m[39m keeps aliases scoped, falls back to 未命名项目 and uses CAS revisions [33m 509[2mms[22m[39m
+ [32m✓[39m tests/provider-discovery.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 667[2mms[22m[39m
+     [33m[2m✓[22m[39m projects Scaena bindings and keeps submit disabled [33m 645[2mms[22m[39m
+ [32m✓[39m tests/work-queue-route.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 697[2mms[22m[39m
+     [33m[2m✓[22m[39m returns scoped queue items, counts, epoch and signed pagination [33m 678[2mms[22m[39m
+ [32m✓[39m tests/auctra-authoring.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 708[2mms[22m[39m
+     [33m[2m✓[22m[39m syncs refs-only records into the local Control Center index [33m 673[2mms[22m[39m
+ [32m✓[39m tests/creative-flow-route.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 744[2mms[22m[39m
+     [33m[2m✓[22m[39m projects a Scaena breakdown without exposing owner payloads [33m 724[2mms[22m[39m
+ [32m✓[39m tests/action-contract.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 752[2mms[22m[39m
+     [33m[2m✓[22m[39m previews allowlisted actions without touching an owner [33m 634[2mms[22m[39m
+ [32m✓[39m tests/owners-delegation.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 776[2mms[22m[39m
+     [33m[2m✓[22m[39m prefers the session (OIDC) delegation over the service credential [33m 704[2mms[22m[39m
+ [32m✓[39m tests/collaboration.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 835[2mms[22m[39m
+     [33m[2m✓[22m[39m retains the recipient's owner actor and does not grant an owner scope through sharing [33m 549[2mms[22m[39m
+ [32m✓[39m tests/audit-first.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 797[2mms[22m[39m
+     [33m[2m✓[22m[39m writes the audit row before the owner read and records the outcome [33m 708[2mms[22m[39m
+ [32m✓[39m tests/notifications.test.ts [2m([22m[2m11 tests[22m[2m)[22m[33m 842[2mms[22m[39m
+     [33m[2m✓[22m[39m creates one reminder for the same task revision and ignores polling [33m 628[2mms[22m[39m
+ [32m✓[39m tests/service-directory.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 893[2mms[22m[39m
+     [33m[2m✓[22m[39m requires login and exact scope even for a control-center admin [33m 712[2mms[22m[39m
+ [32m✓[39m tests/drama-route.test.ts [2m([22m[2m13 tests[22m[2m)[22m[33m 922[2mms[22m[39m
+     [33m[2m✓[22m[39m returns scoped episode rows with a five-stage rail, the epoch and no credentials [33m 679[2mms[22m[39m
+ [32m✓[39m tests/server-security.test.ts [2m([22m[2m14 tests[22m[2m)[22m[33m 921[2mms[22m[39m
+     [33m[2m✓[22m[39m never falls back to demo for unauthenticated requests [33m 682[2mms[22m[39m
+ [32m✓[39m tests/personal-config.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 2016[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects unsafe origins and malformed account identifiers before writing [33m 497[2mms[22m[39m
+     [33m[2m✓[22m[39m toggles local content preference and reports it without secrets [33m 398[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects invalid content changes without rewriting configuration [33m 633[2mms[22m[39m
+ [32m✓[39m tests/drama.test.ts [2m([22m[2m24 tests[22m[2m)[22m[33m 1076[2mms[22m[39m
+     [33m[2m✓[22m[39m lists only screenplay units, in natural order, and hides archived ones [33m 505[2mms[22m[39m
+ [32m✓[39m tests/tool-catalog-discovery.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1028[2mms[22m[39m
+     [33m[2m✓[22m[39m builds a cross-owner catalog from read-only discovery only [33m 718[2mms[22m[39m
+ [32m✓[39m tests/attachments.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1035[2mms[22m[39m
+     [33m[2m✓[22m[39m returns text attachments inline with an audit-first row [33m 752[2mms[22m[39m
+ [32m✓[39m tests/provider-live.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 2272[2mms[22m[39m
+     [33m[2m✓[22m[39m keeps live submissions idempotent and projects confirmed cost once [33m 688[2mms[22m[39m
+     [33m[2m✓[22m[39m serves scoped capability, usage, run and SSE projections [33m 1559[2mms[22m[39m
+ [32m✓[39m tests/personal-auth.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 11018[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects non-loopback HTTP origins [33m 763[2mms[22m[39m
+     [33m[2m✓[22m[39m uses a server session without exposing service credentials [33m 855[2mms[22m[39m
+     [33m[2m✓[22m[39m authenticates a named user with an administrator-distributed key [33m 1564[2mms[22m[39m
+     [33m[2m✓[22m[39m requires the configured username and exposes only a server-derived role [33m 1597[2mms[22m[39m
+     [33m[2m✓[22m[39m never lets an admin bypass scope, CSRF or the owner cancellation contract [33m 827[2mms[22m[39m
+     [33m[2m✓[22m[39m defaults legacy accounts to viewer without trusting a client role [33m 792[2mms[22m[39m
+     [33m[2m✓[22m[39m does not expose configured OIDC when personal mode is selected [33m 390[2mms[22m[39m
+     [33m[2m✓[22m[39m rejects cross-origin login and throttles failed attempts [33m 2384[2mms[22m[39m
+     [33m[2m✓[22m[39m expires idle sessions and revokes them when password changes [33m 1840[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m53 passed[39m[22m[90m (53)[39m
+[2m      Tests [22m [1m[32m364 passed[39m[22m[90m (364)[39m
+[2m   Start at [22m 03:24:02
+[2m   Duration [22m 12.74s[2m (transform 26.61s, setup 0ms, import 45.74s, tests 31.08s, environment 11ms)[22m
+
+$ bun run build
+$ vite build
+vite v7.2.7 building client environment for production...
+transforming...
+✓ 1995 modules transformed.
+rendering chunks...
+computing gzip size...
+../dist/index.html                                              5.45 kB │ gzip:  1.97 kB
+../dist/assets/geist-cyrillic-ext-wght-normal-DjL33-gN.woff2    7.42 kB
+../dist/assets/geist-vietnamese-wght-normal-6IgcOCM7.woff2      8.00 kB
+../dist/assets/geist-cyrillic-wght-normal-BEAKL7Jp.woff2       15.08 kB
+../dist/assets/geist-latin-ext-wght-normal-DC-KSUi6.woff2      16.51 kB
+../dist/assets/geist-latin-wght-normal-BgDaEnEv.woff2          29.40 kB
+../dist/assets/controlCenter-D0eUceAJ.css                     105.02 kB │ gzip: 20.55 kB
+../dist/assets/chevron-left-B8FygqfR.js                         0.14 kB │ gzip:  0.15 kB
+../dist/assets/chevron-right-Ds_SXkxP.js                        0.14 kB │ gzip:  0.15 kB
+../dist/assets/terminal-DV6sJOLw.js                             0.17 kB │ gzip:  0.17 kB
+../dist/assets/table-2-Bi_JY3w3.js                              0.23 kB │ gzip:  0.19 kB
+../dist/assets/server-tHwth0TW.js                               0.35 kB │ gzip:  0.22 kB
+../dist/assets/layout-grid-B_ZX8IJt.js                          0.36 kB │ gzip:  0.20 kB
+../dist/assets/route-FdJwXIST.js                                0.43 kB │ gzip:  0.29 kB
+../dist/assets/review-CfcfnfHI.js                               0.44 kB │ gzip:  0.32 kB
+../dist/assets/check-check-C-MVBEuY.js                          0.71 kB │ gzip:  0.43 kB
+../dist/assets/OwnerLinkRow-DAWqfT1R.js                         1.07 kB │ gzip:  0.66 kB
+../dist/assets/collaboration-action-DQb7NMC1.js                 1.15 kB │ gzip:  0.62 kB
+../dist/assets/action-runner-CJaFEu0F.js                        1.28 kB │ gzip:  0.53 kB
+../dist/assets/Controls-CBEycQ5I.js                             2.25 kB │ gzip:  0.96 kB
+../dist/assets/TaskThumbnail-oigmb4Ql.js                        2.55 kB │ gzip:  1.43 kB
+../dist/assets/FilterBar-DSwiB-3O.js                            3.67 kB │ gzip:  1.65 kB
+../dist/assets/labels-BI5GS7DD.js                               3.71 kB │ gzip:  1.94 kB
+../dist/assets/ResultViewer-DkF2PU4V.js                         3.96 kB │ gzip:  1.44 kB
+../dist/assets/PromptCaptureSummary-CAyv3EIE.js                 4.05 kB │ gzip:  1.83 kB
+../dist/assets/SourceCoverage-BOXyUViB.js                       4.09 kB │ gzip:  1.91 kB
+../dist/assets/Data-DLAa2vcx.js                                 4.43 kB │ gzip:  1.83 kB
+../dist/assets/ProcessTimeline-BUxeTHs4.js                      4.74 kB │ gzip:  2.25 kB
+../dist/assets/InspectorShell-5FhGJxzU.js                       7.07 kB │ gzip:  2.85 kB
+../dist/assets/guide-content-cnG-aEn6.js                        7.67 kB │ gzip:  3.68 kB
+../dist/assets/StageRail-BKZ3zqze.js                            8.09 kB │ gzip:  3.76 kB
+../dist/assets/ReviewPage-g323yJ6y.js                           8.90 kB │ gzip:  3.75 kB
+../dist/assets/RemindersPage-Rzrf1zBu.js                        9.75 kB │ gzip:  4.05 kB
+../dist/assets/CreationPage-BG8laFWH.js                        11.13 kB │ gzip:  4.42 kB
+../dist/assets/ServicesPage-CFrZfZYB.js                        13.67 kB │ gzip:  5.32 kB
+../dist/assets/ProjectFiles-DRGOp60h.js                        14.75 kB │ gzip:  5.68 kB
+../dist/assets/TasksPage-DwUbLqfy.js                           15.37 kB │ gzip:  6.35 kB
+../dist/assets/UsageAnalytics-DuaSn6Zf.js                      16.09 kB │ gzip:  5.83 kB
+../dist/assets/TaskDetail-DGuHdWXf.js                          16.17 kB │ gzip:  6.05 kB
+../dist/assets/TeamPage-CaG_A0zB.js                            17.58 kB │ gzip:  6.31 kB
+../dist/assets/GuidePage-B4ohbfE_.js                           18.78 kB │ gzip:  6.51 kB
+../dist/assets/DramaPage-DEs8Saqa.js                           21.93 kB │ gzip:  7.87 kB
+../dist/assets/HomePage-d6_pZs30.js                            27.14 kB │ gzip:  9.34 kB
+../dist/assets/RequestsPage-PRJrsq_1.js                        27.63 kB │ gzip:  9.32 kB
+../dist/assets/AssetsPage-CwU-TVLN.js                          29.85 kB │ gzip: 10.19 kB
+../dist/assets/ProjectsPage-DulFc5Bh.js                        42.91 kB │ gzip: 14.17 kB
+../dist/assets/CapabilityHub-ukZMKRkJ.js                       44.40 kB │ gzip: 13.70 kB
+../dist/assets/controls-B7jrXBEq.js                           124.67 kB │ gzip: 40.43 kB
+../dist/assets/controlCenter-C6OK1ZLG.js                      180.15 kB │ gzip: 60.67 kB
+../dist/assets/react-BOo_SldA.js                              180.47 kB │ gzip: 56.70 kB
+✓ built in 4.58s
+$ git diff --check
+verification_exit=0

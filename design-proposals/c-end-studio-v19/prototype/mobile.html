@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Yeisme · 今天（手机）</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="studio.css">
+<script src="sprite.js"></script>
+</head>
+<body>
+<div class="phone">
+  <header class="m-top">
+    <span class="scope">
+      <img src="../../../public/guide/showcase/eikona-gpt-1.webp" alt="">
+      <span><strong>雨夜重逢</strong> · 第 3 集</span>
+    </span>
+    <span class="grow"></span>
+    <span class="status-pill"><span class="dot"></span>正常</span>
+    <button class="avatar" type="button" data-soon="账号面板在正式方案里从「我的」进入">Y</button>
+  </header>
+
+  <section class="m-hero" aria-labelledby="m-title">
+    <div class="m-hero__media" style="background-image:url('../../../public/guide/showcase/eikona-gpt-1.webp')"></div>
+    <span class="glass"><svg class="i i-sm"><use href="#i-clock"/></svg>周三 · 11 月 5 日</span>
+    <div class="m-hero__body">
+      <p class="eyebrow"><span class="dot"></span>第 3 集 · 制作交接</p>
+      <h1 id="m-title">还剩两个镜头</h1>
+      <p>4 个在生成，2 个等你确认。其余都排好了。</p>
+      <a class="btn btn-primary" href="drama.html">继续制作<svg class="i i-sm"><use href="#i-arrow"/></svg></a>
+    </div>
+  </section>
+
+  <section class="m-section" aria-label="等你决定">
+    <div class="m-section-head"><h2>等你决定</h2><a href="m-today.html" data-soon="完整队列在正式方案里是「动态」页，本原型只画了 4 屏">全部 6 件</a></div>
+    <div class="m-decisions">
+      <article class="m-decision">
+        <img src="../../../public/guide/showcase/eikona-gpt-3.webp" alt="站台人群背景候选">
+        <div>
+          <p class="why">待你挑选</p>
+          <p class="title">站台 · 人群背景</p>
+          <p class="desc">4 个候选，选一个收工</p>
+        </div>
+        <button class="go" type="button" aria-label="处理：站台 · 人群背景" data-soon="挑选台是左右对比，键盘 1–4 直接选"><svg class="i i-sm"><use href="#i-chevron"/></svg></button>
+      </article>
+      <article class="m-decision">
+        <img src="../../../public/guide/showcase/eikona-grok-1.webp" alt="天台黄昏光比">
+        <div>
+          <p class="why" style="color:var(--danger)">需要处理</p>
+          <p class="title">天台 · 黄昏光比</p>
+          <p class="desc">审核拦截，换个说法重来</p>
+        </div>
+        <button class="go" type="button" aria-label="处理：天台 · 黄昏光比" data-soon="原因面板会给出被拦截的短语和三个改写建议"><svg class="i i-sm"><use href="#i-chevron"/></svg></button>
+      </article>
+    </div>
+  </section>
+
+  <section class="m-section" aria-label="正在片场">
+    <div class="m-section-head"><h2>正在片场</h2><a href="mobile.html" data-soon="任务中心在正式方案里收进「动态」">任务</a></div>
+    <div class="m-scenes">
+      <article class="m-scene">
+        <div class="m-scene__media" style="background-image:url('../../../public/guide/showcase/eikona-gpt-2.webp')"></div>
+        <div class="m-scene__body">
+          <p class="kind">图像 · 雨夜远景</p>
+          <p class="title">车站 · 雨夜远景</p>
+          <div class="bar"><i style="width:45%"></i></div>
+        </div>
+      </article>
+      <article class="m-scene">
+        <div class="m-scene__media" style="background-image:url('../../../public/guide/showcase/eikona-grok-3.webp')"></div>
+        <div class="m-scene__body">
+          <p class="kind">声音 · 对白合成</p>
+          <p class="title">第 03 场 · 对白合成</p>
+          <div class="bar"><i style="width:58%"></i></div>
+        </div>
+      </article>
+      <article class="m-scene">
+        <div class="m-scene__media" style="background-image:url('../../../public/guide/showcase/scaena-t2v-poster.webp')"></div>
+        <div class="m-scene__body">
+          <p class="kind">视频 · 粗剪</p>
+          <p class="title">第 3 集 · 粗剪</p>
+          <div class="bar"><i style="width:68%"></i></div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <p class="m-status"><span class="dot"></span>系统正常 · 6/8 连接可读 · 2 分钟前同步</p>
+
+  <nav class="m-tabbar" aria-label="主导航">
+    <a class="m-tab active" href="mobile.html" aria-current="page"><svg class="i"><use href="#i-sun"/></svg>今天</a>
+    <a class="m-tab" href="drama.html"><svg class="i"><use href="#i-pen"/></svg>创作</a>
+    <a class="m-tab" href="works.html"><svg class="i"><use href="#i-grid"/></svg>作品</a>
+    <a class="m-tab" href="mobile.html" data-soon="动态在正式方案里是一条时间线，本原型只画了 4 屏"><svg class="i"><use href="#i-activity"/></svg>动态</a>
+    <a class="m-tab" href="mobile.html" data-soon="「我的」收纳系统、连接与设置，本原型只画了 4 屏"><svg class="i"><use href="#i-user"/></svg>我的</a>
+  </nav>
+</div>
+<script src="studio.js"></script>
+</body>
+</html>
