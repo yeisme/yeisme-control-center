@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout control center
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
