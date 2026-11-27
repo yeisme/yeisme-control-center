@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: latest moved to 26.04 and Playwright refuses to launch Chromium there
+    # ("Playwright does not support chromium on ubuntu26.04-x64"), which failed this job without anything
+    # being wrong with the code. Move this forward once Playwright supports the newer image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
